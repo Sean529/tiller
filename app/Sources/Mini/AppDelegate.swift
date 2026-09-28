@@ -4,11 +4,18 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: BrowserWindowController?
     private let controlServer = ControlServer()
+    private var settingsController: SettingsWindowController?
+
+    @objc func showSettings(_ sender: Any?) {
+        let controller = settingsController ?? SettingsWindowController()
+        settingsController = controller
+        controller.showWindow(sender)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
 
-        let url = UserDefaults.standard.string(forKey: "url") ?? "https://www.google.com/"
+        let url = UserDefaults.standard.string(forKey: "url") ?? Settings.homepageURL
         let controller = BrowserWindowController(url: url)
         controller.onClose = { [weak self] in self?.windowController = nil }
         controller.showWindow(nil)

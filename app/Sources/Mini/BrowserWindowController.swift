@@ -179,7 +179,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     // MARK: Actions (also reached from the menu through the responder chain)
 
     @objc func newTab(_ sender: Any?) {
-        openTab(url: "about:blank", select: true)
+        openTab(url: Settings.newTabPage == .homepage ? Settings.homepageURL : "about:blank", select: true)
     }
 
     @objc func closeTab(_ sender: Any?) {

@@ -28,6 +28,9 @@ final class AgentPanelView: NSView {
         super.init(frame: frame)
         build()
         showIdle()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
+        )
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -142,6 +145,13 @@ final class AgentPanelView: NSView {
         else { return }
         AgentKind.current = kind
         startNewChat()
+    }
+
+    /// Settings changed the default agent. A running chat keeps its agent; the
+    /// next new chat uses the one now shown in the picker.
+    @objc private func currentAgentChanged(_ notification: Notification) {
+        agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: .current) ?? 0)
+        if session == nil { showIdle() }
     }
 
     @objc private func newChat(_ sender: Any?) {

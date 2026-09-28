@@ -29,8 +29,24 @@ cargo run -p export-cef-dir -- --force $HOME/.local/share/cef
 ```sh
 scripts/bundle.sh            # release; pass `debug` for a debug build
 open build/Mini.app
-open build/Mini.app --args -url https://example.com   # start on another page
+open build/Mini.app --args -url https://example.com   # start on another page, ignoring the homepage
 ```
+
+## Settings
+
+Mini > Settings… (Cmd+,) has two panes. Changes are saved as you make them.
+
+| Pane | Setting | Default | Takes effect |
+|---|---|---|---|
+| General | Homepage | `https://www.google.com/` | next launch, and new tabs if chosen below |
+| General | New tabs open with: Blank Page or Homepage | Blank Page | next new tab |
+| General | Search engine: Google, Bing, DuckDuckGo or Custom | Google | next search |
+| General | Custom search URL, with `%s` for the query | empty | next search; Google is used while it isn't a valid http(s) URL with `%s` |
+| Agent | New chats use: Qoder CLI or Claude Code | Qoder CLI | next new chat; same as the picker in the panel |
+| Agent | Path for each CLI | empty, meaning look it up | next new chat |
+| Agent | Extra instructions, added after Mini's system prompt | empty | next new chat |
+
+Settings live in the `dev.sorrycc.mini` user defaults. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.
 
 Mini passes two switches to Chromium:
 
@@ -85,7 +101,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"r
 
 ## Agent panel
 
-Click the sparkles button at the right of the toolbar, or press Cmd+Shift+A, to open the agent panel. Pick Qoder CLI (the default) or Claude Code from the menu at its top. Enter sends, Option+Enter adds a line, the button next to the field stops a running turn, and the pencil button starts a new chat. Switching agents also starts a new chat.
+Click the sparkles button at the right of the toolbar, or press Cmd+Shift+A, to open the agent panel. Pick Qoder CLI (the default) or Claude Code from the menu at its top, or in Settings. Enter sends, Option+Enter adds a line, the button next to the field stops a running turn, and the pencil button starts a new chat. Switching agents also starts a new chat.
 
 Mini runs the CLI in print mode with stream-json on stdin and stdout, and keeps the process alive between messages so the conversation carries over. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code, and one line per tool call that turns into ✓ or ✗ when it finishes.
 
@@ -99,11 +115,6 @@ The agent gets Mini's browser tools and nothing else:
 
 The MCP config is written to `~/Library/Application Support/Mini/agent-mcp.json` and points at the `mini_mcp` inside the running app. The agent runs in the empty directory `~/Library/Application Support/Mini/agent`, with `--no-session-persistence`. Your user settings still load, so your hooks, model choice and user-level instructions (such as `~/.claude/CLAUDE.md`) apply.
 
-Mini looks for the CLI in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.bun/bin`, `~/.volta/bin`, `~/.npm-global/bin`, then asks a login shell. Shell functions and aliases are skipped, so wrappers defined in `.zshrc` don't run. To use another binary:
-
-```sh
-defaults write dev.sorrycc.mini agentPath.qodercli /path/to/qodercli
-defaults write dev.sorrycc.mini agentPath.claude /path/to/claude
-```
+Mini looks for the CLI in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.bun/bin`, `~/.volta/bin`, `~/.npm-global/bin`, then asks a login shell. Shell functions and aliases are skipped, so wrappers defined in `.zshrc` don't run. To use another binary, set its path in Settings > Agent, which shows the one found automatically when the field is empty.
 
 Debug builds take two launch arguments for testing without typing: `-agentPrompt "..."` opens the panel and sends that message, and `-agentStopAfter <seconds>` presses Stop after that many seconds.

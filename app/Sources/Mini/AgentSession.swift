@@ -13,12 +13,17 @@ enum AgentKind: String, CaseIterable {
         }
     }
 
-    /// `defaults write dev.sorrycc.mini agentPath.<rawValue> /path/to/cli` overrides the lookup.
+    /// The path set in Settings, which overrides the lookup.
     var pathDefaultsKey: String { "agentPath.\(rawValue)" }
 
+    /// The agent new chats start with.
     static var current: AgentKind {
         get { UserDefaults.standard.string(forKey: "agent").flatMap(AgentKind.init) ?? .qodercli }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "agent") }
+        set {
+            guard newValue != current else { return }
+            UserDefaults.standard.set(newValue.rawValue, forKey: "agent")
+            NotificationCenter.default.post(name: .agentKindDidChange, object: nil)
+        }
     }
 
     /// Print mode with stream-json both ways, no built-in tools, only the
@@ -94,7 +99,10 @@ final class AgentSession {
     func start() throws {
         guard process == nil else { return }
         guard let executable = AgentEnvironment.executable(for: kind) else {
-            throw ControlError("\(kind.rawValue) not found. Install it, or set its path with: defaults write dev.sorrycc.mini \(kind.pathDefaultsKey) /path/to/\(kind.rawValue)")
+            if let path = Settings.agentPath(for: kind) {
+                throw ControlError("\(path) is not an executable file. Fix the \(kind.displayName) path in Settings (Cmd+,).")
+            }
+            throw ControlError("\(kind.rawValue) not found. Install it, or set its path in Settings (Cmd+,).")
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -300,7 +308,7 @@ final class AgentSession {
 /// Where the agent CLIs are, and what they run with.
 @MainActor
 enum AgentEnvironment {
-    static let systemPrompt = """
+    private static let basePrompt = """
         You are running inside Mini, a web browser for macOS. The user talks to you in a narrow \
         side panel next to the page. You act on the browser only through the mini tools \
         (list_tabs, new_tab, select_tab, close_tab, navigate, read_page, click, type, screenshot, \
@@ -309,11 +317,17 @@ enum AgentEnvironment {
         refs it returns. Keep replies short.
         """
 
+    /// Mini's prompt, then the extra instructions from Settings.
+    static var systemPrompt: String {
+        let extra = Settings.agentInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        return extra.isEmpty ? basePrompt : basePrompt + "\n\n" + extra
+    }
+
     private static let supportDirectory = NSHomeDirectory() + "/Library/Application Support/Mini"
 
     /// Browsers launched from Finder get a minimal PATH, so look in the usual
     /// install locations too.
-    private static var searchDirectories: [String] {
+    nonisolated private static var searchDirectories: [String] {
         let home = NSHomeDirectory()
         return [
             "\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
@@ -322,20 +336,25 @@ enum AgentEnvironment {
     }
 
     static func executable(for kind: AgentKind) -> String? {
-        let fm = FileManager.default
-        if let path = UserDefaults.standard.string(forKey: kind.pathDefaultsKey), !path.isEmpty {
-            return fm.isExecutableFile(atPath: path) ? path : nil
+        if let path = Settings.agentPath(for: kind) {
+            return FileManager.default.isExecutableFile(atPath: path) ? path : nil
         }
+        return detectedExecutable(for: kind)
+    }
+
+    /// Where the CLI is when Settings has no path for it. Can start a login
+    /// shell, so Settings calls it off the main thread.
+    nonisolated static func detectedExecutable(for kind: AgentKind) -> String? {
         for directory in searchDirectories {
             let path = "\(directory)/\(kind.rawValue)"
-            if fm.isExecutableFile(atPath: path) { return path }
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
         return loginShellLookup(kind.rawValue)
     }
 
     /// `command -v` in a login shell. zsh functions and aliases don't count,
     /// only files on PATH.
-    private static func loginShellLookup(_ name: String) -> String? {
+    nonisolated private static func loginShellLookup(_ name: String) -> String? {
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
         shell.arguments = ["-lc", "whence -p \(name)"]

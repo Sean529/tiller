@@ -72,7 +72,8 @@ final class AddressBarView: NSView {
     }
 }
 
-/// Turns address bar input into a URL: a URL if it looks like one, else a search.
+/// Turns address bar input into a URL: a URL if it looks like one, else a
+/// search with the engine chosen in Settings.
 enum AddressInput {
     static func url(for input: String) -> String {
         if input.contains("://") || input.hasPrefix("about:") || input.hasPrefix("data:") {
@@ -85,8 +86,6 @@ enum AddressInput {
             let scheme = host.hasPrefix("localhost") || host.hasPrefix("127.") ? "http" : "https"
             return "\(scheme)://\(input)"
         }
-        var components = URLComponents(string: "https://www.google.com/search")!
-        components.queryItems = [URLQueryItem(name: "q", value: input)]
-        return components.url!.absoluteString
+        return Settings.searchURL(for: input)
     }
 }
