@@ -1,0 +1,12 @@
+[package]
+name = "mini-mcp"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mini_mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"

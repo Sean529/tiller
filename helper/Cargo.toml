@@ -1,0 +1,12 @@
+[package]
+name = "mini-helper"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mini_helper"
+path = "src/main.rs"
+
+[dependencies]
+cef = { workspace = true, features = ["sandbox"] }

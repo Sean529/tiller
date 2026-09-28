@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["core", "helper", "mcp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+cef = { version = "=154.2.0", default-features = false }
+
+[profile.release]
+lto = "thin"

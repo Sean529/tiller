@@ -1,0 +1,12 @@
+[package]
+name = "mini-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mini_core"
+crate-type = ["staticlib"]
+
+[dependencies]
+cef.workspace = true
