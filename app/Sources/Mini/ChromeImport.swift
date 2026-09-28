@@ -4,7 +4,8 @@ import Security
 
 enum ChromeImportError: LocalizedError {
     case notInstalled
-    /// macOS privacy protection kept Mini out of Chrome's folder.
+    /// The OS or security software kept Mini out of Chrome's folder. Usually
+    /// Full Disk Access, but endpoint/EDR software can block it even with FDA on.
     case noAccess
     case keychainDenied
     case keyNotFound
@@ -14,7 +15,7 @@ enum ChromeImportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notInstalled: "Google Chrome's data wasn't found on this Mac."
-        case .noAccess: "macOS didn't let Mini read Chrome's data. Give Mini Full Disk Access in System Settings, then try again."
+        case .noAccess: "Mini couldn't read Chrome's data. This is usually Full Disk Access — grant it to Mini in System Settings and try again. If it's already on, security or endpoint (EDR) software may be blocking the read; check with your IT/security admin."
         case .keychainDenied: "Access to Chrome's key in the keychain was denied."
         case .keyNotFound: "Chrome's key isn't in the keychain."
         case .keychain(let status): "Keychain error \(status)."
