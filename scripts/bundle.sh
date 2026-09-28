@@ -90,4 +90,7 @@ done
 codesign --force --sign - "$APP/Contents/MacOS/mini_mcp"
 codesign --force --sign - "$APP"
 
-echo "==> done: $APP"
+echo "==> verifying signature"
+codesign --verify --deep --strict "$APP"
+
+echo "==> done: $APP ($(du -sh "$APP" | cut -f1))"
