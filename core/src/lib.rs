@@ -131,14 +131,11 @@ pub extern "C" fn mini_browser_set_focus(id: c_int, focus: bool) {
     }
 }
 
-/// For `windowShouldClose:`. Returns true when the window may close now. When
-/// false, the page's beforeunload runs and CEF asks the window to close again.
+/// Closes a tab. The page's beforeunload runs first and may cancel. When the
+/// close goes ahead, the `close_ready` callback fires.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_try_close(id: c_int) -> bool {
-    match browser::get(id).and_then(|b| b.host()) {
-        Some(host) => host.try_close_browser() != 0,
-        None => true,
-    }
+pub extern "C" fn mini_browser_close(id: c_int) {
+    browser::close(id);
 }
 
 /// Stops all callbacks for this browser. Call before freeing the callback context.

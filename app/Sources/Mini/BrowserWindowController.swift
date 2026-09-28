@@ -1,19 +1,26 @@
 import AppKit
-import CMiniCore
 
-/// One window, one CEF browser, and a toolbar with back, forward, reload and
-/// the address field.
+/// One window holding a row of tabs. The toolbar has back, forward, the tabs
+/// and a new-tab button. The address bar sits in a row under it.
 @MainActor
-final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
+final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
+    NSMenuItemValidation, TabDelegate, TabStripDelegate
+{
     var onClose: (() -> Void)?
 
-    private let browserView = BrowserHostView()
-    private let addressField = NSTextField()
+    private let contentView = NSView()
+    private let tabStrip = TabStripView()
+    private let addressBar = AddressBarView(frame: NSRect(x: 0, y: 0, width: 800, height: 40))
     private let backButton = NSButton()
     private let forwardButton = NSButton()
-    private let reloadButton = NSButton()
-    private var browserID: Int32 = -1
-    private var isLoading = false
+    private let newTabButton = NSButton()
+
+    /// The tab strip's width, kept to what the toolbar has room for. A larger
+    /// preference makes the toolbar move the whole strip into its overflow menu.
+    private lazy var tabStripWidth = tabStrip.widthAnchor.constraint(equalToConstant: 600)
+
+    private var tabs: [Tab] = []
+    private var selectedTab: Tab?
 
     init(url: String) {
         let window = NSWindow(
@@ -29,109 +36,206 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         super.init(window: window)
 
         window.delegate = self
-        window.contentView = browserView
+        window.contentView = contentView
         window.toolbarStyle = .unified
         let toolbar = NSToolbar(identifier: "MiniToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
+
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = addressBar
+        accessory.layoutAttribute = .bottom
+        window.addTitlebarAccessoryViewController(accessory)
+
         if !window.setFrameUsingName("MiniBrowserWindow") { window.center() }
 
         configureControls()
-        createBrowser(url: url)
+        tabStrip.delegate = self
+        openTab(url: url, select: true)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    // MARK: Browser
+    // MARK: Tabs
 
-    private func createBrowser(url: String) {
+    /// Opens `url` in a new tab placed after `after`, or at the end.
+    @discardableResult
+    private func openTab(url: String, select: Bool, after: Tab? = nil) -> Tab {
+        let tab = Tab()
+        tab.delegate = self
+        let index = after.flatMap { after in tabs.firstIndex { $0 === after } }.map { $0 + 1 } ?? tabs.endIndex
+        tabs.insert(tab, at: index)
+
         window?.layoutIfNeeded()
-        let size = browserView.bounds.size
-        let callbacks = MiniBrowserCallbacks(
-            ctx: Unmanaged.passUnretained(self).toOpaque(),
-            address_changed: { ctx, url in
-                guard let ctx, let url else { return }
-                BrowserWindowController.from(ctx).addressChanged(String(cString: url))
-            },
-            title_changed: { ctx, title in
-                guard let ctx, let title else { return }
-                BrowserWindowController.from(ctx).titleChanged(String(cString: title))
-            },
-            loading_state_changed: { ctx, loading, back, forward in
-                guard let ctx else { return }
-                BrowserWindowController.from(ctx).loadingStateChanged(loading: loading, back: back, forward: forward)
-            }
-        )
-        let view = Unmanaged.passUnretained(browserView).toOpaque()
-        browserID = mini_browser_create(view, Int32(size.width), Int32(size.height), url, callbacks)
-        addressField.stringValue = url
+        tab.hostView.frame = contentView.bounds
+        tab.hostView.autoresizingMask = [.width, .height]
+        tab.hostView.isHidden = true
+        contentView.addSubview(tab.hostView)
+        tab.start(url: url)
+
+        if select { self.select(tab) } else { tabStrip.update(tabs: tabs, selected: selectedTab) }
+        return tab
     }
 
-    /// CEF calls back on the main thread, so hopping onto the main actor is safe.
-    nonisolated private static func from(_ ctx: UnsafeMutableRawPointer) -> BrowserWindowController {
-        Unmanaged<BrowserWindowController>.fromOpaque(ctx).takeUnretainedValue()
-    }
-
-    nonisolated private func addressChanged(_ url: String) {
-        MainActor.assumeIsolated {
-            // Don't overwrite what the user is typing.
-            if addressField.currentEditor() == nil { addressField.stringValue = url }
+    private func select(_ tab: Tab) {
+        selectedTab?.hostView.isHidden = true
+        selectedTab = tab
+        tab.hostView.isHidden = false
+        tabStrip.update(tabs: tabs, selected: tab)
+        showState(of: tab)
+        if tab.isBlank {
+            openLocation(nil)
+        } else {
+            tab.focus()
         }
     }
 
-    nonisolated private func titleChanged(_ title: String) {
-        MainActor.assumeIsolated { window?.title = title.isEmpty ? "Mini" : title }
+    /// Takes the tab out of the window once CEF has agreed to close it.
+    private func remove(_ tab: Tab) {
+        guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        tab.detach()
+        // Tearing down the view is what lets CEF finish closing the browser.
+        tab.hostView.removeFromSuperview()
+        tabs.remove(at: index)
+
+        guard !tabs.isEmpty else {
+            selectedTab = nil
+            tabStrip.update(tabs: [], selected: nil)
+            window?.close()
+            return
+        }
+        if tab === selectedTab {
+            selectedTab = nil
+            select(tabs[min(index, tabs.count - 1)])
+        } else {
+            tabStrip.update(tabs: tabs, selected: selectedTab)
+        }
     }
 
-    nonisolated private func loadingStateChanged(loading: Bool, back: Bool, forward: Bool) {
-        MainActor.assumeIsolated {
-            isLoading = loading
-            backButton.isEnabled = back
-            forwardButton.isEnabled = forward
-            reloadButton.image = symbol(loading ? "xmark" : "arrow.clockwise")
-            reloadButton.toolTip = loading ? "Stop" : "Reload"
+    private func showState(of tab: Tab) {
+        addressBar.show(tab.url)
+        addressBar.setLoading(tab.isLoading)
+        backButton.isEnabled = tab.canGoBack
+        forwardButton.isEnabled = tab.canGoForward
+        window?.title = tab.displayTitle
+    }
+
+    // MARK: TabDelegate
+
+    func tabDidChange(_ tab: Tab) {
+        tabStrip.refresh(tab)
+        if tab === selectedTab { showState(of: tab) }
+    }
+
+    func tab(_ tab: Tab, openInNewTab url: String, background: Bool) {
+        openTab(url: url, select: !background, after: tab)
+    }
+
+    func tabReadyToClose(_ tab: Tab) {
+        remove(tab)
+    }
+
+    /// Menu shortcuts win over the page, except the Edit menu's, so editors in
+    /// the page keep their own undo, select all and so on.
+    func tab(_ tab: Tab, performKeyEquivalent event: NSEvent) -> Bool {
+        guard let menu = NSApp.mainMenu else { return false }
+        for item in menu.items where item.submenu?.title != MainMenu.editTitle {
+            if item.submenu?.performKeyEquivalent(with: event) == true { return true }
         }
+        return false
+    }
+
+    // MARK: TabStripDelegate
+
+    func tabStrip(_ strip: TabStripView, select tab: Tab) {
+        if tab !== selectedTab { select(tab) }
+    }
+
+    func tabStrip(_ strip: TabStripView, close tab: Tab) {
+        tab.close()
     }
 
     // MARK: Actions (also reached from the menu through the responder chain)
 
-    @objc func goBack(_ sender: Any?) { mini_browser_go_back(browserID) }
-    @objc func goForward(_ sender: Any?) { mini_browser_go_forward(browserID) }
-
-    @objc func reloadOrStop(_ sender: Any?) {
-        isLoading ? mini_browser_stop(browserID) : mini_browser_reload(browserID)
+    @objc func newTab(_ sender: Any?) {
+        openTab(url: "about:blank", select: true)
     }
 
-    @objc func reloadPage(_ sender: Any?) { mini_browser_reload(browserID) }
+    @objc func closeTab(_ sender: Any?) {
+        selectedTab?.close()
+    }
+
+    @objc func selectNextTab(_ sender: Any?) { selectTab(offset: 1) }
+    @objc func selectPreviousTab(_ sender: Any?) { selectTab(offset: -1) }
+
+    /// Cmd+1 to Cmd+8 pick that tab, Cmd+9 the last one. The number is the menu item's tag.
+    @objc func selectTabByNumber(_ sender: Any?) {
+        guard let number = (sender as? NSMenuItem)?.tag, !tabs.isEmpty else { return }
+        let index = number == 9 ? tabs.count - 1 : number - 1
+        if tabs.indices.contains(index) { select(tabs[index]) }
+    }
+
+    private func selectTab(offset: Int) {
+        guard let current = selectedTab, let index = tabs.firstIndex(where: { $0 === current }), tabs.count > 1 else { return }
+        select(tabs[(index + offset + tabs.count) % tabs.count])
+    }
+
+    @objc func goBack(_ sender: Any?) { selectedTab?.goBack() }
+    @objc func goForward(_ sender: Any?) { selectedTab?.goForward() }
+
+    @objc func reloadOrStop(_ sender: Any?) {
+        guard let tab = selectedTab else { return }
+        tab.isLoading ? tab.stop() : tab.reload()
+    }
+
+    @objc func reloadPage(_ sender: Any?) { selectedTab?.reload() }
 
     @objc func openLocation(_ sender: Any?) {
-        window?.makeFirstResponder(addressField)
-        addressField.currentEditor()?.selectAll(nil)
+        window?.makeFirstResponder(addressBar.field)
+        addressBar.field.currentEditor()?.selectAll(nil)
     }
 
     @objc private func addressEntered(_ sender: NSTextField) {
         let input = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty else { return }
+        guard !input.isEmpty, let tab = selectedTab else { return }
         let url = AddressInput.url(for: input)
         sender.stringValue = url
-        mini_browser_load_url(browserID, url)
-        window?.makeFirstResponder(browserView)
-        mini_browser_set_focus(browserID, true)
+        tab.load(url)
+        tab.focus()
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(goBack(_:)): selectedTab?.canGoBack ?? false
+        case #selector(goForward(_:)): selectedTab?.canGoForward ?? false
+        case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)): tabs.count > 1
+        default: true
+        }
     }
 
     // MARK: Window
 
+    /// Closes every tab first. Each page's beforeunload may still cancel its own
+    /// close. The window closes when its last tab is gone.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        mini_browser_try_close(browserID)
+        if tabs.isEmpty { return true }
+        tabs.forEach { $0.close() }
+        return false
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        fitTabStrip()
+    }
+
+    /// Room left after the window buttons, back, forward and new tab.
+    private func fitTabStrip() {
+        guard let width = window?.frame.width else { return }
+        tabStripWidth.constant = max(200, width - 280)
     }
 
     func windowWillClose(_ notification: Notification) {
-        mini_browser_detach(browserID)
-        // Releasing CEF's view lets CEF finish closing the browser. The last
-        // browser to close ends the message loop and the app quits.
-        browserView.subviews.forEach { $0.removeFromSuperview() }
         onClose?()
     }
 
@@ -140,17 +244,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private enum Item {
         static let back = NSToolbarItem.Identifier("back")
         static let forward = NSToolbarItem.Identifier("forward")
-        static let reload = NSToolbarItem.Identifier("reload")
-        static let address = NSToolbarItem.Identifier("address")
+        static let tabs = NSToolbarItem.Identifier("tabs")
+        static let newTab = NSToolbarItem.Identifier("newTab")
     }
 
     private func configureControls() {
         for (button, name, tip, action) in [
             (backButton, "chevron.left", "Back", #selector(goBack(_:))),
             (forwardButton, "chevron.right", "Forward", #selector(goForward(_:))),
-            (reloadButton, "arrow.clockwise", "Reload", #selector(reloadOrStop(_:))),
+            (newTabButton, "plus", "New Tab", #selector(newTab(_:))),
         ] {
-            button.image = symbol(name)
+            button.image = NSImage(systemSymbolName: name, accessibilityDescription: tip)
             button.toolTip = tip
             button.bezelStyle = .toolbar
             button.target = self
@@ -159,20 +263,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         backButton.isEnabled = false
         forwardButton.isEnabled = false
 
-        addressField.placeholderString = "Search or enter website"
-        addressField.bezelStyle = .roundedBezel
-        addressField.lineBreakMode = .byTruncatingTail
-        addressField.usesSingleLineMode = true
-        addressField.target = self
-        addressField.action = #selector(addressEntered(_:))
-    }
-
-    private func symbol(_ name: String) -> NSImage? {
-        NSImage(systemSymbolName: name, accessibilityDescription: nil)
+        addressBar.field.target = self
+        addressBar.field.action = #selector(addressEntered(_:))
+        addressBar.reloadButton.target = self
+        addressBar.reloadButton.action = #selector(reloadOrStop(_:))
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Item.back, Item.forward, Item.reload, .flexibleSpace, Item.address, .flexibleSpace]
+        [Item.back, Item.forward, Item.tabs, Item.newTab]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -188,45 +286,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         switch id {
         case Item.back: item.view = backButton; item.label = "Back"
         case Item.forward: item.view = forwardButton; item.label = "Forward"
-        case Item.reload: item.view = reloadButton; item.label = "Reload"
-        case Item.address:
-            item.view = addressField
-            item.label = "Address"
-            addressField.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
-            addressField.widthAnchor.constraint(lessThanOrEqualToConstant: 720).isActive = true
-            let preferred = addressField.widthAnchor.constraint(equalToConstant: 720)
-            preferred.priority = .defaultLow
-            preferred.isActive = true
+        case Item.newTab: item.view = newTabButton; item.label = "New Tab"
+        case Item.tabs:
+            item.view = tabStrip
+            item.label = "Tabs"
+            tabStrip.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            tabStripWidth.isActive = true
+            fitTabStrip()
         default: return nil
         }
         return item
-    }
-}
-
-/// Hosts CEF's view and keeps it the size of the window content.
-final class BrowserHostView: NSView {
-    override var acceptsFirstResponder: Bool { true }
-
-    override func resizeSubviews(withOldSize oldSize: NSSize) {
-        for view in subviews { view.frame = bounds }
-    }
-}
-
-/// Turns address bar input into a URL: a URL if it looks like one, else a search.
-enum AddressInput {
-    static func url(for input: String) -> String {
-        if input.contains("://") || input.hasPrefix("about:") || input.hasPrefix("data:") {
-            return input
-        }
-        let host = input.split(separator: "/", maxSplits: 1).first.map(String.init) ?? input
-        let looksLikeHost = !input.contains(" ")
-            && (host.contains(".") || host.hasPrefix("localhost") || host.contains(":"))
-        if looksLikeHost {
-            let scheme = host.hasPrefix("localhost") || host.hasPrefix("127.") ? "http" : "https"
-            return "\(scheme)://\(input)"
-        }
-        var components = URLComponents(string: "https://www.google.com/search")!
-        components.queryItems = [URLQueryItem(name: "q", value: input)]
-        return components.url!.absoluteString
     }
 }

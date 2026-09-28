@@ -16,6 +16,10 @@ pub struct Callbacks {
     pub address_changed: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     pub title_changed: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     pub loading_state_changed: Option<unsafe extern "C" fn(*mut c_void, bool, bool, bool)>,
+    pub favicon_changed: Option<unsafe extern "C" fn(*mut c_void, *const u8, usize)>,
+    pub open_tab: Option<unsafe extern "C" fn(*mut c_void, *const c_char, bool)>,
+    pub close_ready: Option<unsafe extern "C" fn(*mut c_void)>,
+    pub key_equivalent: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool>,
 }
 
 struct Entry {
@@ -32,7 +36,10 @@ pub fn get(id: i32) -> Option<Browser> {
 }
 
 fn callbacks_for(browser: Option<&mut Browser>) -> Option<Callbacks> {
-    let id = browser?.identifier();
+    callbacks_for_id(browser?.identifier())
+}
+
+fn callbacks_for_id(id: i32) -> Option<Callbacks> {
     BROWSERS.with_borrow(|map| map.get(&id).and_then(|e| e.callbacks))
 }
 
@@ -73,6 +80,14 @@ pub fn detach(id: i32) {
     });
 }
 
+/// Starts closing one browser. The page's beforeunload runs first, then
+/// `close_ready` fires and the Swift side removes the tab's view.
+pub fn close(id: i32) {
+    if let Some(host) = get(id).and_then(|b| b.host()) {
+        host.close_browser(0);
+    }
+}
+
 /// Starts closing every browser. Each one runs its beforeunload handlers, then
 /// asks its window to close. Quits right away when no browser exists.
 pub fn close_all() {
@@ -101,6 +116,10 @@ wrap_client! {
             Some(MiniLifeSpanHandler::new())
         }
 
+        fn keyboard_handler(&self) -> Option<KeyboardHandler> {
+            Some(MiniKeyboardHandler::new())
+        }
+
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(MiniLoadHandler::new())
         }
@@ -121,10 +140,93 @@ wrap_display_handler! {
             }
         }
 
+        fn on_favicon_urlchange(&self, browser: Option<&mut Browser>, icon_urls: Option<&mut CefStringList>) {
+            let Some(browser) = browser else { return };
+            let first = icon_urls.and_then(first_string);
+            let Some(url) = first else {
+                send_favicon(browser.identifier(), &[]);
+                return;
+            };
+            if let Some(host) = browser.host() {
+                let mut callback = MiniFaviconCallback::new(browser.identifier());
+                host.download_image(Some(&CefString::from(url.as_str())), 1, 64, 0, Some(&mut callback));
+            }
+        }
+
         fn on_title_change(&self, browser: Option<&mut Browser>, title: Option<&CefString>) {
             if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.title_changed {
                 let title = to_cstring(title);
                 unsafe { f(cb.ctx, title.as_ptr()) };
+            }
+        }
+    }
+}
+
+/// First entry of a list CEF lends to a callback. The crate's `Clone` and
+/// `IntoIterator` for a borrowed list lose its contents, so read it directly.
+fn first_string(list: &mut CefStringList) -> Option<String> {
+    let raw: *mut sys::_cef_string_list_t = list.into();
+    if raw.is_null() || unsafe { sys::cef_string_list_size(raw) } == 0 {
+        return None;
+    }
+    let mut value: sys::cef_string_t = unsafe { std::mem::zeroed() };
+    if unsafe { sys::cef_string_list_value(raw, 0, &mut value) } == 0 {
+        return None;
+    }
+    let s = CefString::from(std::ptr::from_ref(&value)).to_string();
+    unsafe { sys::cef_string_utf16_clear(&mut value) };
+    Some(s)
+}
+
+fn send_favicon(id: i32, png: &[u8]) {
+    if let Some(cb) = callbacks_for_id(id) && let Some(f) = cb.favicon_changed {
+        unsafe { f(cb.ctx, png.as_ptr(), png.len()) };
+    }
+}
+
+wrap_download_image_callback! {
+    struct MiniFaviconCallback {
+        browser_id: i32,
+    }
+
+    impl DownloadImageCallback {
+        fn on_download_image_finished(&self, _image_url: Option<&CefString>, _http_status_code: i32, image: Option<&mut Image>) {
+            // CEF returns nothing unless both size out-parameters are given.
+            let (mut width, mut height) = (0, 0);
+            let png = image.and_then(|image| image.as_png(2.0, 1, Some(&mut width), Some(&mut height)));
+            match png {
+                Some(png) if png.size() > 0 => {
+                    let bytes = unsafe { std::slice::from_raw_parts(png.raw_data().cast::<u8>(), png.size()) };
+                    send_favicon(self.browser_id, bytes);
+                }
+                _ => send_favicon(self.browser_id, &[]),
+            }
+        }
+    }
+}
+
+wrap_keyboard_handler! {
+    struct MiniKeyboardHandler;
+
+    impl KeyboardHandler {
+        /// Gives the menu bar first pick of Command and Control shortcuts, so
+        /// Cmd+W, Cmd+R, Cmd+[ and the rest work while a page has focus. The
+        /// Swift side leaves Edit menu keys alone so pages still get Cmd+Z etc.
+        fn on_pre_key_event(
+            &self,
+            browser: Option<&mut Browser>,
+            event: Option<&KeyEvent>,
+            os_event: *mut u8,
+            _is_keyboard_shortcut: Option<&mut i32>,
+        ) -> i32 {
+            let Some(event) = event else { return 0 };
+            let modifiers = (sys::cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0 | sys::cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0) as u32;
+            if event.type_ != KeyEventType::RAWKEYDOWN || event.modifiers & modifiers == 0 || os_event.is_null() {
+                return 0;
+            }
+            match callbacks_for(browser) {
+                Some(Callbacks { ctx, key_equivalent: Some(f), .. }) => unsafe { f(ctx, os_event.cast()) }.into(),
+                _ => 0,
             }
         }
     }
@@ -146,7 +248,8 @@ wrap_life_span_handler! {
     struct MiniLifeSpanHandler;
 
     impl LifeSpanHandler {
-        /// Tabs arrive in step 5. Until then a popup loads in the same browser.
+        /// Opens popups and new-window links as tabs. The new tab is a separate
+        /// browser, so the page loses `window.opener` to it.
         fn on_before_popup(
             &self,
             browser: Option<&mut Browser>,
@@ -154,7 +257,7 @@ wrap_life_span_handler! {
             _popup_id: i32,
             target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
-            _target_disposition: WindowOpenDisposition,
+            target_disposition: WindowOpenDisposition,
             _user_gesture: i32,
             _popup_features: Option<&PopupFeatures>,
             _window_info: Option<&mut WindowInfo>,
@@ -163,18 +266,22 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut i32>,
         ) -> i32 {
-            if let (Some(browser), Some(url)) = (browser, target_url)
-                && let Some(frame) = browser.main_frame()
-            {
-                frame.load_url(Some(url));
+            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.open_tab {
+                let url = to_cstring(target_url);
+                let background = target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB;
+                unsafe { f(cb.ctx, url.as_ptr(), background) };
             }
             1
         }
 
-        /// Returning false lets CEF send the close event to the window, whose
-        /// `windowShouldClose:` then calls `mini_browser_try_close` again.
-        fn do_close(&self, _browser: Option<&mut Browser>) -> i32 {
-            0
+        /// A tab closing must not close the window, so instead of letting CEF
+        /// send performClose: to it, tell Swift to remove the tab's view. Tearing
+        /// down that view finishes the close and leads to `on_before_close`.
+        fn do_close(&self, browser: Option<&mut Browser>) -> i32 {
+            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.close_ready {
+                unsafe { f(cb.ctx) };
+            }
+            1
         }
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
@@ -184,7 +291,7 @@ wrap_life_span_handler! {
                 map.remove(&id);
                 map.is_empty()
             });
-            // One window for now, so the last browser closing quits the app.
+            // One window for now, so the last tab closing quits the app.
             if empty {
                 quit_message_loop();
             }

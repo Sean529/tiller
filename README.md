@@ -33,3 +33,18 @@ open build/Mini.app --args -url https://example.com   # start on another page
 ```
 
 Mini passes `--use-mock-keychain` to Chromium, so it never asks for the login keychain password. The cost is that cookies are encrypted with a fixed key instead of one kept in the keychain.
+
+## Tabs
+
+| Shortcut | Action |
+|---|---|
+| Cmd+T | New tab |
+| Cmd+W | Close tab (the window closes with its last tab, and the app quits) |
+| Cmd+Shift+W | Close window |
+| Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
+| Middle click on a tab | Close it |
+
+Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
+
+Popups and `target=_blank` links open as new tabs. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.

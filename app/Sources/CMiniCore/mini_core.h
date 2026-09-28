@@ -1,6 +1,8 @@
 // C interface of the Rust crate in core/. Keep in sync with core/src/lib.rs.
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 // Called on the main thread. `ctx` is passed back unchanged.
 typedef struct MiniBrowserCallbacks {
@@ -8,6 +10,15 @@ typedef struct MiniBrowserCallbacks {
     void (*address_changed)(void *ctx, const char *url);
     void (*title_changed)(void *ctx, const char *title);
     void (*loading_state_changed)(void *ctx, bool is_loading, bool can_go_back, bool can_go_forward);
+    // PNG bytes of the page's favicon, or len 0 when it has none.
+    void (*favicon_changed)(void *ctx, const uint8_t *png, size_t len);
+    // A popup or new-window link. The URL should open in a new tab.
+    void (*open_tab)(void *ctx, const char *url, bool background);
+    // beforeunload passed. Remove the browser's view to finish closing it.
+    void (*close_ready)(void *ctx);
+    // A Command or Control key press (an NSEvent *) before the page sees it.
+    // Return true if the app handled it.
+    bool (*key_equivalent)(void *ctx, void *ns_event);
 } MiniBrowserCallbacks;
 
 // Static version string. Do not free.
@@ -30,9 +41,9 @@ void mini_browser_reload(int id);
 void mini_browser_stop(int id);
 void mini_browser_set_focus(int id, bool focus);
 
-// For windowShouldClose:. True means close now. False means beforeunload is
-// running and CEF will ask the window to close again.
-bool mini_browser_try_close(int id);
+// Closes a tab. beforeunload runs first and may cancel. If it doesn't,
+// close_ready fires.
+void mini_browser_close(int id);
 
 // Stops callbacks for this browser. Call before freeing the callback context.
 void mini_browser_detach(int id);

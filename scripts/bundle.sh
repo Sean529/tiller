@@ -26,8 +26,11 @@ cargo build --manifest-path "$ROOT/Cargo.toml" --workspace "${cargo_flags[@]}"
 RUST_OUT="$ROOT/target/$CONFIG"
 
 echo "==> swift build ($CONFIG)"
-swift build --package-path "$ROOT/app" -c "$CONFIG" -Xlinker -L"$RUST_OUT"
 SWIFT_OUT="$(swift build --package-path "$ROOT/app" -c "$CONFIG" --show-bin-path)"
+# SwiftPM doesn't track the Rust static library, so a Rust-only change would
+# not relink. Removing the executable forces the link step.
+rm -f "$SWIFT_OUT/Mini"
+swift build --package-path "$ROOT/app" -c "$CONFIG" -Xlinker -L"$RUST_OUT"
 
 echo "==> assembling $APP"
 rm -rf "$APP"
