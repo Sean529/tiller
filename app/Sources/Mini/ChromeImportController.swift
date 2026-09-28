@@ -38,8 +38,12 @@ enum ChromeImporter {
         var preferences: Result<ChromePreferences, Error>?
     }
 
-    static func run(profile: ChromeProfile, kinds: Set<ImportKind>) async -> [ImportResult] {
-        let loaded = await Task.detached { load(ChromeReader(profile: profile), kinds) }.value
+    /// Reads from `dataDirectory` instead of Chrome's real folder when set —
+    /// the Finder-made copy used when security software blocks direct reads.
+    static func run(profile: ChromeProfile, kinds: Set<ImportKind>, dataDirectory: String? = nil) async -> [ImportResult] {
+        let loaded = await Task.detached {
+            load(ChromeReader(profile: profile, dataDirectory: dataDirectory ?? ChromeReader.defaultDataDirectory), kinds)
+        }.value
         var results: [ImportResult] = []
 
         if let preferences = loaded.preferences {
@@ -177,9 +181,13 @@ final class ChromeImportController: NSWindowController {
     private let status = NSTextField(wrappingLabelWithString: "")
     private let spinner = NSProgressIndicator()
     private let privacyButton = NSButton(title: "Open Privacy Settings", target: nil, action: nil)
+    private let finderButton = NSButton(title: "Copy via Finder", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let importButton = NSButton(title: "Import", target: nil, action: nil)
     private var profiles: [ChromeProfile] = []
+    /// Temp folder holding a Finder-made copy of Chrome's data, used when
+    /// security software blocks Mini from reading the real folder.
+    private var copyRoot: URL?
     private var finished = false
     private var onEnd: (() -> Void)?
 
@@ -233,13 +241,16 @@ final class ChromeImportController: NSWindowController {
         privacyButton.target = self
         privacyButton.action = #selector(openPrivacySettings(_:))
         privacyButton.isHidden = true
+        finderButton.target = self
+        finderButton.action = #selector(copyViaFinder(_:))
+        finderButton.isHidden = true
         cancelButton.target = self
         cancelButton.action = #selector(cancel(_:))
         cancelButton.keyEquivalent = "\u{1b}"
         importButton.target = self
         importButton.action = #selector(importOrClose(_:))
         importButton.keyEquivalent = "\r"
-        let buttons = NSStackView(views: [spinner, privacyButton, NSView(), cancelButton, importButton])
+        let buttons = NSStackView(views: [spinner, privacyButton, finderButton, NSView(), cancelButton, importButton])
         buttons.spacing = 8
         buttons.setHuggingPriority(.defaultLow, for: .horizontal)
 
@@ -267,7 +278,57 @@ final class ChromeImportController: NSWindowController {
             profilePopUp.addItem(withTitle: "None found")
             setControlsEnabled(false)
             show([ImportResult(title: "Chrome", detail: "", error: error)])
+            finderButton.isHidden = !Self.isNoAccess(error)
         }
+    }
+
+    /// Fallback for when security software blocks Mini from Chrome's folder:
+    /// have Finder make a readable copy and import from that instead.
+    @objc private func copyViaFinder(_ sender: Any?) {
+        guard copyRoot == nil else { return }
+        let needsProfiles = profiles.isEmpty
+        finderButton.isEnabled = false
+        spinner.startAnimation(nil)
+        showStatus("Asking Finder to copy Chrome's data…")
+        Task {
+            let result = await Task.detached { () -> Result<(root: URL, profiles: [ChromeProfile], lastUsed: String?), Error> in
+                Result {
+                    let root = try FinderChromeCopy.makeTempRoot()
+                    if needsProfiles {
+                        try FinderChromeCopy.copyLocalState(to: root)
+                        let (profiles, lastUsed) = try ChromeReader.profiles(in: root.path)
+                        return (root, profiles, lastUsed)
+                    }
+                    return (root, [], nil)
+                }
+            }.value
+            spinner.stopAnimation(nil)
+            finderButton.isEnabled = true
+            switch result {
+            case .failure(let error):
+                show([ImportResult(title: "Finder copy", detail: "", error: error)])
+            case .success(let (root, copiedProfiles, lastUsed)):
+                copyRoot = root
+                finderButton.isHidden = true
+                if needsProfiles {
+                    profiles = copiedProfiles
+                    profilePopUp.removeAllItems()
+                    for profile in copiedProfiles {
+                        profilePopUp.addItem(withTitle: profile.name == profile.directory ? profile.name : "\(profile.name) (\(profile.directory))")
+                    }
+                    profilePopUp.selectItem(at: copiedProfiles.firstIndex { $0.directory == lastUsed } ?? 0)
+                }
+                setControlsEnabled(true)
+                showStatus("Copied. Mini will import from Finder's copy — click Import.")
+            }
+        }
+    }
+
+    private func showStatus(_ text: String) {
+        status.stringValue = text
+        status.textColor = .secondaryLabelColor
+        status.isHidden = false
+        window?.layoutIfNeeded()
     }
 
     @objc private func checkboxChanged(_ sender: NSButton) {
@@ -291,19 +352,50 @@ final class ChromeImportController: NSWindowController {
         setControlsEnabled(false)
         cancelButton.isEnabled = false
         privacyButton.isHidden = true
+        finderButton.isHidden = true
         spinner.startAnimation(nil)
         status.isHidden = false
         status.textColor = .secondaryLabelColor
-        status.stringValue = "Importing…"
+        status.stringValue = copyRoot == nil ? "Importing…" : "Copying via Finder…"
         Task {
-            let results = await ChromeImporter.run(profile: profile, kinds: selectedKinds)
+            var results: [ImportResult]?
+            if let copyRoot {
+                // The copy is made per import: the user may have picked another
+                // profile since the last attempt, and it keeps plaintext data
+                // on disk only for as long as this import runs.
+                let copied = await Task.detached { Result { try FinderChromeCopy.copyProfile(profile.directory, to: copyRoot) } }.value
+                if case .failure(let error) = copied {
+                    results = [ImportResult(title: "Finder copy", detail: "", error: error)]
+                }
+            }
+            if results == nil {
+                status.stringValue = "Importing…"
+                results = await ChromeImporter.run(profile: profile, kinds: selectedKinds, dataDirectory: copyRoot?.path)
+            }
+            let usedCopy = copyRoot != nil
+            if let copyRoot {
+                try? FileManager.default.removeItem(at: copyRoot)
+                self.copyRoot = nil
+            }
             spinner.stopAnimation(nil)
-            show(results)
-            finished = true
-            cancelButton.isHidden = true
-            importButton.title = "Done"
-            importButton.isEnabled = true
+            show(results!)
+            if !usedCopy && results!.contains(where: { Self.isNoAccess($0.error) }) {
+                // Direct reads are blocked — offer the Finder-copy retry.
+                finderButton.isHidden = false
+                setControlsEnabled(true)
+                cancelButton.isEnabled = true
+            } else {
+                finished = true
+                cancelButton.isHidden = true
+                importButton.title = "Done"
+                importButton.isEnabled = true
+            }
         }
+    }
+
+    private static func isNoAccess(_ error: Error?) -> Bool {
+        if case ChromeImportError.noAccess? = error { return true }
+        return false
     }
 
     private func show(_ results: [ImportResult]) {
@@ -336,6 +428,7 @@ final class ChromeImportController: NSWindowController {
 
     private func dismiss() {
         guard let window else { return }
+        if let copyRoot { try? FileManager.default.removeItem(at: copyRoot) }
         window.sheetParent?.endSheet(window)
         onEnd?()
         onEnd = nil

@@ -82,11 +82,13 @@ struct ChromePreferences: Sendable {
 struct ChromeReader: Sendable {
     let profileDirectory: String
 
-    init(profile: ChromeProfile) {
-        profileDirectory = Self.dataDirectory + "/" + profile.directory
+    /// Where Chrome's top-level data lives. A Finder-made copy (see
+    /// FinderChromeCopy) passes its own root here.
+    init(profile: ChromeProfile, dataDirectory: String = ChromeReader.defaultDataDirectory) {
+        profileDirectory = dataDirectory + "/" + profile.directory
     }
 
-    static var dataDirectory: String {
+    static var defaultDataDirectory: String {
         #if DEBUG
         // For testing against a made-up profile: `-chromeDataDir /path`.
         if let dir = UserDefaults.standard.string(forKey: "chromeDataDir") { return dir }
@@ -96,7 +98,7 @@ struct ChromeReader: Sendable {
 
     /// Profiles listed in Chrome's Local State, Default first. The second value
     /// is the profile Chrome used last.
-    static func profiles() throws -> (profiles: [ChromeProfile], lastUsed: String?) {
+    static func profiles(in dataDirectory: String = defaultDataDirectory) throws -> (profiles: [ChromeProfile], lastUsed: String?) {
         let data = try read(dataDirectory + "/Local State")
         guard let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let profile = state["profile"] as? [String: Any]

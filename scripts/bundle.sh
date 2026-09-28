@@ -62,6 +62,7 @@ write_plist() {
     <key>NSHighResolutionCapable</key><true/>
     <key>NSCameraUsageDescription</key><string>A website wants to use the camera.</string>
     <key>NSMicrophoneUsageDescription</key><string>A website wants to use the microphone.</string>
+    <key>NSAppleEventsUsageDescription</key><string>Mini asks Finder to copy Chrome's data when security software blocks reading it directly.</string>
     $ui_element
     $icon
 </dict>
