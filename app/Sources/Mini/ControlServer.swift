@@ -11,8 +11,10 @@ struct ControlError: Error {
 /// Swift; the core sends them to the tab directly.
 @MainActor
 final class ControlServer {
-    /// Where mini_mcp looks, unless its MINI_SOCKET variable says otherwise.
-    static let socketPath = NSHomeDirectory() + "/Library/Application Support/Mini/control.sock"
+    /// Where mini_mcp looks. Both honor MINI_SOCKET, for data folders whose
+    /// path is too long for a socket.
+    static let socketPath = ProcessInfo.processInfo.environment["MINI_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
+        ?? DataDirectory.file("control.sock")
 
     weak var browser: BrowserWindowController?
 

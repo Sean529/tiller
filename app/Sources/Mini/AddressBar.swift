@@ -1,12 +1,16 @@
 import AppKit
 
-/// The row under the tabs: a Liquid Glass capsule holding the address field
-/// and the reload/stop button. Used as a titlebar accessory.
+/// The row under the tabs: a Liquid Glass capsule holding the address field,
+/// the reload/stop button and, on pages with a saved login, a key button that
+/// fills it. Used as a titlebar accessory.
 final class AddressBarView: NSView {
     let field = NSTextField()
     let reloadButton = NSButton()
+    let keyButton = NSButton()
 
     private let glass = NSGlassEffectView()
+    /// The capsule, for placing the suggestion list under it.
+    var capsule: NSView { glass }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -26,8 +30,16 @@ final class AddressBarView: NSView {
         reloadButton.imagePosition = .imageOnly
         setLoading(false)
 
+        keyButton.bezelStyle = .accessoryBarAction
+        keyButton.isBordered = false
+        keyButton.imagePosition = .imageOnly
+        keyButton.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: "Fill Password")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        keyButton.toolTip = "Fill Saved Password"
+        keyButton.isHidden = true
+
         let content = NSView()
-        for view in [field, reloadButton] as [NSView] {
+        for view in [field, reloadButton, keyButton] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -52,6 +64,9 @@ final class AddressBarView: NSView {
             reloadButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
             reloadButton.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             reloadButton.widthAnchor.constraint(equalToConstant: 20),
+            keyButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+            keyButton.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            keyButton.widthAnchor.constraint(equalToConstant: 20),
         ])
     }
 

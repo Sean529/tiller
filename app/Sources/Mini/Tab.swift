@@ -25,6 +25,9 @@ final class Tab {
     private(set) var canGoForward = false
     private(set) var favicon: NSImage?
 
+    /// The URL and title last written to history, so each change is saved once.
+    var recordedVisit: (url: String, title: String)?
+
     var isBlank: Bool { url.isEmpty || url == "about:blank" }
 
     var displayTitle: String {
@@ -85,6 +88,9 @@ final class Tab {
     func goForward() { mini_browser_go_forward(browserID) }
     func reload() { mini_browser_reload(browserID) }
     func stop() { mini_browser_stop(browserID) }
+
+    /// Runs `code` in the main frame. Does nothing once the tab has closed.
+    func executeJavaScript(_ code: String) { mini_browser_execute_js(browserID, code) }
 
     func focus() {
         hostView.window?.makeFirstResponder(hostView)

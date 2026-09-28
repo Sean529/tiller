@@ -31,6 +31,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 MainActor.assumeIsolated { controller?.sendAgentPrompt(prompt) }
             }
         }
+        // `-importChrome YES` imports everything from Chrome's last-used
+        // profile and logs the result.
+        if UserDefaults.standard.bool(forKey: "importChrome") {
+            Task {
+                do {
+                    let (profiles, lastUsed) = try ChromeReader.profiles()
+                    guard let profile = profiles.first(where: { $0.directory == lastUsed }) ?? profiles.first else { return }
+                    for result in await ChromeImporter.run(profile: profile, kinds: Set(ImportKind.allCases)) {
+                        NSLog("Mini import: %@: %@", result.title, result.error?.localizedDescription ?? result.detail)
+                    }
+                } catch {
+                    NSLog("Mini import: %@", error.localizedDescription)
+                }
+            }
+        }
         #endif
     }
 

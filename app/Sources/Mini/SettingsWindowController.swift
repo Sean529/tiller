@@ -1,7 +1,7 @@
 import AppKit
 
-/// The Settings window (Cmd+,), with a General and an Agent pane. Every change
-/// is saved as it is made.
+/// The Settings window (Cmd+,), with General, Passwords and Agent panes.
+/// Every change is saved as it is made.
 @MainActor
 final class SettingsWindowController: NSWindowController {
     init() {
@@ -9,6 +9,7 @@ final class SettingsWindowController: NSWindowController {
         tabs.tabStyle = .toolbar
         let panes: [(NSViewController, String)] = [
             (GeneralSettingsPane(), "gearshape"),
+            (PasswordsSettingsPane(), "key"),
             (AgentSettingsPane(), "sparkles"),
         ]
         for (pane, symbol) in panes {
@@ -118,6 +119,8 @@ class SettingsPane: NSViewController {
 
 final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     private let homepageField = NSTextField()
+    private var newTabPopUp: NSPopUpButton?
+    private var searchPopUp: NSPopUpButton?
     private let templateField = NSTextField()
     private let templateNote = SettingsPane.note()
 
@@ -132,21 +135,35 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         addRow("Homepage:", Self.fixWidth(homepageField))
         addNote(Self.note("Opens at launch, and in new tabs if set below."))
 
-        addRow("New tabs open with:", Self.popUp(
+        let newTabPopUp = Self.popUp(
             NewTabPage.allCases, title: \.displayName, selected: Settings.newTabPage,
             target: self, action: #selector(newTabPageChanged(_:))
-        ))
+        )
+        self.newTabPopUp = newTabPopUp
+        addRow("New tabs open with:", newTabPopUp)
 
-        addRow("Search engine:", Self.popUp(
+        let searchPopUp = Self.popUp(
             SearchEngine.allCases, title: \.displayName, selected: Settings.searchEngine,
             target: self, action: #selector(searchEngineChanged(_:))
-        ))
+        )
+        self.searchPopUp = searchPopUp
+        addRow("Search engine:", searchPopUp)
 
         templateField.stringValue = Settings.searchTemplate
         templateField.placeholderString = "https://example.com/search?q=%s"
         templateField.delegate = self
         addRow("Custom search URL:", Self.fixWidth(templateField))
         addNote(templateNote)
+        showTemplateState()
+    }
+
+    /// An import from Chrome may have changed these while the window was closed.
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        homepageField.stringValue = Settings.homepage
+        templateField.stringValue = Settings.searchTemplate
+        newTabPopUp?.selectItem(at: NewTabPage.allCases.firstIndex(of: Settings.newTabPage) ?? 0)
+        searchPopUp?.selectItem(at: SearchEngine.allCases.firstIndex(of: Settings.searchEngine) ?? 0)
         showTemplateState()
     }
 
@@ -179,6 +196,156 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
             Self.show("Needs an http(s) URL with %s. Google is used until then.", in: templateNote, warning: true)
         } else {
             Self.show("Put %s where the search terms go.", in: templateNote)
+        }
+    }
+}
+
+// MARK: Passwords
+
+/// Saved passwords: site and username, with buttons to copy a password or
+/// remove logins. Passwords come in through File > Import from Chrome.
+final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    private let table = NSTableView()
+    private let copyButton = NSButton(title: "Copy Password", target: nil, action: nil)
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let removeAllButton = NSButton(title: "Remove All…", target: nil, action: nil)
+    private let note = SettingsPane.note()
+    private var entries: [PasswordStore.Entry] { PasswordStore.shared.entries }
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        title = "Passwords"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        for (id, title, width) in [("site", "Website", 300.0), ("username", "Username", 220.0)] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.allowsMultipleSelection = true
+        table.usesAlternatingRowBackgroundColors = true
+        table.style = .inset
+        table.dataSource = self
+        table.delegate = self
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+
+        copyButton.target = self
+        copyButton.action = #selector(copyPassword(_:))
+        removeButton.target = self
+        removeButton.action = #selector(remove(_:))
+        removeAllButton.target = self
+        removeAllButton.action = #selector(removeAll(_:))
+        let buttons = NSStackView(views: [copyButton, removeButton, NSView(), removeAllButton])
+        buttons.spacing = 8
+
+        let stack = NSStackView(views: [scroll, buttons, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let view = NSView()
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalToConstant: 560),
+            scroll.heightAnchor.constraint(equalToConstant: 280),
+            buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+        ])
+        self.view = view
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = view.fittingSize
+        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .passwordsDidChange, object: nil)
+        reload(nil)
+    }
+
+    @objc private func reload(_ notification: Notification?) {
+        table.reloadData()
+        updateControls()
+    }
+
+    private func updateControls() {
+        copyButton.isEnabled = table.selectedRowIndexes.count == 1
+        removeButton.isEnabled = !table.selectedRowIndexes.isEmpty
+        removeAllButton.isEnabled = !entries.isEmpty
+        SettingsPane.show(
+            entries.isEmpty
+                ? "No saved passwords. Bring them over with File > Import from Chrome…"
+                : "\(entries.count) saved. On a page with a saved login, the key in the address bar fills it.",
+            in: note
+        )
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
+
+    func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
+        guard entries.indices.contains(row) else { return nil }
+        let entry = entries[row]
+        let text = column?.identifier.rawValue == "site"
+            ? HistoryStore.bare(entry.origin)
+            : (entry.username.isEmpty ? "(no username)" : entry.username)
+        let label = NSTextField(labelWithString: text)
+        label.lineBreakMode = .byTruncatingTail
+        if column?.identifier.rawValue == "site" { label.toolTip = entry.origin }
+        return label
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateControls()
+    }
+
+    private var selectedEntries: [PasswordStore.Entry] {
+        table.selectedRowIndexes.compactMap { entries.indices.contains($0) ? entries[$0] : nil }
+    }
+
+    @objc private func copyPassword(_ sender: Any?) {
+        guard let entry = selectedEntries.first else { return }
+        Task {
+            do {
+                let password = try await PasswordStore.shared.password(for: entry)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(password, forType: .string)
+                SettingsPane.show("Copied the password for \(HistoryStore.bare(entry.origin)).", in: note)
+            } catch {
+                SettingsPane.show(error.localizedDescription, in: note, warning: true)
+            }
+        }
+    }
+
+    @objc private func remove(_ sender: Any?) {
+        do {
+            try PasswordStore.shared.remove(Set(selectedEntries.map(\.id)))
+        } catch {
+            SettingsPane.show(error.localizedDescription, in: note, warning: true)
+        }
+    }
+
+    @objc private func removeAll(_ sender: Any?) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Remove all saved passwords?"
+        alert.informativeText = "Removes \(entries.count) passwords from Mini. Chrome keeps its own."
+        alert.addButton(withTitle: "Remove All")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated {
+                do {
+                    try PasswordStore.shared.removeAll()
+                } catch {
+                    guard let self else { return }
+                    SettingsPane.show(error.localizedDescription, in: self.note, warning: true)
+                }
+            }
         }
     }
 }

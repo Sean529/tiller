@@ -3,6 +3,7 @@
 
 mod app_mac;
 mod browser;
+mod cookies;
 mod ipc;
 
 use cef::*;
@@ -46,7 +47,11 @@ pub extern "C" fn mini_core_start() -> c_int {
         return code;
     }
 
-    let root = std::env::var("HOME").map(|h| format!("{h}/Library/Application Support/Mini")).unwrap_or_default();
+    // Same folder as DataDirectory.swift.
+    let root = match std::env::var("MINI_DATA_DIR") {
+        Ok(dir) if !dir.is_empty() => dir,
+        _ => std::env::var("HOME").map(|h| format!("{h}/Library/Application Support/Mini")).unwrap_or_default(),
+    };
     let settings = Settings {
         root_cache_path: CefString::from(root.as_str()),
         cache_path: CefString::from(format!("{root}/Default").as_str()),
@@ -130,6 +135,31 @@ pub extern "C" fn mini_browser_set_focus(id: c_int, focus: bool) {
     if let Some(host) = browser::get(id).and_then(|b| b.host()) {
         host.set_focus(focus.into());
     }
+}
+
+/// Runs `code` in the tab's main frame. Nothing comes back.
+///
+/// # Safety
+/// `code` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mini_browser_execute_js(id: c_int, code: *const c_char) {
+    let code = unsafe { cstr(code) };
+    if let Some(frame) = browser::get(id).and_then(|b| b.main_frame()) {
+        frame.execute_java_script(Some(&CefString::from(code.as_str())), None, 0);
+    }
+}
+
+/// Sets the cookies in `cookies_json` (see mini_core.h), replacing any with
+/// the same name, domain and path. `done` runs on the main thread once all
+/// are set and written to disk.
+///
+/// # Safety
+/// `cookies_json` must be a NUL-terminated UTF-8 string. `ctx` must stay valid
+/// until `done` runs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mini_cookies_import(cookies_json: *const c_char, ctx: *mut c_void, done: cookies::Done) {
+    let json = unsafe { cstr(cookies_json) };
+    cookies::import(&json, ctx, done);
 }
 
 /// Closes a tab. The page's beforeunload runs first and may cancel. When the

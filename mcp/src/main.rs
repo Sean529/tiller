@@ -360,7 +360,10 @@ enum Failure {
 
 fn socket_path() -> String {
     std::env::var("MINI_SOCKET").unwrap_or_else(|_| {
-        format!("{}/Library/Application Support/Mini/control.sock", std::env::var("HOME").unwrap_or_default())
+        let dir = std::env::var("MINI_DATA_DIR").unwrap_or_else(|_| {
+            format!("{}/Library/Application Support/Mini", std::env::var("HOME").unwrap_or_default())
+        });
+        format!("{dir}/control.sock")
     })
 }
 

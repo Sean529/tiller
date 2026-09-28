@@ -41,6 +41,23 @@ void mini_browser_reload(int id);
 void mini_browser_stop(int id);
 void mini_browser_set_focus(int id, bool focus);
 
+// Runs JavaScript in the tab's main frame. Nothing comes back.
+void mini_browser_execute_js(int id, const char *code);
+
+// Sets cookies, replacing any with the same name, domain and path.
+// `cookies_json` is an array of objects:
+//   url        where the cookie is set from, e.g. "https://example.com/"
+//   name, value, path
+//   domain     ".example.com" for a domain cookie, "" for a host-only one
+//   secure, httponly, has_expires   booleans
+//   creation, last_access, expires  microseconds since 1601-01-01 UTC
+//   same_site  "unspecified", "none", "lax" or "strict"
+//   priority   "low", "medium" or "high"
+// `done` runs on the main thread once every cookie is set and the store is
+// written to disk, with how many were set and how many were rejected.
+void mini_cookies_import(const char *cookies_json, void *ctx,
+                         void (*done)(void *ctx, int imported, int failed));
+
 // Closes a tab. beforeunload runs first and may cancel. If it doesn't,
 // close_ready fires.
 void mini_browser_close(int id);

@@ -25,6 +25,8 @@ enum MainMenu {
         file.addItem(withTitle: "New Tab", action: #selector(BrowserWindowController.newTab(_:)), keyEquivalent: "t")
         file.addItem(withTitle: "Open Location…", action: #selector(BrowserWindowController.openLocation(_:)), keyEquivalent: "l")
         file.addItem(.separator())
+        file.addItem(withTitle: "Import from Chrome…", action: #selector(BrowserWindowController.importFromChrome(_:)), keyEquivalent: "")
+        file.addItem(.separator())
         file.addItem(withTitle: "Close Tab", action: #selector(BrowserWindowController.closeTab(_:)), keyEquivalent: "w")
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "W")
         add(file, titled: "File", to: main)
@@ -37,6 +39,8 @@ enum MainMenu {
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Fill Saved Password", action: #selector(BrowserWindowController.fillPassword(_:)), keyEquivalent: "")
         add(edit, titled: editTitle, to: main)
 
         let view = NSMenu(title: "View")
@@ -48,6 +52,9 @@ enum MainMenu {
         let history = NSMenu(title: "History")
         history.addItem(withTitle: "Back", action: #selector(BrowserWindowController.goBack(_:)), keyEquivalent: "[")
         history.addItem(withTitle: "Forward", action: #selector(BrowserWindowController.goForward(_:)), keyEquivalent: "]")
+        history.addItem(.separator())
+        history.addItem(withTitle: "Clear History…", action: #selector(BrowserWindowController.clearHistory(_:)), keyEquivalent: "")
+        history.delegate = historyMenu
         add(history, titled: "History", to: main)
 
         let window = NSMenu(title: "Window")
@@ -69,6 +76,8 @@ enum MainMenu {
         return main
     }
 
+    @MainActor private static let historyMenu = HistoryMenuDelegate()
+
     @MainActor
     @discardableResult
     private static func hidden(
@@ -86,5 +95,36 @@ enum MainMenu {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.submenu = submenu
         menu.addItem(item)
+    }
+}
+
+/// Fills the History menu with recently visited pages each time it opens,
+/// between Back/Forward and Clear History.
+@MainActor
+private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
+    private static let recentTag = 1001
+    private static let limit = 15
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items where item.tag == Self.recentTag {
+            menu.removeItem(item)
+        }
+        // After Back, Forward and the separator.
+        var index = 3
+        for page in HistoryStore.shared.recent(limit: Self.limit) {
+            var title = page.displayTitle
+            if title.count > 60 { title = title.prefix(59) + "…" }
+            let item = NSMenuItem(title: title, action: #selector(BrowserWindowController.openHistoryItem(_:)), keyEquivalent: "")
+            item.representedObject = page.url
+            item.toolTip = page.url
+            item.tag = Self.recentTag
+            menu.insertItem(item, at: index)
+            index += 1
+        }
+        if index > 3 {
+            let separator = NSMenuItem.separator()
+            separator.tag = Self.recentTag
+            menu.insertItem(separator, at: index)
+        }
     }
 }

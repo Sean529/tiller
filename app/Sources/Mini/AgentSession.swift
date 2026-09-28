@@ -323,7 +323,7 @@ enum AgentEnvironment {
         return extra.isEmpty ? basePrompt : basePrompt + "\n\n" + extra
     }
 
-    private static let supportDirectory = NSHomeDirectory() + "/Library/Application Support/Mini"
+    private static let supportDirectory = DataDirectory.path
 
     /// Browsers launched from Finder get a minimal PATH, so look in the usual
     /// install locations too.

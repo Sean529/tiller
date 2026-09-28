@@ -19,6 +19,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let backButton = NSButton()
     private let forwardButton = NSButton()
     private let newTabButton = NSButton()
+    private lazy var suggestions = AddressSuggestions(addressBar: addressBar)
+    /// The import sheet while it is up.
+    private var chromeImport: ChromeImportController?
 
     /// The tab strip's width, kept to what the toolbar has room for. A larger
     /// preference makes the toolbar move the whole strip into its overflow menu.
@@ -69,6 +72,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
         configureControls()
         tabStrip.delegate = self
+        NotificationCenter.default.addObserver(self, selector: #selector(passwordsChanged(_:)), name: .passwordsDidChange, object: nil)
         openTab(url: url, select: true)
     }
 
@@ -139,11 +143,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         backButton.isEnabled = tab.canGoBack
         forwardButton.isEnabled = tab.canGoForward
         window?.title = tab.displayTitle
+        addressBar.keyButton.isHidden = savedLogins(for: tab).isEmpty
+    }
+
+    /// Saves the page to history once it has loaded, and again whenever its
+    /// URL or title changes after that.
+    private func recordHistory(_ tab: Tab) {
+        guard !tab.isLoading, tab.url.hasPrefix("http://") || tab.url.hasPrefix("https://") else { return }
+        if tab.recordedVisit?.url != tab.url {
+            HistoryStore.shared.recordVisit(url: tab.url, title: tab.title)
+        } else if tab.recordedVisit?.title != tab.title {
+            HistoryStore.shared.setTitle(tab.title, for: tab.url)
+        } else {
+            return
+        }
+        tab.recordedVisit = (tab.url, tab.title)
     }
 
     // MARK: TabDelegate
 
     func tabDidChange(_ tab: Tab) {
+        recordHistory(tab)
         tabStrip.refresh(tab)
         if tab === selectedTab { showState(of: tab) }
     }
@@ -244,6 +264,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         addressBar.field.currentEditor()?.selectAll(nil)
     }
 
+    /// Loads a suggestion picked from the address bar's list.
+    private func openSuggestion(_ url: String) {
+        guard let tab = selectedTab else { return }
+        addressBar.field.stringValue = url
+        tab.load(url)
+        tab.focus()
+    }
+
     @objc private func addressEntered(_ sender: NSTextField) {
         let input = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty, let tab = selectedTab else { return }
@@ -261,6 +289,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case #selector(goBack(_:)): selectedTab?.canGoBack ?? false
         case #selector(goForward(_:)): selectedTab?.canGoForward ?? false
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)): tabs.count > 1
+        case #selector(fillPassword(_:)): selectedTab.map { !savedLogins(for: $0).isEmpty } ?? false
         default: true
         }
     }
@@ -276,6 +305,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func windowDidResize(_ notification: Notification) {
+        suggestions.hide()
         fitTabStrip()
     }
 
@@ -322,6 +352,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         addressBar.field.action = #selector(addressEntered(_:))
         addressBar.reloadButton.target = self
         addressBar.reloadButton.action = #selector(reloadOrStop(_:))
+        addressBar.keyButton.target = self
+        addressBar.keyButton.action = #selector(fillPassword(_:))
+        suggestions.onOpen = { [weak self] url in self?.openSuggestion(url) }
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -417,4 +450,90 @@ extension BrowserWindowController {
         guard let tab = selectedTab else { return "[Mini: no tab is open]" }
         return "[Mini: selected tab \(tab.browserID), \"\(tab.displayTitle)\", \(tab.isBlank ? "about:blank" : tab.url)]"
     }
+}
+
+// MARK: History, passwords and import
+
+extension BrowserWindowController {
+    /// A page from the History menu. The URL is the item's represented object.
+    @objc func openHistoryItem(_ sender: Any?) {
+        guard let url = (sender as? NSMenuItem)?.representedObject as? String else { return }
+        guard let tab = selectedTab else { return }
+        tab.load(url)
+        tab.focus()
+        tabDidChange(tab)
+    }
+
+    @objc func clearHistory(_ sender: Any?) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Clear all history?"
+        alert.informativeText = "Removes every page from Mini's history, including pages imported from Chrome. Cookies and saved passwords stay."
+        alert.addButton(withTitle: "Clear History")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn { HistoryStore.shared.clear() }
+        }
+    }
+
+    @objc func importFromChrome(_ sender: Any?) {
+        guard let window, chromeImport == nil else { return }
+        let controller = ChromeImportController()
+        chromeImport = controller
+        controller.begin(on: window) { [weak self] in self?.chromeImport = nil }
+    }
+
+    /// Fills the page's saved login. With several, asks which one from a menu
+    /// under the key button.
+    @objc func fillPassword(_ sender: Any?) {
+        guard let tab = selectedTab else { return }
+        let logins = savedLogins(for: tab)
+        if logins.count == 1 { return fill(logins[0], in: tab) }
+        guard !logins.isEmpty else { return }
+        let menu = NSMenu()
+        for login in logins {
+            let item = MenuActionItem(title: login.username.isEmpty ? "(no username)" : login.username) { [weak self] in
+                self?.fill(login, in: tab)
+            }
+            menu.addItem(item)
+        }
+        let button = addressBar.keyButton
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.isFlipped ? button.bounds.maxY + 4 : -4), in: button)
+    }
+
+    private func savedLogins(for tab: Tab) -> [PasswordStore.Entry] {
+        SavedLogin.origin(of: tab.url).map(PasswordStore.shared.logins(for:)) ?? []
+    }
+
+    private func fill(_ login: PasswordStore.Entry, in tab: Tab) {
+        Task {
+            do {
+                let password = try await PasswordStore.shared.password(for: login)
+                guard tabs.contains(where: { $0 === tab }) else { return }
+                tab.executeJavaScript(LoginFill.script(origin: login.origin, username: login.username, password: password))
+            } catch {
+                guard let window else { return }
+                NSAlert(error: error).beginSheetModal(for: window, completionHandler: nil)
+            }
+        }
+    }
+
+    @objc private func passwordsChanged(_ notification: Notification) {
+        if let selectedTab { showState(of: selectedTab) }
+    }
+}
+
+/// A menu item that runs a closure.
+final class MenuActionItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run(_:)), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError() }
+
+    @objc private func run(_ sender: Any?) { handler() }
 }
