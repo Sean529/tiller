@@ -38,6 +38,8 @@ enum MainMenu {
 
         let view = NSMenu(title: "View")
         view.addItem(withTitle: "Reload Page", action: #selector(BrowserWindowController.reloadPage(_:)), keyEquivalent: "r")
+        view.addItem(.separator())
+        view.addItem(withTitle: "Show Agent", action: #selector(BrowserWindowController.toggleAgentPanel(_:)), keyEquivalent: "A")
         add(view, titled: "View", to: main)
 
         let history = NSMenu(title: "History")

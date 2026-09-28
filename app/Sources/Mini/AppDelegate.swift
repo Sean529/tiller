@@ -18,6 +18,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Mini: control socket unavailable, agent tools will not work")
         }
         NSApp.activate()
+        #if DEBUG
+        if let prompt = UserDefaults.standard.string(forKey: "agentPrompt") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak controller] in
+                MainActor.assumeIsolated { controller?.sendAgentPrompt(prompt) }
+            }
+        }
+        #endif
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {

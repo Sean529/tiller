@@ -82,3 +82,28 @@ open build/Mini.app
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_page","arguments":{}}}' \
   | build/Mini.app/Contents/MacOS/mini_mcp
 ```
+
+## Agent panel
+
+Click the sparkles button at the right of the toolbar, or press Cmd+Shift+A, to open the agent panel. Pick Qoder CLI (the default) or Claude Code from the menu at its top. Enter sends, Option+Enter adds a line, the button next to the field stops a running turn, and the pencil button starts a new chat. Switching agents also starts a new chat.
+
+Mini runs the CLI in print mode with stream-json on stdin and stdout, and keeps the process alive between messages so the conversation carries over. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code, and one line per tool call that turns into ✓ or ✗ when it finishes.
+
+The agent gets Mini's browser tools and nothing else:
+
+| | Qoder CLI | Claude Code |
+|---|---|---|
+| Built-in tools off | `--tools ""` and `--disallowed-tools ListAgents,SendMessage` | `--tools ""` |
+| Only Mini's MCP server | `--mcp-config <file> --strict-mcp-config` | same |
+| Mini's tools allowed without asking | `--allowed-tools mcp__mini --permission-mode dont_ask` | `--allowedTools mcp__mini --permission-mode dontAsk` |
+
+The MCP config is written to `~/Library/Application Support/Mini/agent-mcp.json` and points at the `mini_mcp` inside the running app. The agent runs in the empty directory `~/Library/Application Support/Mini/agent`, with `--no-session-persistence`. Your user settings still load, so your hooks, model choice and user-level instructions (such as `~/.claude/CLAUDE.md`) apply.
+
+Mini looks for the CLI in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.bun/bin`, `~/.volta/bin`, `~/.npm-global/bin`, then asks a login shell. Shell functions and aliases are skipped, so wrappers defined in `.zshrc` don't run. To use another binary:
+
+```sh
+defaults write dev.sorrycc.mini agentPath.qodercli /path/to/qodercli
+defaults write dev.sorrycc.mini agentPath.claude /path/to/claude
+```
+
+Debug builds take two launch arguments for testing without typing: `-agentPrompt "..."` opens the panel and sends that message, and `-agentStopAfter <seconds>` presses Stop after that many seconds.

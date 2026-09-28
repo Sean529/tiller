@@ -1,14 +1,19 @@
 import AppKit
 
-/// One window holding a row of tabs. The toolbar has back, forward, the tabs
-/// and a new-tab button. The address bar sits in a row under it.
+/// One window holding a row of tabs. The toolbar has back, forward, the tabs,
+/// a new-tab button and the agent panel toggle. The address bar sits in a row
+/// under it. The agent panel sits to the right of the page.
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
-    NSMenuItemValidation, TabDelegate, TabStripDelegate
+    NSMenuItemValidation, TabDelegate, TabStripDelegate, AgentPanelDelegate
 {
     var onClose: (() -> Void)?
 
+    private let splitView = NSSplitView()
+    /// Holds every tab's view. Only the selected one is visible.
     private let contentView = NSView()
+    private let agentPanel = AgentPanelView(frame: NSRect(x: 0, y: 0, width: 360, height: 600))
+    private let agentButton = NSButton()
     private let tabStrip = TabStripView()
     private let addressBar = AddressBarView(frame: NSRect(x: 0, y: 0, width: 800, height: 40))
     private let backButton = NSButton()
@@ -36,7 +41,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         super.init(window: window)
 
         window.delegate = self
-        window.contentView = contentView
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.addArrangedSubview(contentView)
+        splitView.addArrangedSubview(agentPanel)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
+        agentPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
+        contentView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
+        agentPanel.delegate = self
+        agentPanel.isHidden = !UserDefaults.standard.bool(forKey: Self.agentVisibleKey)
+        splitView.autosaveName = "MiniAgentSplit"
+        window.contentView = splitView
         window.toolbarStyle = .unified
         let toolbar = NSToolbar(identifier: "MiniToolbar")
         toolbar.delegate = self
@@ -65,6 +81,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private func openTab(url: String, select: Bool, after: Tab? = nil) -> Tab {
         let tab = Tab()
         tab.delegate = self
+        let panelHadFocus = agentPanel.hasKeyboardFocus
         let index = after.flatMap { after in tabs.firstIndex { $0 === after } }.map { $0 + 1 } ?? tabs.endIndex
         tabs.insert(tab, at: index)
 
@@ -76,6 +93,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tab.start(url: url)
 
         if select { self.select(tab) } else { tabStrip.update(tabs: tabs, selected: selectedTab) }
+        // An agent opening a tab shouldn't take the keyboard from its panel.
+        if panelHadFocus { window?.makeFirstResponder(agentPanel.input) }
         return tab
     }
 
@@ -192,6 +211,34 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     @objc func reloadPage(_ sender: Any?) { selectedTab?.reload() }
 
+    @objc func toggleAgentPanel(_ sender: Any?) {
+        agentPanel.isHidden.toggle()
+        UserDefaults.standard.set(!agentPanel.isHidden, forKey: Self.agentVisibleKey)
+        splitView.adjustSubviews()
+        agentButton.state = agentPanel.isHidden ? .off : .on
+        if agentPanel.isHidden {
+            selectedTab?.focus()
+        } else {
+            window?.makeFirstResponder(agentPanel.input)
+        }
+    }
+
+    private static let agentVisibleKey = "agentPanelVisible"
+
+    #if DEBUG
+    /// For testing without typing: `open Mini.app --args -agentPrompt "..."`.
+    func sendAgentPrompt(_ text: String) {
+        if agentPanel.isHidden { toggleAgentPanel(nil) }
+        agentPanel.send(text)
+        let stopAfter = UserDefaults.standard.double(forKey: "agentStopAfter")
+        if stopAfter > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter) { [weak self] in
+                MainActor.assumeIsolated { self?.agentPanel.stopForTesting() }
+            }
+        }
+    }
+    #endif
+
     @objc func openLocation(_ sender: Any?) {
         window?.makeFirstResponder(addressBar.field)
         addressBar.field.currentEditor()?.selectAll(nil)
@@ -207,7 +254,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        switch item.action {
+        if item.action == #selector(toggleAgentPanel(_:)) {
+            item.title = agentPanel.isHidden ? "Show Agent" : "Hide Agent"
+        }
+        return switch item.action {
         case #selector(goBack(_:)): selectedTab?.canGoBack ?? false
         case #selector(goForward(_:)): selectedTab?.canGoForward ?? false
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)): tabs.count > 1
@@ -229,13 +279,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         fitTabStrip()
     }
 
-    /// Room left after the window buttons, back, forward and new tab.
+    /// Room left after the window buttons, back, forward, new tab and the agent button.
     private func fitTabStrip() {
         guard let width = window?.frame.width else { return }
-        tabStripWidth.constant = max(200, width - 280)
+        tabStripWidth.constant = max(200, width - 330)
     }
 
     func windowWillClose(_ notification: Notification) {
+        agentPanel.shutDown()
         onClose?()
     }
 
@@ -246,6 +297,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         static let forward = NSToolbarItem.Identifier("forward")
         static let tabs = NSToolbarItem.Identifier("tabs")
         static let newTab = NSToolbarItem.Identifier("newTab")
+        static let agent = NSToolbarItem.Identifier("agent")
     }
 
     private func configureControls() {
@@ -253,6 +305,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             (backButton, "chevron.left", "Back", #selector(goBack(_:))),
             (forwardButton, "chevron.right", "Forward", #selector(goForward(_:))),
             (newTabButton, "plus", "New Tab", #selector(newTab(_:))),
+            (agentButton, "sparkles", "Agent", #selector(toggleAgentPanel(_:))),
         ] {
             button.image = NSImage(systemSymbolName: name, accessibilityDescription: tip)
             button.toolTip = tip
@@ -262,6 +315,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
         backButton.isEnabled = false
         forwardButton.isEnabled = false
+        agentButton.setButtonType(.pushOnPushOff)
+        agentButton.state = agentPanel.isHidden ? .off : .on
 
         addressBar.field.target = self
         addressBar.field.action = #selector(addressEntered(_:))
@@ -270,7 +325,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Item.back, Item.forward, Item.tabs, Item.newTab]
+        [Item.back, Item.forward, Item.tabs, Item.newTab, .flexibleSpace, Item.agent]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -287,6 +342,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case Item.back: item.view = backButton; item.label = "Back"
         case Item.forward: item.view = forwardButton; item.label = "Forward"
         case Item.newTab: item.view = newTabButton; item.label = "New Tab"
+        case Item.agent: item.view = agentButton; item.label = "Agent"
         case Item.tabs:
             item.view = tabStrip
             item.label = "Tabs"
@@ -313,7 +369,11 @@ extension BrowserWindowController {
             return info(openTab(url: url, select: params["select"] as? Bool ?? true))
         case "tabs.select":
             let tab = try tab(for: params)
-            if tab !== selectedTab { select(tab) }
+            if tab !== selectedTab {
+                let panelHadFocus = agentPanel.hasKeyboardFocus
+                select(tab)
+                if panelHadFocus { window?.makeFirstResponder(agentPanel.input) }
+            }
             return info(tab)
         case "tabs.navigate":
             let tab = try tab(for: params)
@@ -347,5 +407,14 @@ extension BrowserWindowController {
             "loading": tab.isLoading,
             "selected": tab === selectedTab,
         ]
+    }
+}
+
+// MARK: Agent panel
+
+extension BrowserWindowController {
+    func agentPanelContext(_ panel: AgentPanelView) -> String {
+        guard let tab = selectedTab else { return "[Mini: no tab is open]" }
+        return "[Mini: selected tab \(tab.browserID), \"\(tab.displayTitle)\", \(tab.isBlank ? "about:blank" : tab.url)]"
     }
 }
