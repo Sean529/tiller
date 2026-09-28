@@ -34,7 +34,7 @@ swift build --package-path "$ROOT/app" -c "$CONFIG" -Xlinker -L"$RUST_OUT"
 
 echo "==> assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 
 # write_plist <contents dir> <executable> <identifier> <is_helper>
 write_plist() {
@@ -71,6 +71,9 @@ PLIST
 
 cp "$SWIFT_OUT/Mini" "$APP/Contents/MacOS/Mini"
 cp "$RUST_OUT/mini_mcp" "$APP/Contents/MacOS/mini_mcp"
+# Not in MacOS/, where `mini` and `Mini` would be the same file on a
+# case-insensitive disk.
+cp "$RUST_OUT/mini" "$APP/Contents/Helpers/mini"
 cp "$ROOT/app/Resources/Mini.icns" "$APP/Contents/Resources/Mini.icns"
 write_plist "$APP/Contents" "Mini" "$BUNDLE_ID" 0
 
@@ -92,6 +95,7 @@ for suffix in "${HELPERS[@]}"; do
     codesign --force --sign - "$APP/Contents/Frameworks/Mini $suffix.app"
 done
 codesign --force --sign - "$APP/Contents/MacOS/mini_mcp"
+codesign --force --sign - "$APP/Contents/Helpers/mini"
 codesign --force --sign - "$APP"
 
 echo "==> verifying signature"

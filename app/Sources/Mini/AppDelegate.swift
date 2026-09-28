@@ -12,6 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.showWindow(sender)
     }
 
+    @objc func installCommandLineTool(_ sender: Any?) {
+        Task { await CommandLineTool.installAndReport() }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
 

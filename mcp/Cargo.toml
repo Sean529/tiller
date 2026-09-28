@@ -4,9 +4,16 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "mini_mcp"
 path = "src/main.rs"
+
+[[bin]]
+name = "mini"
+path = "src/bin/mini.rs"
 
 [dependencies]
 serde_json = "1"

@@ -8,7 +8,7 @@ A small macOS browser: Chromium (via the Rust `cef` crate) inside a native Swift
 |---|---|
 | `core/` | Rust static library linked into the app. Loads CEF, owns the browsers and sets imported cookies. C header in `app/Sources/CMiniCore/mini_core.h`. |
 | `helper/` | Rust binary for CEF subprocesses, copied into the five `Mini Helper*.app` bundles. |
-| `mcp/` | Rust stdio MCP server that the agent CLI launches. |
+| `mcp/` | Rust crate with the browser tools: the stdio MCP server `mini_mcp` that the agent CLI launches, and the `mini` command-line tool. |
 | `app/` | SwiftPM package with the AppKit app. Menu is built in code, so no Xcode or `ibtool` needed. |
 | `scripts/bundle.sh` | Builds everything and assembles an ad-hoc signed `build/Mini.app`. |
 
@@ -140,6 +140,39 @@ open build/Mini.app
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_page","arguments":{}}}' \
   | build/Mini.app/Contents/MacOS/mini_mcp
 ```
+
+## Command-line tool
+
+`mini` runs the same browser tools from a shell, so scripts and agents outside Mini, such as Claude Code with its Bash tool, can drive the browser. It ships at `build/Mini.app/Contents/Helpers/mini`, not next to `Mini` in `Contents/MacOS`, where the two names would be one file on a case-insensitive disk. Mini > Install Command Line Tool… links it as `~/.local/bin/mini` and says if that folder isn't on your PATH. Install again after moving the app.
+
+```sh
+mini tabs                        # * marks the selected tab
+mini new example.com             # opens a tab and waits for the load
+mini read                        # text, then [ref] lines for links, buttons and fields
+mini click 3
+mini type 5 "hello" --submit
+mini type --selector '#q' hi     # CSS selector instead of a ref
+mini screenshot -o page.jpg      # prints the path; a temp file without -o
+mini eval 'document.title'
+mini close 2
+```
+
+| Command | Tool |
+|---|---|
+| `tabs` | `list_tabs` |
+| `new [url]` | `new_tab` |
+| `select <tab>` | `select_tab` |
+| `close <tab>` | `close_tab` |
+| `go <url>` | `navigate` |
+| `read [--max-chars N]` | `read_page` |
+| `click <ref>` | `click` |
+| `type [ref] <text> [--append] [--submit]` | `type`, into the focused element when no ref or selector is given |
+| `screenshot [-o file]` | `screenshot` |
+| `eval <expression>` | `eval_js` |
+
+`--tab <id>` acts on another tab than the selected one, and `--json` prints the raw result instead of text. Refs are stored in the page, so a `read` in one call and a `click` in the next agree. Errors go to stderr with exit code 1, or 2 for bad arguments. Like `mini_mcp`, it needs Mini running and honors `MINI_SOCKET`.
+
+The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and `mcp/src/bin/mini.rs` as the CLI.
 
 ## Agent panel
 

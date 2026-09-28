@@ -14,6 +14,7 @@ enum MainMenu {
         appMenu.addItem(.separator())
         // Reaches the AppDelegate at the end of the responder chain.
         appMenu.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "Install Command Line Tool…", action: #selector(AppDelegate.installCommandLineTool(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Mini", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit Mini", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

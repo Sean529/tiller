@@ -354,7 +354,7 @@ enum AgentEnvironment {
 
     /// `command -v` in a login shell. zsh functions and aliases don't count,
     /// only files on PATH.
-    nonisolated private static func loginShellLookup(_ name: String) -> String? {
+    nonisolated static func loginShellLookup(_ name: String) -> String? {
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
         shell.arguments = ["-lc", "whence -p \(name)"]
