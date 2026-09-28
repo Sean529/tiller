@@ -29,4 +29,7 @@ cargo run -p export-cef-dir -- --force $HOME/.local/share/cef
 ```sh
 scripts/bundle.sh            # release; pass `debug` for a debug build
 open build/Mini.app
+open build/Mini.app --args -url https://example.com   # start on another page
 ```
+
+Mini passes `--use-mock-keychain` to Chromium, so it never asks for the login keychain password. The cost is that cookies are encrypted with a fixed key instead of one kept in the keychain.

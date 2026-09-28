@@ -13,6 +13,12 @@ enum MainMenu {
         appMenu.addItem(withTitle: "Quit Mini", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         add(appMenu, titled: "Mini", to: main)
 
+        // Browser actions have no target, so they go to the key window's
+        // BrowserWindowController through the responder chain.
+        let file = NSMenu(title: "File")
+        file.addItem(withTitle: "Open Location…", action: #selector(BrowserWindowController.openLocation(_:)), keyEquivalent: "l")
+        add(file, titled: "File", to: main)
+
         let edit = NSMenu(title: "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
         edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
@@ -22,6 +28,15 @@ enum MainMenu {
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         add(edit, titled: "Edit", to: main)
+
+        let view = NSMenu(title: "View")
+        view.addItem(withTitle: "Reload Page", action: #selector(BrowserWindowController.reloadPage(_:)), keyEquivalent: "r")
+        add(view, titled: "View", to: main)
+
+        let history = NSMenu(title: "History")
+        history.addItem(withTitle: "Back", action: #selector(BrowserWindowController.goBack(_:)), keyEquivalent: "[")
+        history.addItem(withTitle: "Forward", action: #selector(BrowserWindowController.goForward(_:)), keyEquivalent: "]")
+        add(history, titled: "History", to: main)
 
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
