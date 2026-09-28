@@ -40,6 +40,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 write_plist() {
     local ui_element=""
     [ "$4" = "1" ] && ui_element="<key>LSUIElement</key><string>1</string>"
+    local icon=""
+    [ "$4" = "0" ] && icon="<key>CFBundleIconFile</key><string>Mini</string>"
     cat > "$1/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -61,6 +63,7 @@ write_plist() {
     <key>NSCameraUsageDescription</key><string>A website wants to use the camera.</string>
     <key>NSMicrophoneUsageDescription</key><string>A website wants to use the microphone.</string>
     $ui_element
+    $icon
 </dict>
 </plist>
 PLIST
@@ -68,6 +71,7 @@ PLIST
 
 cp "$SWIFT_OUT/Mini" "$APP/Contents/MacOS/Mini"
 cp "$RUST_OUT/mini_mcp" "$APP/Contents/MacOS/mini_mcp"
+cp "$ROOT/app/Resources/Mini.icns" "$APP/Contents/Resources/Mini.icns"
 write_plist "$APP/Contents" "Mini" "$BUNDLE_ID" 0
 
 # ditto keeps the framework's symlinks and permissions intact.
