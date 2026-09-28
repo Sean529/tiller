@@ -32,7 +32,10 @@ open build/Mini.app
 open build/Mini.app --args -url https://example.com   # start on another page
 ```
 
-Mini passes `--use-mock-keychain` to Chromium, so it never asks for the login keychain password. The cost is that cookies are encrypted with a fixed key instead of one kept in the keychain.
+Mini passes two switches to Chromium:
+
+- `--use-mock-keychain`, so it never asks for the login keychain password. The cost is that cookies are encrypted with a fixed key instead of one kept in the keychain.
+- `--disable-backgrounding-occluded-windows`, so a window covered by other apps still counts as visible. Otherwise Chromium drops the agent's mouse and key input while you work elsewhere. The cost is that a covered Mini window keeps drawing.
 
 ## Tabs
 
@@ -48,3 +51,34 @@ Mini passes `--use-mock-keychain` to Chromium, so it never asks for the login ke
 Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
 
 Popups and `target=_blank` links open as new tabs. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.
+
+## Browser tools (MCP)
+
+`build/Mini.app/Contents/MacOS/mini_mcp` is a stdio MCP server. It talks to the running app over a Unix socket at `~/Library/Application Support/Mini/control.sock` (only your user can open it). Set `MINI_SOCKET` to use another path.
+
+| Tool | What it does |
+|---|---|
+| `list_tabs` | Id, URL, title, loading state and selection of every tab |
+| `new_tab` | Opens a URL or search in a new tab and waits for it to load |
+| `select_tab` | Brings a tab to the front |
+| `close_tab` | Closes a tab (the page may still ask to confirm) |
+| `navigate` | Loads a URL or search and waits for the load |
+| `read_page` | Page text plus numbered links, buttons and fields |
+| `click` | Real mouse click on an element's center by `ref` or CSS `selector` |
+| `type` | Types into a field, replacing its text unless `append` is set, optionally presses Enter |
+| `screenshot` | JPEG of the visible part of the tab |
+| `eval_js` | Runs an expression in the page and returns the value as JSON |
+
+Tools act on the selected tab unless given `tab_id`. `click`, `type` and `screenshot` select their tab first, because background tabs don't draw and Chromium drops their input.
+
+`read_page` marks each element it lists with a `data-mini-ref` attribute, which pages can see. Refs are renumbered on every call.
+
+How it's wired: tab operations (`tabs.*`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
+
+To try it without an agent:
+
+```sh
+open build/Mini.app
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_page","arguments":{}}}' \
+  | build/Mini.app/Contents/MacOS/mini_mcp
+```

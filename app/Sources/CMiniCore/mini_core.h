@@ -47,3 +47,13 @@ void mini_browser_close(int id);
 
 // Stops callbacks for this browser. Call before freeing the callback context.
 void mini_browser_detach(int id);
+
+// Starts the control socket mini_mcp connects to. `handler` runs on the main
+// thread for every request except DevTools calls, which the core answers
+// itself. Each request must be answered with mini_ipc_reply using its token.
+// Returns false if the socket can't be created.
+bool mini_ipc_start(const char *socket_path, void *ctx,
+                    void (*handler)(void *ctx, const char *request_json, uint64_t token));
+
+// Answers a request. `reply_json` is {"result": ...} or {"error": "..."}.
+void mini_ipc_reply(uint64_t token, const char *reply_json);

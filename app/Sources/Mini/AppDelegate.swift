@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: BrowserWindowController?
+    private let controlServer = ControlServer()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
@@ -12,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onClose = { [weak self] in self?.windowController = nil }
         controller.showWindow(nil)
         windowController = controller
+        controlServer.browser = controller
+        if !controlServer.start() {
+            NSLog("Mini: control socket unavailable, agent tools will not work")
+        }
         NSApp.activate()
     }
 

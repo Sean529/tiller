@@ -3,6 +3,7 @@
 
 mod app_mac;
 mod browser;
+mod ipc;
 
 use cef::*;
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -142,6 +143,40 @@ pub extern "C" fn mini_browser_close(id: c_int) {
 #[unsafe(no_mangle)]
 pub extern "C" fn mini_browser_detach(id: c_int) {
     browser::detach(id);
+}
+
+/// Starts the control socket at `socket_path` that `mini_mcp` connects to.
+/// `handler` gets every request except `cdp`, on the main thread, and must
+/// answer each one with `mini_ipc_reply`. Returns false if the socket can't be
+/// created.
+///
+/// # Safety
+/// `socket_path` must be a NUL-terminated UTF-8 string. `ctx` must stay valid
+/// for the life of the process.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mini_ipc_start(socket_path: *const c_char, ctx: *mut c_void, handler: ipc::Handler) -> bool {
+    let path = unsafe { cstr(socket_path) };
+    match ipc::start(std::path::Path::new(&path), ctx, handler) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("mini: control socket {path}: {e}");
+            false
+        }
+    }
+}
+
+/// Answers the request `token`. `reply_json` is `{"result": ...}` or
+/// `{"error": "..."}`.
+///
+/// # Safety
+/// `reply_json` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mini_ipc_reply(token: u64, reply_json: *const c_char) {
+    let reply = unsafe { cstr(reply_json) };
+    match serde_json::from_str(&reply) {
+        Ok(value) => ipc::reply(token, value),
+        Err(e) => ipc::reply_error(token, format!("bad reply from app: {e}")),
+    }
 }
 
 unsafe fn cstr(p: *const c_char) -> String {

@@ -298,3 +298,54 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         return item
     }
 }
+
+// MARK: Control socket
+
+extension BrowserWindowController {
+    /// Tab operations for mini_mcp. Tab ids are CEF browser ids, the same ids
+    /// the core's DevTools calls take. A missing `tab_id` means the selected tab.
+    func control(_ method: String, params: [String: Any]) throws -> Any {
+        switch method {
+        case "tabs.list":
+            return ["tabs": tabs.map(info)]
+        case "tabs.new":
+            let url = (params["url"] as? String).map(AddressInput.url(for:)) ?? "about:blank"
+            return info(openTab(url: url, select: params["select"] as? Bool ?? true))
+        case "tabs.select":
+            let tab = try tab(for: params)
+            if tab !== selectedTab { select(tab) }
+            return info(tab)
+        case "tabs.navigate":
+            let tab = try tab(for: params)
+            guard let input = params["url"] as? String, !input.isEmpty else { throw ControlError("navigate needs a url") }
+            tab.load(AddressInput.url(for: input))
+            tabDidChange(tab)
+            return info(tab)
+        case "tabs.close":
+            let tab = try tab(for: params)
+            tab.close()
+            return ["closing": Int(tab.browserID)]
+        default:
+            throw ControlError("unknown method \(method)")
+        }
+    }
+
+    private func tab(for params: [String: Any]) throws -> Tab {
+        guard let id = params["tab_id"] as? Int else {
+            guard let selectedTab else { throw ControlError("no tab is open") }
+            return selectedTab
+        }
+        guard let tab = tabs.first(where: { Int($0.browserID) == id }) else { throw ControlError("no tab with id \(id)") }
+        return tab
+    }
+
+    private func info(_ tab: Tab) -> [String: Any] {
+        [
+            "id": Int(tab.browserID),
+            "url": tab.url,
+            "title": tab.displayTitle,
+            "loading": tab.isLoading,
+            "selected": tab === selectedTab,
+        ]
+    }
+}

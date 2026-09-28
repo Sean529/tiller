@@ -1,9 +1,11 @@
 //! Browser registry and CEF handlers. Everything here runs on the CEF UI
 //! thread, which on macOS is the main thread.
 
+use crate::ipc;
 use cef::*;
+use serde_json::{Value, json};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     ffi::{CString, c_char, c_void},
 };
@@ -25,10 +27,20 @@ pub struct Callbacks {
 struct Entry {
     browser: Browser,
     callbacks: Option<Callbacks>,
+    /// Keeps the DevTools observer attached. Added on the first DevTools call.
+    devtools: Option<Registration>,
+}
+
+/// A DevTools call waiting for its result.
+struct PendingCall {
+    browser_id: i32,
+    token: u64,
 }
 
 thread_local! {
     static BROWSERS: RefCell<HashMap<i32, Entry>> = RefCell::new(HashMap::new());
+    static DEVTOOLS_CALLS: RefCell<HashMap<i32, PendingCall>> = RefCell::new(HashMap::new());
+    static NEXT_MESSAGE_ID: Cell<i32> = const { Cell::new(1) };
 }
 
 pub fn get(id: i32) -> Option<Browser> {
@@ -67,7 +79,7 @@ pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, call
         return -1;
     };
     let id = browser.identifier();
-    BROWSERS.with_borrow_mut(|map| map.insert(id, Entry { browser, callbacks: Some(callbacks) }));
+    BROWSERS.with_borrow_mut(|map| map.insert(id, Entry { browser, callbacks: Some(callbacks), devtools: None }));
     id
 }
 
@@ -100,6 +112,65 @@ pub fn close_all() {
     for browser in browsers {
         if let Some(host) = browser.host() {
             host.close_browser(0);
+        }
+    }
+}
+
+/// Sends one DevTools protocol command to a tab and replies to the control
+/// socket request `token` with `{"result": ...}` or `{"error": ...}`.
+pub fn devtools_call(id: i32, method: &str, params: Value, token: u64) {
+    let Some(host) = get(id).and_then(|b| b.host()) else {
+        return ipc::reply_error(token, format!("no tab with id {id}"));
+    };
+    let attached = BROWSERS.with_borrow_mut(|map| {
+        let Some(entry) = map.get_mut(&id) else { return false };
+        if entry.devtools.is_none() {
+            let mut observer = MiniDevToolsObserver::new();
+            entry.devtools = host.add_dev_tools_message_observer(Some(&mut observer));
+        }
+        entry.devtools.is_some()
+    });
+    if !attached {
+        return ipc::reply_error(token, "could not attach to the tab's DevTools agent");
+    }
+
+    let message_id = NEXT_MESSAGE_ID.get();
+    NEXT_MESSAGE_ID.set(message_id.wrapping_add(1).max(1));
+    DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.insert(message_id, PendingCall { browser_id: id, token }));
+    let message = json!({ "id": message_id, "method": method, "params": params }).to_string();
+    if host.send_dev_tools_message(Some(message.as_bytes())) == 0 {
+        DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&message_id));
+        ipc::reply_error(token, "DevTools message was rejected");
+    }
+}
+
+/// Fails every DevTools call still waiting on a browser that is going away.
+fn fail_devtools_calls(browser_id: i32) {
+    let tokens: Vec<u64> = DEVTOOLS_CALLS.with_borrow_mut(|calls| {
+        let ids: Vec<i32> = calls.iter().filter(|(_, c)| c.browser_id == browser_id).map(|(id, _)| *id).collect();
+        ids.iter().filter_map(|id| calls.remove(id)).map(|c| c.token).collect()
+    });
+    for token in tokens {
+        ipc::reply_error(token, "the tab closed");
+    }
+}
+
+wrap_dev_tools_message_observer! {
+    struct MiniDevToolsObserver;
+
+    impl DevToolsMessageObserver {
+        /// Answers the matching call. Events and replies to anyone else's calls
+        /// are left for CEF's default handling.
+        fn on_dev_tools_message(&self, _browser: Option<&mut Browser>, message: Option<&[u8]>) -> i32 {
+            let Some(message) = message.and_then(|m| serde_json::from_slice::<Value>(m).ok()) else { return 0 };
+            let Some(id) = message["id"].as_i64() else { return 0 };
+            let Some(call) = DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&(id as i32))) else { return 0 };
+            let reply = match message.get("error") {
+                Some(error) => json!({ "error": error["message"].as_str().unwrap_or("DevTools error") }),
+                None => json!({ "result": message.get("result").cloned().unwrap_or_else(|| json!({})) }),
+            };
+            ipc::reply(call.token, reply);
+            1
         }
     }
 }
@@ -287,6 +358,7 @@ wrap_life_span_handler! {
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             let Some(browser) = browser else { return };
             let id = browser.identifier();
+            fail_devtools_calls(id);
             let empty = BROWSERS.with_borrow_mut(|map| {
                 map.remove(&id);
                 map.is_empty()
@@ -309,6 +381,11 @@ wrap_app! {
                 // Keeps Chromium from asking for the login keychain password to
                 // encrypt cookies. Cookies are stored with a fixed key instead.
                 cmd.append_switch(Some(&CefString::from("use-mock-keychain")));
+                // A window covered by other windows would otherwise count as
+                // hidden, and Chromium drops input to hidden pages, so the
+                // agent's clicks and keys would vanish while the user works
+                // in another app. The cost is that covered windows keep drawing.
+                cmd.append_switch(Some(&CefString::from("disable-backgrounding-occluded-windows")));
             }
         }
     }
