@@ -10,7 +10,8 @@ A small macOS browser built on Chromium, with a native Swift/AppKit interface an
 
 - **Chromium engine, native shell.** Pages render with Chromium through CEF; the window, tabs and menus are AppKit.
 - **Tabs and session restore.** Open tabs and recently closed tabs survive restarts and crashes.
-- **Import from Chrome.** Cookies, saved passwords, history, search engine and homepage.
+- **Import from Chrome.** Cookies, saved passwords, history, extensions, search engine and homepage.
+- **Chrome extensions.** Add unpacked folders or CRX files, or bring Chrome's over. Content scripts, background workers and popups run; Chrome's tab and window APIs don't see Tiller's tabs.
 - **Profiles.** Each profile has its own site data, history, passwords, settings and chats, and runs as its own app instance.
 - **Agent panel.** Chat with Qoder CLI, Claude Code or Codex in a side panel that controls the browser.
 - **Browser tools.** A stdio MCP server and the `tiller` command-line tool expose the same tools to external agents and scripts.

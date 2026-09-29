@@ -4,7 +4,7 @@ Tiller's settings, the switches it passes to Chromium, and where it stores data.
 
 ## Settings
 
-Tiller > Settings… (Cmd+,) has four panes: General, Passwords, Agent and Profiles (see [Profiles](browser.md#profiles)). Changes are saved as you make them, and apply to the current profile only.
+Tiller > Settings… (Cmd+,) has five panes: General, Passwords, Extensions (see [Extensions](browser.md#extensions)), Agent and Profiles (see [Profiles](browser.md#profiles)). Changes are saved as you make them, and apply to the current profile only.
 
 | Pane | Setting | Default | Takes effect |
 |---|---|---|---|
@@ -24,10 +24,11 @@ Settings live in the profile's own user defaults, `dev.sorrycc.tiller.profile.<i
 
 ## Chromium switches
 
-Tiller passes two switches to Chromium:
+Tiller passes these switches to Chromium:
 
 - `--use-mock-keychain`, so it never asks for the login keychain password. The cost is that cookies are encrypted with a fixed key instead of one kept in the keychain.
 - `--disable-backgrounding-occluded-windows`, so a window covered by other apps still counts as visible. Otherwise Chromium drops the agent's mouse and key input while you work elsewhere. The cost is that a covered Tiller window keeps drawing.
+- With extensions on, `--load-extension=<folders>` for the profile's enabled [extensions](browser.md#extensions), and `--noerrdialogs`. Without it, an extension Chromium can't load asks for an error dialog, which hangs Tiller at launch. Chromium writes the error to `chrome_debug.log` in the profile's folder instead, and Settings > Extensions reads it from there. A folder whose path has a comma can't be passed, since Chromium splits the list on commas.
 
 ## Data folder
 
@@ -36,7 +37,9 @@ Tiller keeps its data in `~/Library/Application Support/Tiller`. Set `TILLER_DAT
 | Path | What it is |
 |---|---|
 | `profiles.json` | Every profile's id, name and creation date, and the id of the one used last |
-| `Profiles/<id>/` | One profile: Chromium's data, `history.sqlite`, `passwords.json`, `session.json`, `agent-chats/`, the agent's working folder and the control socket |
+| `Profiles/<id>/` | One profile: Chromium's data, `history.sqlite`, `passwords.json`, `session.json`, `extensions.json`, `Extensions/`, `agent-chats/`, the agent's working folder and the control socket |
+| `Profiles/<id>/extensions.json` | The profile's extensions: each one's folder, where it came from (a folder, a CRX file or Chrome), and whether it's on and pinned |
+| `Profiles/<id>/Extensions/` | Extensions Tiller unpacked or copied, one folder each, named by id plus a random suffix so an update never overwrites files Chromium has loaded. Folders nothing uses any more are deleted at launch |
 
 Unix socket paths are limited to 104 bytes, so for a long folder path set `TILLER_SOCKET` to a shorter socket path. The app and `tiller_mcp` both read it. It applies to one Tiller only: profiles opened from that Tiller don't get it, since two processes can't share a socket.
 

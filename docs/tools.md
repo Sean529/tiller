@@ -71,6 +71,8 @@ The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and 
 
 Debug builds (`scripts/bundle.sh debug`) accept extra launch arguments.
 
-Three arguments test the Chrome import: `-chromeDataDir <folder>` reads a Chrome data folder other than the real one, `-chromeSafeStoragePassword <password>` uses that password instead of the keychain's, and `-importChrome YES` imports everything from the last-used profile at launch and logs the result.
+Three arguments test the Chrome import: `-chromeDataDir <folder>` reads a Chrome data folder other than the real one, `-chromeSafeStoragePassword <password>` uses that password instead of the keychain's, and `-importChrome YES` imports everything from the last-used profile at launch and logs the result. `-importChrome extensions,history` imports only those kinds (`cookies`, `passwords`, `history`, `settings`, `extensions`).
+
+`-addExtension <path>` adds an unpacked extension folder, or a CRX file when the path ends in `.crx`, and logs the result. It loads at the next launch.
 
 Three arguments test the agent panel without typing: `-agentPrompt "..."` opens the panel and sends that message, `-agentStopAfter <seconds>` presses Stop after that many seconds, and `-agentPasteImage YES` pastes the clipboard into the field twice before sending the prompt three seconds later.

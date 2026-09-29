@@ -44,8 +44,9 @@ enum FinderChromeCopy: Sendable {
     }
 
     /// Copies one profile's databases and Preferences into `<root>/<directory>`,
-    /// mirroring Chrome's layout so ChromeReader can read it unchanged.
-    static func copyProfile(_ directory: String, to root: URL) throws {
+    /// mirroring Chrome's layout so ChromeReader can read it unchanged. With
+    /// `extensions`, its installed extensions and their settings come too.
+    static func copyProfile(_ directory: String, to root: URL, extensions: Bool = false) throws {
         let destination = root.appendingPathComponent(directory)
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
@@ -56,6 +57,9 @@ enum FinderChromeCopy: Sendable {
             for suffix in journalSuffixes {
                 files.append(source + "/" + name + suffix)
             }
+        }
+        if extensions {
+            files += [source + "/Secure Preferences", source + "/Extensions"]
         }
         try duplicate(files, into: destination)
         guard profileFiles.contains(where: {

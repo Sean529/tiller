@@ -7,6 +7,7 @@ enum ImportKind: CaseIterable, Sendable {
     case passwords
     case history
     case settings
+    case extensions
 
     var title: String {
         switch self {
@@ -14,6 +15,7 @@ enum ImportKind: CaseIterable, Sendable {
         case .passwords: "Saved passwords"
         case .history: "History"
         case .settings: "Search engine and homepage"
+        case .extensions: "Extensions"
         }
     }
 
@@ -36,6 +38,7 @@ enum ChromeImporter {
         var logins: Result<(logins: [SavedLogin], skipped: Int), Error>?
         var history: Result<[HistoryPage], Error>?
         var preferences: Result<ChromePreferences, Error>?
+        var extensions: Result<(extensions: [ChromeExtension], skipped: Int), Error>?
     }
 
     /// Reads from `dataDirectory` instead of Chrome's real folder when set —
@@ -78,6 +81,20 @@ enum ChromeImporter {
             results.append(line("Passwords", result))
         }
 
+        if let extensions = loaded.extensions {
+            var result: Result<String, Error>
+            do {
+                let (found, left) = try extensions.get()
+                let (imported, skipped) = await ExtensionStore.shared.importFromChrome(found)
+                result = .success(
+                    "\(imported.formatted()) imported, loading at next launch"
+                        + skippedNote(left + skipped, "Chrome's own, installed by policy, apps, themes or unreadable"))
+            } catch {
+                result = .failure(error)
+            }
+            results.append(line("Extensions", result))
+        }
+
         if let cookies = loaded.cookies {
             var result: Result<String, Error>
             do {
@@ -98,6 +115,7 @@ enum ChromeImporter {
         var loaded = Loaded()
         if kinds.contains(.settings) { loaded.preferences = Result { try reader.preferences() } }
         if kinds.contains(.history) { loaded.history = Result { try reader.history() } }
+        if kinds.contains(.extensions) { loaded.extensions = Result { try reader.extensions() } }
         guard kinds.contains(where: \.needsChromeKey) else { return loaded }
         // One keychain prompt covers both.
         let key = Result { try ChromeReader.safeStorageKey() }
@@ -226,7 +244,7 @@ final class ChromeImportController: NSWindowController {
         grid.setContentHuggingPriority(.required, for: .horizontal)
         grid.setContentHuggingPriority(.required, for: .vertical)
 
-        let note = SettingsPane.note("For cookies and passwords, macOS asks for your login password so Tiller can read Chrome's key. Imported cookies replace Tiller's for the same site.")
+        let note = SettingsPane.note("For cookies and passwords, macOS asks for your login password so Tiller can read Chrome's key. Imported cookies replace Tiller's for the same site. Extensions load at the next launch.")
         note.lineBreakMode = .byWordWrapping
         note.maximumNumberOfLines = 0
         note.preferredMaxLayoutWidth = 420
@@ -363,7 +381,10 @@ final class ChromeImportController: NSWindowController {
                 // The copy is made per import: the user may have picked another
                 // profile since the last attempt, and it keeps plaintext data
                 // on disk only for as long as this import runs.
-                let copied = await Task.detached { Result { try FinderChromeCopy.copyProfile(profile.directory, to: copyRoot) } }.value
+                let extensions = selectedKinds.contains(.extensions)
+                let copied = await Task.detached {
+                    Result { try FinderChromeCopy.copyProfile(profile.directory, to: copyRoot, extensions: extensions) }
+                }.value
                 if case .failure(let error) = copied {
                     results = [ImportResult(title: "Finder copy", detail: "", error: error)]
                 }

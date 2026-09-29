@@ -12,8 +12,8 @@ if let running = Profiles.claim() {
 }
 
 // tiller_core_start installs the NSApplication subclass CEF needs, so it has to
-// run before anything touches NSApp.
-let code = tiller_core_start(DataDirectory.path)
+// run before anything touches NSApp. Chromium only loads extensions at startup.
+let code = tiller_core_start(DataDirectory.path, ExtensionStore.shared.launchArgument)
 if code != 0 { exit(code) }
 
 let app = NSApplication.shared

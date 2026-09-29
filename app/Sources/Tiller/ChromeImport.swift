@@ -77,6 +77,16 @@ struct ChromePreferences: Sendable {
     var homepage: String?
 }
 
+/// An extension installed in a Chrome profile.
+struct ChromeExtension: Sendable {
+    let id: String
+    /// The version's folder, with manifest.json in it.
+    let folder: String
+    let enabled: Bool
+    /// Loaded unpacked from a folder of the user's rather than installed.
+    let unpacked: Bool
+}
+
 /// Reads one Chrome profile. Runs off the main thread: the databases can be
 /// large and the keychain prompt blocks.
 struct ChromeReader: Sendable {
@@ -253,6 +263,57 @@ struct ChromeReader: Sendable {
             url.hasPrefix("http://") || url.hasPrefix("https://")
         }
         return result
+    }
+
+    /// Extensions from the Web Store and ones loaded unpacked, from the
+    /// profile's `Secure Preferences`, with how many were left out: Chrome's
+    /// own, ones installed by policy and ones whose files are missing.
+    func extensions() throws -> (extensions: [ChromeExtension], skipped: Int) {
+        var settings: [String: [String: Any]] = [:]
+        for name in ["Preferences", "Secure Preferences"] {
+            guard let data = try? Self.read(profileDirectory + "/" + name),
+                let prefs = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let found = (prefs["extensions"] as? [String: Any])?["settings"] as? [String: [String: Any]]
+            else { continue }
+            settings.merge(found) { $1 }
+        }
+        // Without its settings, list what's installed, as if all were on.
+        if settings.isEmpty {
+            let folder = profileDirectory + "/Extensions"
+            let ids: [String]
+            do {
+                ids = try FileManager.default.contentsOfDirectory(atPath: folder)
+            } catch {
+                if case CocoaError.fileReadNoSuchFile = Self.mapped(error) { return ([], 0) }
+                throw Self.mapped(error)
+            }
+            for id in ids where id.count == 32 {
+                let versions = (try? FileManager.default.contentsOfDirectory(atPath: folder + "/" + id)) ?? []
+                if let version = versions.max(by: { $0.compare($1, options: .numeric) == .orderedAscending }) {
+                    settings[id] = ["path": id + "/" + version, "location": 1]
+                }
+            }
+        }
+        var found: [ChromeExtension] = []
+        var skipped = 0
+        for (id, setting) in settings.sorted(by: { $0.key < $1.key }) {
+            guard let path = setting["path"] as? String else { continue }
+            // 5 and 10 are Chrome's own, 7 and 9 installed by an admin's policy.
+            let location = setting["location"] as? Int ?? 1
+            let unpacked = location == 4
+            let folder = path.hasPrefix("/") ? path : profileDirectory + "/Extensions/" + path
+            guard ![5, 7, 9, 10].contains(location),
+                FileManager.default.fileExists(atPath: folder + "/manifest.json")
+            else {
+                skipped += 1
+                continue
+            }
+            let reasons = setting["disable_reasons"]
+            let disabled = (reasons as? [Any]).map { !$0.isEmpty } ?? ((reasons as? Int ?? 0) != 0)
+                || (setting["state"] as? Int) == 0
+            found.append(ChromeExtension(id: id, folder: folder, enabled: !disabled, unpacked: unpacked))
+        }
+        return (found, skipped)
     }
 
     // MARK: Files

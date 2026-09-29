@@ -18,18 +18,24 @@ pub extern "C" fn tiller_core_version() -> *const c_char {
 }
 
 /// Loads CEF, installs the CEF-compatible NSApplication and initializes CEF
-/// with Chromium's data in `data_dir`, the profile's folder. Must be the first
-/// thing `main` does, before anything touches `NSApp`. Returns 0 on success,
-/// or a nonzero exit code.
+/// with Chromium's data in `data_dir`, the profile's folder, and the extension
+/// folders in `extensions`, one per line. Must be the first thing `main` does,
+/// before anything touches `NSApp`. Returns 0 on success, or a nonzero exit
+/// code.
 ///
 /// # Safety
-/// `data_dir` must be a NUL-terminated UTF-8 string.
+/// `data_dir` and `extensions` must be NUL-terminated UTF-8 strings.
+/// `extensions` may be null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tiller_core_start(data_dir: *const c_char) -> c_int {
+pub unsafe extern "C" fn tiller_core_start(data_dir: *const c_char, extensions: *const c_char) -> c_int {
     let root = unsafe { cstr(data_dir) };
     if root.is_empty() {
         return 1;
     }
+    // Chromium splits the switch on commas, so a folder with one in its path
+    // can't be passed. The app leaves those out.
+    let extensions = unsafe { cstr(extensions) };
+    let _ = browser::EXTENSIONS.set(extensions.lines().filter(|l| !l.is_empty()).collect::<Vec<_>>().join(","));
     let Ok(exe) = std::env::current_exe() else {
         return 1;
     };
@@ -164,6 +170,18 @@ pub extern "C" fn tiller_browser_zoom(id: c_int, command: c_int) {
 #[unsafe(no_mangle)]
 pub extern "C" fn tiller_browser_zoom_factor(id: c_int) -> f64 {
     browser::get(id).and_then(|b| b.host()).map_or(1.0, |host| 1.2f64.powf(host.zoom_level()))
+}
+
+/// Sizes the browser to its page, between the minimum and maximum sizes in
+/// points, and reports each new size through `auto_resize`. For extension
+/// popups.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_set_auto_resize(id: c_int, min_width: c_int, min_height: c_int, max_width: c_int, max_height: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        let min = Size { width: min_width, height: min_height };
+        let max = Size { width: max_width, height: max_height };
+        host.set_auto_resize_enabled(1, Some(&min), Some(&max));
+    }
 }
 
 /// Finds `text` in the page and highlights the matches. `find_next` moves to

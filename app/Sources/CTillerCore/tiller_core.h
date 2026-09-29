@@ -24,15 +24,18 @@ typedef struct TillerBrowserCallbacks {
     // A find in the page moved on: how many matches, which one is selected
     // (1-based), and whether the search has finished counting.
     void (*find_result)(void *ctx, int count, int active, bool final_update);
+    // The page's new size in points, once auto-resize is on. May be NULL.
+    void (*auto_resize)(void *ctx, int width, int height);
 } TillerBrowserCallbacks;
 
 // Static version string. Do not free.
 const char *tiller_core_version(void);
 
 // Loads CEF, installs the CEF-compatible NSApplication subclass and initializes
-// CEF, keeping Chromium's data in `data_dir` (the profile's folder). Call first
-// in main, before touching NSApp. Returns 0 or an exit code.
-int tiller_core_start(const char *data_dir);
+// CEF, keeping Chromium's data in `data_dir` (the profile's folder) and loading
+// the unpacked extensions in `extensions`, one folder per line (may be NULL).
+// Call first in main, before touching NSApp. Returns 0 or an exit code.
+int tiller_core_start(const char *data_dir, const char *extensions);
 
 // Runs the message loop until the last browser closes, then shuts CEF down.
 void tiller_core_run(void);
@@ -55,6 +58,10 @@ void tiller_browser_set_focus(int id, bool focus);
 void tiller_browser_zoom(int id, int command);
 // The zoom as a factor, 1 for 100%.
 double tiller_browser_zoom_factor(int id);
+
+// Sizes the browser to its page within the given bounds, in points, and reports
+// each new size through the auto_resize callback. For extension popups.
+void tiller_browser_set_auto_resize(int id, int min_width, int min_height, int max_width, int max_height);
 
 // Finds text in the page. find_next continues the current search in the
 // given direction. Results arrive through the find_result callback.

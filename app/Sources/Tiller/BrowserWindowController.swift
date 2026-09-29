@@ -1,11 +1,11 @@
 import AppKit
 
 /// One window holding the tabs. With tabs along the top, the toolbar has
-/// back, forward, reload, the tabs, a new-tab button, the profile's name when
-/// there are several, and the agent panel toggle, and the address bar sits in
-/// a row under it. With tabs in a sidebar, the address bar takes the tabs'
-/// place in the toolbar, and the page is a card between the sidebar on the
-/// left and the agent panel on the right.
+/// back, forward, reload, the tabs, a new-tab button, extension buttons, the
+/// profile's name when there are several, and the agent panel toggle, and the
+/// address bar sits in a row under it. With tabs in a sidebar, the address
+/// bar takes the tabs' place in the toolbar, and the page is a card between
+/// the sidebar on the left and the agent panel on the right.
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
     NSMenuItemValidation, NSSplitViewDelegate, TabDelegate, TabStripDelegate, AgentPanelDelegate
@@ -37,6 +37,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Names the profile and opens the Profiles menu. Hidden with one profile.
     private let profileButton = NSButton()
     private var profileItem: NSToolbarItem?
+    /// Extension buttons. Hidden when no extension is loaded.
+    private let extensionBar = ExtensionBarView()
+    /// The extension popup while one is open.
+    private var extensionPopover: ExtensionPopover?
     /// Nil while there is only one profile.
     private var profileName: String?
     private lazy var suggestions = AddressSuggestions(addressBar: addressBar)
@@ -313,9 +317,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         remove(tab)
     }
 
+    func tab(_ tab: Tab, performKeyEquivalent event: NSEvent) -> Bool {
+        performMenuKeyEquivalent(event)
+    }
+
     /// Menu shortcuts win over the page, except the Edit menu's, so editors in
     /// the page keep their own undo, select all and so on.
-    func tab(_ tab: Tab, performKeyEquivalent event: NSEvent) -> Bool {
+    private func performMenuKeyEquivalent(_ event: NSEvent) -> Bool {
         guard let menu = NSApp.mainMenu else { return false }
         for item in menu.items {
             // Of the Edit menu, only Find goes before the page.
@@ -352,6 +360,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     @objc func newTab(_ sender: Any?) {
         openTab(url: Settings.newTabPage == .homepage ? Settings.homepageURL : "about:blank", select: true)
+    }
+
+    /// Opens `url` in a new selected tab and brings the window forward.
+    func openInNewTab(_ url: String) {
+        openTab(url: url, select: true)
+        window?.makeKeyAndOrderFront(nil)
     }
 
     @objc func closeTab(_ sender: Any?) {
@@ -588,13 +602,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     /// Room left after the window buttons, back, forward, reload, new tab, the
-    /// profile button and the agent button. The address bar gets the same in
-    /// the tabs' place, plus the new-tab button's.
+    /// extension buttons, the profile button and the agent button. The address
+    /// bar gets the same in the tabs' place, plus the new-tab button's.
     private func fitTabStrip() {
         guard let width = window?.frame.width else { return }
         let profileWidth = profileName == nil ? 0 : profileButton.fittingSize.width + 12
-        tabStripWidth.constant = max(200, width - 370 - profileWidth)
-        addressWidth.constant = max(200, width - 330 - profileWidth)
+        let extensionsWidth = extensionBar.isEmpty ? 0 : extensionBar.fittingSize.width + 12
+        tabStripWidth.constant = max(200, width - 370 - profileWidth - extensionsWidth)
+        addressWidth.constant = max(200, width - 330 - profileWidth - extensionsWidth)
     }
 
     // MARK: Tab layout
@@ -709,6 +724,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func windowWillClose(_ notification: Notification) {
+        extensionPopover?.close()
         agentPanel.shutDown()
         SessionStore.shared.flush()
         onClose?()
@@ -725,6 +741,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         static let newTab = NSToolbarItem.Identifier("newTab")
         static let agent = NSToolbarItem.Identifier("agent")
         static let profile = NSToolbarItem.Identifier("profile")
+        static let extensions = NSToolbarItem.Identifier("extensions")
     }
 
     private func configureControls() {
@@ -761,12 +778,39 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         addressBar.zoomButton.target = self
         addressBar.zoomButton.action = #selector(actualSize(_:))
         suggestions.onOpen = { [weak self] url in self?.openSuggestion(url) }
+        extensionBar.onPopup = { [weak self] manifest, anchor in self?.showExtensionPopup(manifest, from: anchor) }
+        extensionBar.onOpen = { [weak self] url in self?.openInNewTab(url) }
+        extensionBar.onResize = { [weak self] in self?.fitTabStrip() }
+    }
+
+    /// Opens the extension's popup under `anchor`, closing any other first.
+    /// Clicking the button of the one that's open just closes it.
+    private func showExtensionPopup(_ manifest: ExtensionManifest, from anchor: NSView) {
+        if let open = extensionPopover {
+            open.close()
+            if open.manifest.id == manifest.id { return }
+        }
+        let popover = ExtensionPopover(manifest: manifest)
+        popover.onOpenTab = { [weak self, weak popover] url, background in
+            guard let self else { return }
+            self.openTab(url: url, select: !background)
+            if !background { popover?.close() }
+        }
+        popover.onKeyEquivalent = { [weak self] event in self?.performMenuKeyEquivalent(event) ?? false }
+        popover.onClose = { [weak self, weak popover] in
+            if let self, self.extensionPopover === popover { self.extensionPopover = nil }
+        }
+        extensionPopover = popover
+        popover.show(relativeTo: anchor)
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         tabLayout == .vertical
-            ? [Item.back, Item.forward, Item.reload, Item.address, .flexibleSpace, Item.profile, Item.agent]
-            : [Item.back, Item.forward, Item.reload, Item.tabs, Item.newTab, .flexibleSpace, Item.profile, Item.agent]
+            ? [Item.back, Item.forward, Item.reload, Item.address, .flexibleSpace, Item.extensions, Item.profile, Item.agent]
+            : [
+                Item.back, Item.forward, Item.reload, Item.tabs, Item.newTab, .flexibleSpace, Item.extensions,
+                Item.profile, Item.agent,
+            ]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -785,6 +829,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case Item.reload: item.view = reloadButton; item.label = "Reload"
         case Item.newTab: item.view = newTabButton; item.label = "New Tab"
         case Item.agent: item.view = agentButton; item.label = "Agent"
+        case Item.extensions:
+            item.view = extensionBar
+            item.label = "Extensions"
+            item.isHidden = extensionBar.isEmpty
         case Item.profile:
             item.view = profileButton
             item.label = "Profile"

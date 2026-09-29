@@ -14,6 +14,12 @@ protocol TabDelegate: AnyObject {
     func tabProgressChanged(_ tab: Tab)
     /// A find in the page counted `count` matches and selected the `active`th.
     func tab(_ tab: Tab, foundMatches count: Int, active: Int, final: Bool)
+    /// The page's size in points, once `autoResize` is on.
+    func tab(_ tab: Tab, autoResizedTo size: NSSize)
+}
+
+extension TabDelegate {
+    func tab(_ tab: Tab, autoResizedTo size: NSSize) {}
 }
 
 /// One CEF browser and the view that hosts it.
@@ -91,6 +97,10 @@ final class Tab {
             find_result: { ctx, count, active, final in
                 guard let ctx else { return }
                 Tab.from(ctx).findResult(count: Int(count), active: Int(active), final: final)
+            },
+            auto_resize: { ctx, width, height in
+                guard let ctx else { return }
+                Tab.from(ctx).autoResized(NSSize(width: Int(width), height: Int(height)))
             }
         )
         let view = Unmanaged.passUnretained(hostView).toOpaque()
@@ -122,6 +132,13 @@ final class Tab {
     }
 
     func stopFinding() { tiller_browser_stop_finding(browserID) }
+
+    /// Sizes the browser to its page between `min` and `max`, reporting each
+    /// new size to the delegate.
+    func autoResize(min: NSSize, max: NSSize) {
+        tiller_browser_set_auto_resize(
+            browserID, Int32(min.width), Int32(min.height), Int32(max.width), Int32(max.height))
+    }
 
     /// Runs `code` in the main frame. Does nothing once the tab has closed.
     func executeJavaScript(_ code: String) { tiller_browser_execute_js(browserID, code) }
@@ -185,6 +202,10 @@ final class Tab {
 
     nonisolated private func findResult(count: Int, active: Int, final: Bool) {
         MainActor.assumeIsolated { delegate?.tab(self, foundMatches: count, active: active, final: final) }
+    }
+
+    nonisolated private func autoResized(_ size: NSSize) {
+        MainActor.assumeIsolated { delegate?.tab(self, autoResizedTo: size) }
     }
 
     nonisolated private func faviconChanged(_ png: Data) {

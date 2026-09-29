@@ -1,7 +1,8 @@
 import AppKit
+import UniformTypeIdentifiers
 
-/// The Settings window (Cmd+,), with General, Passwords, Agent and Profiles
-/// panes. Every change is saved as it is made, in the current profile.
+/// The Settings window (Cmd+,), with General, Passwords, Extensions, Agent and
+/// Profiles panes. Every change is saved as it is made, in the current profile.
 @MainActor
 final class SettingsWindowController: NSWindowController {
     private let tabs = NSTabViewController()
@@ -11,6 +12,7 @@ final class SettingsWindowController: NSWindowController {
         let panes: [(NSViewController, String)] = [
             (GeneralSettingsPane(), "gearshape"),
             (PasswordsSettingsPane(), "key"),
+            (ExtensionsSettingsPane(), "puzzlepiece.extension"),
             (AgentSettingsPane(), "sparkles"),
             (ProfilesSettingsPane(), "person.2"),
         ]
@@ -385,6 +387,238 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
                 }
             }
         }
+    }
+}
+
+// MARK: Extensions
+
+/// The profile's extensions, with switches to turn them on and pin them to
+/// the toolbar, and buttons to add, configure and remove them. Chromium loads
+/// extensions at launch, so turning one on or off applies at the next launch.
+final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    static let paneTitle = "Extensions"
+
+    private let table = NSTableView()
+    private let addFolderButton = NSButton(title: "Add Folder…", target: nil, action: nil)
+    private let addCRXButton = NSButton(title: "Add CRX File…", target: nil, action: nil)
+    private let optionsButton = NSButton(title: "Options", target: nil, action: nil)
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let note = SettingsPane.note()
+    private var store: ExtensionStore { .shared }
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        title = Self.paneTitle
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        for (id, title, width) in [
+            ("on", "On", 30.0), ("name", "Extension", 250.0), ("version", "Version", 80.0),
+            ("pinned", "Toolbar", 56.0), ("status", "Status", 140.0),
+        ] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.allowsMultipleSelection = true
+        table.usesAlternatingRowBackgroundColors = true
+        table.style = .inset
+        table.rowHeight = 22
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(openOptions(_:))
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+
+        for (button, action) in [
+            (addFolderButton, #selector(addFolder(_:))),
+            (addCRXButton, #selector(addCRX(_:))),
+            (optionsButton, #selector(openOptions(_:))),
+            (removeButton, #selector(remove(_:))),
+        ] {
+            button.target = self
+            button.action = action
+        }
+        let buttons = NSStackView(views: [addFolderButton, addCRXButton, optionsButton, NSView(), removeButton])
+        buttons.spacing = 8
+
+        let stack = NSStackView(views: [scroll, buttons, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let view = NSView()
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalToConstant: 600),
+            scroll.heightAnchor.constraint(equalToConstant: 280),
+            buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+        ])
+        self.view = view
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = view.fittingSize
+        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .extensionsDidChange, object: nil)
+        reload(nil)
+    }
+
+    @objc private func reload(_ notification: Notification?) {
+        let selected = table.selectedRowIndexes
+        table.reloadData()
+        table.selectRowIndexes(selected.filteredIndexSet { $0 < store.entries.count }, byExtendingSelection: false)
+        updateControls()
+    }
+
+    private func updateControls() {
+        optionsButton.isEnabled = selectedManifest?.optionsURL != nil
+        removeButton.isEnabled = !table.selectedRowIndexes.isEmpty
+        let text: String
+        if store.entries.isEmpty {
+            text = "No extensions. Add an unpacked folder or a CRX file, or bring Chrome's over with File > Import from Chrome…"
+        } else if store.needsRestart {
+            text = "Changes apply the next time Tiller opens."
+        } else {
+            text = "\(store.running.count) of \(store.entries.count) running. Chrome's tab and window APIs don't see Tiller's tabs."
+        }
+        SettingsPane.show(text, in: note)
+    }
+
+    /// The selected extension, when exactly one is selected and running.
+    private var selectedManifest: ExtensionManifest? {
+        guard table.selectedRowIndexes.count == 1, store.entries.indices.contains(table.selectedRow) else { return nil }
+        let entry = store.entries[table.selectedRow]
+        guard store.isLoaded(entry), store.loadError(forFolder: entry.path) == nil else { return nil }
+        return try? store.manifest(for: entry).get()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { store.entries.count }
+
+    func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
+        guard store.entries.indices.contains(row) else { return nil }
+        let entry = store.entries[row]
+        let manifest = store.manifest(for: entry)
+        switch column?.identifier.rawValue {
+        case "on", "pinned":
+            let isOn = column?.identifier.rawValue == "on"
+            let checkbox = NSButton(
+                checkboxWithTitle: "", target: self, action: isOn ? #selector(toggleEnabled(_:)) : #selector(togglePinned(_:)))
+            checkbox.tag = row
+            checkbox.state = (isOn ? entry.enabled : entry.pinned) ? .on : .off
+            return checkbox
+        case "name":
+            let label = NSTextField(labelWithString: (try? manifest.get().name) ?? (entry.path as NSString).lastPathComponent)
+            label.lineBreakMode = .byTruncatingTail
+            label.toolTip = entry.path
+            let icon = NSImageView(image: (try? manifest.get().image(size: 16))
+                ?? NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)!)
+            let stack = NSStackView(views: [icon, label])
+            stack.spacing = 6
+            return stack
+        case "version":
+            return NSTextField(labelWithString: (try? manifest.get().version) ?? "")
+        default:
+            let label = NSTextField(labelWithString: status(of: entry, manifest))
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            if case .failure(let error) = manifest {
+                label.textColor = .systemRed
+                label.toolTip = error.localizedDescription
+            } else if store.isLoaded(entry), let error = store.loadError(forFolder: entry.path) {
+                label.textColor = .systemRed
+                label.toolTip = error
+            }
+            return label
+        }
+    }
+
+    private func status(of entry: ExtensionStore.Entry, _ manifest: Result<ExtensionManifest, Error>) -> String {
+        if case .failure(let error) = manifest {
+            if case ExtensionError.noManifest = error { return "Folder missing" }
+            return "Can't be loaded"
+        }
+        if store.isLoaded(entry) && store.loadError(forFolder: entry.path) != nil {
+            return "Failed to load"
+        }
+        switch (store.isLoaded(entry), entry.enabled) {
+        case (true, true): return "Running"
+        case (true, false): return "Stops at next launch"
+        case (false, true): return "Starts at next launch"
+        case (false, false): return "Off"
+        }
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateControls()
+    }
+
+    @objc private func toggleEnabled(_ sender: NSButton) {
+        store.setEnabled(sender.state == .on, at: sender.tag)
+    }
+
+    @objc private func togglePinned(_ sender: NSButton) {
+        store.setPinned(sender.state == .on, at: sender.tag)
+    }
+
+    @objc private func addFolder(_ sender: Any?) {
+        guard let window = view.window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.message = "Choose an unpacked extension's folder, the one with manifest.json in it"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                do {
+                    let manifest = try self.store.addFolder(url.path)
+                    SettingsPane.show("Added \(manifest.name). It starts the next time Tiller opens.", in: self.note)
+                } catch {
+                    SettingsPane.show(error.localizedDescription, in: self.note, warning: true)
+                }
+            }
+        }
+    }
+
+    @objc private func addCRX(_ sender: Any?) {
+        guard let window = view.window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "crx") ?? .data]
+        panel.message = "Choose a Chrome extension package"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                Task {
+                    do {
+                        let manifest = try await self.store.addCRX(url.path)
+                        SettingsPane.show("Added \(manifest.name). It starts the next time Tiller opens.", in: self.note)
+                    } catch {
+                        SettingsPane.show(error.localizedDescription, in: self.note, warning: true)
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func openOptions(_ sender: Any?) {
+        guard let url = selectedManifest?.optionsURL else { return }
+        (NSApp.delegate as? AppDelegate)?.openInNewTab(url)
+    }
+
+    @objc private func remove(_ sender: Any?) {
+        store.remove(at: table.selectedRowIndexes)
+        table.deselectAll(nil)
     }
 }
 

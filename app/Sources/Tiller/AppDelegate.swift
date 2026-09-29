@@ -34,6 +34,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController?.showPane(titled: ProfilesSettingsPane.paneTitle)
     }
 
+    @objc func manageExtensions(_ sender: Any?) {
+        showSettings(sender)
+        settingsController?.showPane(titled: ExtensionsSettingsPane.paneTitle)
+    }
+
+    /// Opens `url` in a new tab of the browser window, for Settings.
+    func openInNewTab(_ url: String) {
+        windowController?.openInNewTab(url)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
 
@@ -65,14 +75,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 MainActor.assumeIsolated { controller?.sendAgentPrompt(prompt) }
             }
         }
+        // `-addExtension <path>` adds an unpacked folder or a CRX file and
+        // logs the result. It loads at the next launch.
+        if let path = UserDefaults.standard.string(forKey: "addExtension") {
+            Task {
+                do {
+                    let manifest = path.hasSuffix(".crx")
+                        ? try await ExtensionStore.shared.addCRX(path) : try ExtensionStore.shared.addFolder(path)
+                    NSLog("Tiller extension: added %@ (%@)", manifest.name, manifest.id)
+                } catch {
+                    NSLog("Tiller extension: %@", error.localizedDescription)
+                }
+            }
+        }
         // `-importChrome YES` imports everything from Chrome's last-used
-        // profile and logs the result.
-        if UserDefaults.standard.bool(forKey: "importChrome") {
+        // profile and logs the result. `-importChrome extensions,history`
+        // imports only those.
+        if let value = UserDefaults.standard.string(forKey: "importChrome"), value != "NO" {
+            let names = Set(value.split(separator: ",").map(String.init))
+            let kinds = value == "YES"
+                ? Set(ImportKind.allCases) : Set(ImportKind.allCases.filter { names.contains("\($0)") })
             Task {
                 do {
                     let (profiles, lastUsed) = try ChromeReader.profiles()
                     guard let profile = profiles.first(where: { $0.directory == lastUsed }) ?? profiles.first else { return }
-                    for result in await ChromeImporter.run(profile: profile, kinds: Set(ImportKind.allCases)) {
+                    for result in await ChromeImporter.run(profile: profile, kinds: kinds) {
                         NSLog("Tiller import: %@: %@", result.title, result.error?.localizedDescription ?? result.detail)
                     }
                 } catch {

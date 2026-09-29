@@ -73,8 +73,9 @@ File > Import from Chrome… brings over data from one Chrome profile. Pick the 
 | Saved passwords | Stored in Tiller's [password store](#saved-passwords). A saved login with the same site and username is replaced. Sites marked "never save" and non-web logins are skipped. |
 | History | Merged into Tiller's history. A page Tiller already has keeps its title and takes the higher visit count and later visit. |
 | Search engine and homepage | Google, Bing and DuckDuckGo map to Tiller's engines; any other engine becomes a custom search URL. Chrome's startup page becomes Tiller's homepage, or failing that its Home button page. |
+| Extensions | Copied into the profile with the same ids, so each is on or off as in Chrome. Ones Chrome loads unpacked are added from their folders. Chrome's own, ones installed by an admin's policy, apps and themes are skipped. They load at the next launch. |
 
-Re-running the import is safe: nothing is duplicated.
+Re-running the import is safe: nothing is duplicated. An extension imported again is updated and stays on or off as it is in Tiller.
 
 Chrome encrypts cookies and passwords with a key in its "Chrome Safe Storage" keychain item, so macOS asks for your login password before Tiller can read it. The import reads copies of Chrome's databases, which works while Chrome is running, but cookies Chrome changed in the last 30 seconds or so may not be on disk yet.
 
@@ -82,10 +83,29 @@ macOS may block Tiller from reading Chrome's folder at all. The sheet then says 
 
 Some sites tie a session to the browser it started in, so they may still ask you to sign in again.
 
+## Extensions
+
+Tiller runs Chrome extensions (Manifest V3) as unpacked extensions, the way Chrome's Load unpacked does. Chromium loads them at launch, so adding, removing or turning one on or off takes effect the next time Tiller opens.
+
+Settings > Extensions lists the profile's extensions, with each one's status:
+
+- **Add Folder…** adds a folder with `manifest.json` in it. It is loaded from where it is, so edits to it apply at the next launch, and its id is the one Chrome's Load unpacked gives the same folder.
+- **Add CRX File…** unpacks a Chrome extension package into the profile. Its key goes into the manifest, so it keeps its Web Store id and adding a newer package updates it.
+- File > Import from Chrome… brings over Chrome's (see [Import from Chrome](#import-from-chrome)).
+- **On** turns an extension on or off, **Toolbar** pins its button to the toolbar, **Options** opens its options page in a new tab, and **Remove** takes it out. Removing a folder leaves the folder alone; removing a package deletes Tiller's copy.
+- Status is Running, Off, Starts or Stops at next launch, or an error: a manifest Tiller can't read, or one Chromium refused at launch, whose reason shows when you hover over it.
+
+The toolbar has an Extensions button with a menu of the running extensions, and a button for each pinned one. Choosing one opens its popup under the button, sized to the page from 25×25 up to 800×600 points; Cmd+W or a click elsewhere closes it. An extension without a popup opens its options page instead, and holding Option in the menu shows Options for the others. Right-click a pinned button to open its options or unpin it. Links a popup opens go to new tabs.
+
+What works: content scripts, background service workers, messaging, storage, `scripting`, `declarativeNetRequest`, options pages and popups. What doesn't: Chrome's tab and window APIs. Tiller's tabs aren't Chrome windows, so `chrome.tabs.query` finds no tabs and `chrome.tabs.create` fails. Popups that act on the current tab, such as a page clipper's, show their no-page state, and extensions that list or open tabs don't work. `chrome://extensions` and installing from the Chrome Web Store don't work either; use a CRX file or the import.
+
+Chromium runs extensions in English, so Tiller shows their names from their English messages. Extensions have the same access to pages as in Chrome, and like the agent's tools, one that reads pages can read a password you fill.
+
 ## Profiles
 
 A profile has its own cookies and site data, history, open tabs, saved passwords, settings and agent chats. Each open profile runs as a separate Tiller, with its own Dock icon.
 
+- Each profile has its own extensions.
 - The Profiles menu lists them, with a check on the current one. Choosing another brings its Tiller forward, or starts one. New Profile… asks for a name and opens it.
 - Settings > Profiles lists them too, with buttons to open, add, rename and delete. The current profile and profiles that are open can't be deleted. Deleting moves the profile's folder to the Trash and removes its settings and password key.
 - With more than one profile, each Tiller shows its profile's name at the right of the toolbar, where clicking it opens the Profiles menu, in the Dock badge and in the window title.

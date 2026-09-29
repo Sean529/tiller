@@ -8,6 +8,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     ffi::{CString, c_char, c_void},
+    sync::OnceLock,
 };
 
 /// Mirrors `TillerBrowserCallbacks` in tiller_core.h.
@@ -24,6 +25,7 @@ pub struct Callbacks {
     pub key_equivalent: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool>,
     pub loading_progress: Option<unsafe extern "C" fn(*mut c_void, f64)>,
     pub find_result: Option<unsafe extern "C" fn(*mut c_void, i32, i32, bool)>,
+    pub auto_resize: Option<unsafe extern "C" fn(*mut c_void, i32, i32)>,
 }
 
 struct Entry {
@@ -38,6 +40,10 @@ struct PendingCall {
     browser_id: i32,
     token: u64,
 }
+
+/// Extension folders for `--load-extension`, comma-separated. Set once before
+/// CEF initializes.
+pub static EXTENSIONS: OnceLock<String> = OnceLock::new();
 
 thread_local! {
     static BROWSERS: RefCell<HashMap<i32, Entry>> = RefCell::new(HashMap::new());
@@ -262,6 +268,18 @@ wrap_display_handler! {
                 unsafe { f(cb.ctx, progress) };
             }
         }
+
+        /// The page's size in points, for browsers with auto-resize on.
+        fn on_auto_resize(&self, browser: Option<&mut Browser>, new_size: Option<&Size>) -> i32 {
+            let Some(size) = new_size else { return 0 };
+            match callbacks_for(browser) {
+                Some(Callbacks { ctx, auto_resize: Some(f), .. }) => {
+                    unsafe { f(ctx, size.width, size.height) };
+                    1
+                }
+                _ => 0,
+            }
+        }
     }
 }
 
@@ -434,6 +452,18 @@ wrap_app! {
                 // agent's clicks and keys would vanish while the user works
                 // in another app. The cost is that covered windows keep drawing.
                 cmd.append_switch(Some(&CefString::from("disable-backgrounding-occluded-windows")));
+                // The profile's enabled extensions, loaded unpacked like
+                // Chrome's Load unpacked. Chromium only reads this at startup.
+                // An extension that fails to load would otherwise get an error
+                // dialog, which hangs startup without Chrome's UI; the error
+                // goes to chrome_debug.log instead.
+                if let Some(paths) = EXTENSIONS.get().filter(|p| !p.is_empty()) {
+                    cmd.append_switch_with_value(
+                        Some(&CefString::from("load-extension")),
+                        Some(&CefString::from(paths.as_str())),
+                    );
+                    cmd.append_switch(Some(&CefString::from("noerrdialogs")));
+                }
             }
         }
     }
