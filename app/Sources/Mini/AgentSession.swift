@@ -1,15 +1,19 @@
 import Foundation
 
-/// The agent CLIs Mini can run. Both speak the same stream-json protocol over
-/// stdio in print mode, and both are limited to Mini's MCP tools.
+/// The agent CLIs Mini can run. Qoder CLI and Claude Code speak the same
+/// stream-json protocol over stdio in print mode. Codex runs its app server,
+/// which speaks JSON-RPC over stdio. All are limited to Mini's MCP tools, except
+/// that Codex keeps a shell confined to a read-only sandbox.
 enum AgentKind: String, CaseIterable {
     case qodercli
     case claude
+    case codex
 
     var displayName: String {
         switch self {
         case .qodercli: "Qoder CLI"
         case .claude: "Claude Code"
+        case .codex: "Codex"
         }
     }
 
@@ -54,6 +58,9 @@ enum AgentKind: String, CaseIterable {
                 "--allowed-tools", "mcp__mini",
                 "--permission-mode", "dont_ask",
             ]
+        case .codex:
+            // The MCP server, sandbox and prompt go in thread/start instead.
+            return ["app-server"]
         }
     }
 }
@@ -68,6 +75,8 @@ enum AgentEvent {
     case toolUse(id: String, name: String, input: [String: Any])
     case toolResult(id: String, isError: Bool, summary: String)
     case retrying
+    /// Something went wrong that doesn't end the turn.
+    case error(String)
     /// `stopped` means the user interrupted the turn.
     case turnFinished(error: String?, stopped: Bool)
     case exited(message: String?)
@@ -90,6 +99,16 @@ final class AgentSession {
     private var interruptTimer: Timer?
     private var interrupted = false
 
+    // Codex app server state.
+    private var nextRequestID = 0
+    /// Methods of the requests Codex hasn't answered yet, by id.
+    private var pendingRequests: [Int: String] = [:]
+    private var threadID: String?
+    private var turnID: String?
+    /// A message sent before the thread started.
+    private var queuedPrompt: String?
+    private var reportedToolFailure = false
+
     init(kind: AgentKind) {
         self.kind = kind
     }
@@ -111,7 +130,7 @@ final class AgentSession {
             systemPrompt: AgentEnvironment.systemPrompt
         )
         process.currentDirectoryURL = try AgentEnvironment.workingDirectory()
-        process.environment = AgentEnvironment.environment()
+        process.environment = try AgentEnvironment.environment(for: kind)
 
         // Writing to an agent that has exited should fail, not kill Mini.
         signal(SIGPIPE, SIG_IGN)
@@ -143,16 +162,18 @@ final class AgentSession {
         try process.run()
         self.process = process
         stdin = input.fileHandleForWriting
+        if kind == .codex { try startCodexThread() }
     }
 
     /// Sends one user turn. `context` goes before the text, for the agent only.
     func send(_ text: String, context: String) throws {
         try start()
-        let message: [String: Any] = [
-            "type": "user",
-            "message": ["role": "user", "content": context + "\n\n" + text],
-        ]
-        try write(message)
+        let prompt = context + "\n\n" + text
+        if kind == .codex {
+            try startCodexTurn(prompt)
+        } else {
+            try write(["type": "user", "message": ["role": "user", "content": prompt]])
+        }
         isBusy = true
     }
 
@@ -161,11 +182,16 @@ final class AgentSession {
     func interrupt() {
         guard isBusy else { return }
         interrupted = true
-        try? write([
-            "type": "control_request",
-            "request_id": UUID().uuidString,
-            "request": ["subtype": "interrupt"],
-        ])
+        if kind == .codex {
+            interruptCodexTurn()
+            guard isBusy else { return }
+        } else {
+            try? write([
+                "type": "control_request",
+                "request_id": UUID().uuidString,
+                "request": ["subtype": "interrupt"],
+            ])
+        }
         interruptTimer?.invalidate()
         interruptTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -195,6 +221,12 @@ final class AgentSession {
         isBusy = false
         interrupted = false
         interruptTimer?.invalidate()
+        nextRequestID = 0
+        pendingRequests.removeAll()
+        threadID = nil
+        turnID = nil
+        queuedPrompt = nil
+        reportedToolFailure = false
     }
 
     private func write(_ object: [String: Any]) throws {
@@ -214,7 +246,7 @@ final class AgentSession {
             stdoutBuffer.removeSubrange(stdoutBuffer.startIndex...newline)
             // Not every line is JSON: qodercli prints some notices to stdout.
             guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
-            handle(message)
+            if kind == .codex { handleCodex(message) } else { handle(message) }
         }
     }
 
@@ -266,20 +298,180 @@ final class AgentSession {
                 ))
             }
         case "result":
-            isBusy = false
-            interruptTimer?.invalidate()
             let failed = message["is_error"] as? Bool ?? false
             let subtype = message["subtype"] as? String ?? "success"
             var error: String?
-            // Claude Code reports an interrupted turn as error_during_execution.
-            if (failed || subtype != "success") && !interrupted {
+            if failed || subtype != "success" {
                 error = (message["result"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? subtype
             }
-            let stopped = interrupted
-            interrupted = false
-            onEvent?(.turnFinished(error: error, stopped: stopped))
+            finishTurn(error: error)
         default:
             break
+        }
+    }
+
+    /// An interrupted turn reports no error: Claude Code calls it
+    /// error_during_execution, and Codex's may fail on the way out.
+    private func finishTurn(error: String?) {
+        isBusy = false
+        interruptTimer?.invalidate()
+        let stopped = interrupted
+        interrupted = false
+        onEvent?(.turnFinished(error: stopped ? nil : error, stopped: stopped))
+    }
+
+    // MARK: Codex
+
+    private func request(_ method: String, _ params: [String: Any]) throws {
+        nextRequestID += 1
+        pendingRequests[nextRequestID] = method
+        try write(["id": nextRequestID, "method": method, "params": params])
+    }
+
+    /// The handshake, then a thread. Turns sent before the thread starts wait
+    /// in `queuedPrompt`.
+    private func startCodexThread() throws {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+        try request("initialize", ["clientInfo": ["name": "mini", "title": "Mini", "version": version]])
+        try write(["method": "initialized"])
+        try request("thread/start", AgentEnvironment.codexThreadParams)
+    }
+
+    private func startCodexTurn(_ prompt: String) throws {
+        guard let threadID else {
+            queuedPrompt = prompt
+            return
+        }
+        try request("turn/start", ["threadId": threadID, "input": [["type": "text", "text": prompt]]])
+    }
+
+    /// Needs the turn's id, so an interrupt before turn/started is sent when it arrives.
+    private func interruptCodexTurn() {
+        if queuedPrompt != nil {
+            queuedPrompt = nil
+            finishTurn(error: nil)
+        } else if let threadID, let turnID {
+            try? request("turn/interrupt", ["threadId": threadID, "turnId": turnID])
+        }
+    }
+
+    private func handleCodex(_ message: [String: Any]) {
+        if let method = message["method"] as? String {
+            if let id = message["id"] {
+                answerCodex(id: id, method: method)
+            } else {
+                handleCodexNotification(method, message["params"] as? [String: Any] ?? [:])
+            }
+        } else if let id = message["id"] as? Int, let method = pendingRequests.removeValue(forKey: id) {
+            let error = (message["error"] as? [String: Any]).map { $0["message"] as? String ?? "unknown error" }
+            handleCodexResponse(method, result: message["result"] as? [String: Any] ?? [:], error: error)
+        }
+    }
+
+    private func handleCodexResponse(_ method: String, result: [String: Any], error: String?) {
+        switch method {
+        case "initialize", "thread/start":
+            if let error {
+                stop()
+                onEvent?(.exited(message: "Codex couldn't start a conversation: \(error)"))
+                return
+            }
+            guard method == "thread/start", let thread = result["thread"] as? [String: Any] else { return }
+            threadID = thread["id"] as? String
+            onEvent?(.ready(model: result["model"] as? String ?? thread["model"] as? String))
+            if let prompt = queuedPrompt {
+                queuedPrompt = nil
+                do { try startCodexTurn(prompt) } catch { finishTurn(error: error.localizedDescription) }
+            }
+        case "turn/start":
+            if let error { finishTurn(error: error) }
+        default:
+            // An interrupt that loses the race with the end of the turn fails harmlessly.
+            break
+        }
+    }
+
+    private func handleCodexNotification(_ method: String, _ params: [String: Any]) {
+        switch method {
+        case "turn/started":
+            turnID = (params["turn"] as? [String: Any])?["id"] as? String
+            if interrupted { interruptCodexTurn() }
+        case "turn/completed":
+            turnID = nil
+            let turn = params["turn"] as? [String: Any] ?? [:]
+            var error: String?
+            switch turn["status"] as? String {
+            case "failed": error = (turn["error"] as? [String: Any])?["message"] as? String ?? "The turn failed."
+            case "interrupted": error = "The turn was interrupted."
+            default: break
+            }
+            finishTurn(error: error)
+        case "item/started", "item/completed":
+            guard let item = params["item"] as? [String: Any] else { return }
+            handleCodexItem(item, completed: method == "item/completed")
+        case "item/agentMessage/delta":
+            if let delta = params["delta"] as? String { onEvent?(.textDelta(delta)) }
+        case "error":
+            // A final error also arrives with turn/completed.
+            if params["willRetry"] as? Bool == true { onEvent?(.retrying) }
+        case "mcpServer/startupStatus/updated":
+            guard params["name"] as? String == "mini", params["status"] as? String == "failed",
+                !reportedToolFailure
+            else { return }
+            reportedToolFailure = true
+            onEvent?(.error("Mini's browser tools didn't start: " + (params["error"] as? String ?? "unknown error")))
+        default:
+            break
+        }
+    }
+
+    private func handleCodexItem(_ item: [String: Any], completed: Bool) {
+        let id = item["id"] as? String ?? ""
+        let status = item["status"] as? String
+        switch item["type"] as? String {
+        case "agentMessage":
+            if !completed {
+                onEvent?(.textStarted)
+            } else if let text = item["text"] as? String, !text.isEmpty {
+                onEvent?(.text(text))
+            }
+        case "mcpToolCall":
+            if !completed {
+                let server = item["server"] as? String ?? "", tool = item["tool"] as? String ?? "tool"
+                onEvent?(.toolUse(
+                    id: id,
+                    name: server == "mini" ? tool : "\(server).\(tool)",
+                    input: item["arguments"] as? [String: Any] ?? [:]
+                ))
+            } else {
+                let error = (item["error"] as? [String: Any])?["message"] as? String
+                let content = (item["result"] as? [String: Any])?["content"]
+                onEvent?(.toolResult(id: id, isError: status == "failed", summary: error ?? Self.summary(of: content)))
+            }
+        case "commandExecution":
+            // Codex's shell, confined to a read-only sandbox.
+            if !completed {
+                onEvent?(.toolUse(id: id, name: "shell", input: ["command": item["command"] as? String ?? ""]))
+            } else {
+                onEvent?(.toolResult(id: id, isError: status != "completed", summary: Self.summary(of: item["aggregatedOutput"])))
+            }
+        default:
+            break
+        }
+    }
+
+    /// Mini can't ask the user, so approvals and questions are declined.
+    private func answerCodex(id: Any, method: String) {
+        let result: [String: Any]? = switch method {
+        case "item/commandExecution/requestApproval", "item/fileChange/requestApproval": ["decision": "decline"]
+        case "execCommandApproval", "applyPatchApproval": ["decision": "denied"]
+        case "mcpServer/elicitation/request": ["action": "decline"]
+        default: nil
+        }
+        if let result {
+            try? write(["id": id, "result": result])
+        } else {
+            try? write(["id": id, "error": ["code": -32601, "message": "Mini doesn't support \(method)"]])
         }
     }
 
@@ -368,13 +560,62 @@ enum AgentEnvironment {
         return shell.terminationStatus == 0 && !path.isEmpty ? path : nil
     }
 
-    static func environment() -> [String: String] {
+    static func environment(for kind: AgentKind) throws -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let path = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (searchDirectories + [path]).joined(separator: ":")
         // Set when Mini itself was started from a Claude Code session.
         for key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] { env[key] = nil }
+        if kind == .codex { env["CODEX_HOME"] = try codexHome() }
         return env
+    }
+
+    /// Codex's own folder for Mini, so the user's config.toml, MCP servers,
+    /// plugins and hooks don't load. Its auth.json links to the user's, so
+    /// Codex uses their login, and a token refresh writes through the link.
+    private static func codexHome() throws -> String {
+        let userHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? NSHomeDirectory() + "/.codex"
+        let userAuth = userHome + "/auth.json"
+        guard FileManager.default.fileExists(atPath: userAuth) else {
+            throw ControlError("Codex isn't logged in. Run codex login in Terminal, then send the message again.")
+        }
+        let home = supportDirectory + "/codex"
+        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        let link = home + "/auth.json"
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: link)) != userAuth {
+            try? FileManager.default.removeItem(atPath: link)
+            try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: userAuth)
+        }
+        return home
+    }
+
+    /// Codex's equivalent of the other CLIs' flags: only the mini MCP server,
+    /// its tools allowed without asking, and the shell in a read-only sandbox
+    /// that never asks for approval.
+    static var codexThreadParams: [String: Any] {
+        [
+            "ephemeral": true,
+            "sandbox": "read-only",
+            "approvalPolicy": "never",
+            "developerInstructions": systemPrompt,
+            "config": [
+                "mcp_servers": [
+                    "mini": [
+                        "command": mcpServerPath,
+                        "args": [String](),
+                        // Codex starts MCP servers with only a few variables
+                        // set, so pass on the ones that pick Mini's socket.
+                        "env_vars": ["MINI_DATA_DIR", "MINI_SOCKET"],
+                        "default_tools_approval_mode": "approve",
+                    ],
+                ],
+                // Tools Codex has on by default.
+                "web_search": "disabled",
+                "features": [
+                    "apps": false, "goals": false, "multi_agent": false, "image_generation": false, "memories": false,
+                ],
+            ],
+        ]
     }
 
     /// An empty directory, so the agent doesn't pick up a project's files or instructions.
@@ -384,11 +625,15 @@ enum AgentEnvironment {
         return url
     }
 
-    /// Points the agent at the mini_mcp next to Mini's own executable.
+    /// The mini_mcp next to Mini's own executable.
+    private static var mcpServerPath: String {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/mini_mcp").path
+    }
+
+    /// Points the agent at mini_mcp.
     static func writeMCPConfig() throws -> String {
-        let server = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/mini_mcp").path
         let config: [String: Any] = [
-            "mcpServers": ["mini": ["type": "stdio", "command": server, "args": [String]()]],
+            "mcpServers": ["mini": ["type": "stdio", "command": mcpServerPath, "args": [String]()]],
         ]
         try FileManager.default.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
         let path = supportDirectory + "/agent-mcp.json"

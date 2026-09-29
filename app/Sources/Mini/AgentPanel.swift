@@ -293,6 +293,8 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
             toolRows.removeValue(forKey: id)?.finish(isError: isError, summary: summary)
         case .retrying:
             status.show("Retrying…", busy: true)
+        case .error(let message):
+            addError(message)
         case .turnFinished(let error, let stopped):
             if let error { addError(error) }
             if stopped { addNote("Stopped") }

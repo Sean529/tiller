@@ -43,7 +43,7 @@ Mini > Settings… (Cmd+,) has two panes. Changes are saved as you make them.
 | General | New tabs open with: Blank Page or Homepage | Blank Page | next new tab |
 | General | Search engine: Google, Bing, DuckDuckGo or Custom | Google | next search |
 | General | Custom search URL, with `%s` for the query | empty | next search; Google is used while it isn't a valid http(s) URL with `%s` |
-| Agent | New chats use: Qoder CLI or Claude Code | Qoder CLI | next new chat; same as the picker in the panel |
+| Agent | New chats use: Qoder CLI, Claude Code or Codex | Qoder CLI | next new chat; same as the picker in the panel |
 | Agent | Path for each CLI | empty, meaning look it up | next new chat |
 | Agent | Extra instructions, added after Mini's system prompt | empty | next new chat |
 
@@ -204,19 +204,21 @@ The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and 
 
 ## Agent panel
 
-Click the sparkles button at the right of the toolbar, or press Cmd+Shift+A, to open the agent panel. Pick Qoder CLI (the default) or Claude Code from the menu at its top, or in Settings. A new chat offers a few prompts to start from. Enter sends, Option+Enter or Shift+Enter adds a line, Escape or the button in the field stops a running turn, and the pencil button starts a new chat. Switching agents also starts a new chat.
+Click the sparkles button at the right of the toolbar, or press Cmd+Shift+A, to open the agent panel. Pick Qoder CLI (the default), Claude Code or Codex from the menu at its top, or in Settings. A new chat offers a few prompts to start from. Enter sends, Option+Enter or Shift+Enter adds a line, Escape or the button in the field stops a running turn, and the pencil button starts a new chat. Switching agents also starts a new chat.
 
-Mini runs the CLI in print mode with stream-json on stdin and stdout, and keeps the process alive between messages so the conversation carries over. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code, with its markdown headings, lists, quotes, code and links rendered. Each tool call gets a row with a spinner that turns into a check, or a cross with the error. The transcript follows new output unless you've scrolled up to read.
+Mini runs Qoder CLI and Claude Code in print mode with stream-json on stdin and stdout, and Codex as `codex app-server`, which speaks JSON-RPC on stdin and stdout. The process stays alive between messages so the conversation carries over. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code and Codex, with its markdown headings, lists, quotes, code and links rendered. Each tool call gets a row with a spinner that turns into a check, or a cross with the error. The transcript follows new output unless you've scrolled up to read.
 
-The agent gets Mini's browser tools and nothing else:
+The agent gets Mini's browser tools and, apart from Codex's shell, nothing else:
 
-| | Qoder CLI | Claude Code |
-|---|---|---|
-| Built-in tools off | `--tools ""` and `--disallowed-tools ListAgents,SendMessage` | `--tools ""` |
-| Only Mini's MCP server | `--mcp-config <file> --strict-mcp-config` | same |
-| Mini's tools allowed without asking | `--allowed-tools mcp__mini --permission-mode dont_ask` | `--allowedTools mcp__mini --permission-mode dontAsk` |
+| | Qoder CLI | Claude Code | Codex (in `thread/start`) |
+|---|---|---|---|
+| Built-in tools off | `--tools ""` and `--disallowed-tools ListAgents,SendMessage` | `--tools ""` | web search, apps, goals, sub-agents, image generation and memories off; the shell can't be removed, so it runs in a `read-only` sandbox |
+| Only Mini's MCP server | `--mcp-config <file> --strict-mcp-config` | same | `mcp_servers.mini` in `config`, with Mini's own `CODEX_HOME` so your `config.toml` servers don't load |
+| Mini's tools allowed without asking | `--allowed-tools mcp__mini --permission-mode dont_ask` | `--allowedTools mcp__mini --permission-mode dontAsk` | `default_tools_approval_mode = "approve"` on the server, `approvalPolicy: "never"` for everything else |
 
 The MCP config is written to `~/Library/Application Support/Mini/agent-mcp.json` and points at the `mini_mcp` inside the running app. The agent runs in the empty directory `~/Library/Application Support/Mini/agent`, with `--no-session-persistence`. Your user settings still load, so your hooks, model choice and user-level instructions (such as `~/.claude/CLAUDE.md`) apply.
+
+Codex is set apart more. It runs with `CODEX_HOME` set to `~/Library/Application Support/Mini/codex`, so your `~/.codex/config.toml`, its MCP servers, plugins, hooks and `AGENTS.md` don't load, and Codex uses its default model. That folder's `auth.json` is a link to `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), so Codex uses your login and a token refresh updates the file you already have. If you aren't logged in, the panel asks you to run `codex login`. Skills in `~/.agents/skills` and system hooks in `/etc/codex` still load. Threads are ephemeral, and Mini declines any approval or question Codex sends, since the panel can't ask you. Current Codex models call tools from a script they write, and the panel still shows each of Mini's tools as its own row. The sandboxed shell can read files on your disk, and its commands show as `shell` rows.
 
 Mini looks for the CLI in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.bun/bin`, `~/.volta/bin`, `~/.npm-global/bin`, then asks a login shell. Shell functions and aliases are skipped, so wrappers defined in `.zshrc` don't run. To use another binary, set its path in Settings > Agent, which shows the one found automatically when the field is empty.
 

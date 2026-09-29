@@ -212,6 +212,7 @@ final class ToolRowView: NSView, TranscriptRow {
         if let ref = input["ref"] { parts.append("ref \(ref)") } else if let selector = input["selector"] { parts.append("\(selector)") }
         if let text = input["text"] { parts.append("\"\(text)\"") }
         if let expression = input["expression"] { parts.append("\(expression)") }
+        if let command = input["command"] { parts.append("\(command)") }
         if parts.isEmpty, let tab = input["tab_id"] { parts.append("tab \(tab)") }
         let string = parts.joined(separator: " ").replacingOccurrences(of: "\n", with: " ")
         return string.count > 80 ? String(string.prefix(80)) + "…" : string

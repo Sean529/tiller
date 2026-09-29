@@ -5,7 +5,7 @@ import AppKit
 /// under it. The agent panel sits to the right of the page.
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
-    NSMenuItemValidation, TabDelegate, TabStripDelegate, AgentPanelDelegate
+    NSMenuItemValidation, NSSplitViewDelegate, TabDelegate, TabStripDelegate, AgentPanelDelegate
 {
     var onClose: (() -> Void)?
 
@@ -70,7 +70,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         splitView.addArrangedSubview(contentView)
         splitView.addArrangedSubview(agentPanel)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
-        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
+        // Above the page, so the panel keeps its width when the window resizes,
+        // and under the priority of a divider drag (490), which must win.
+        splitView.setHoldingPriority(.init(260), forSubviewAt: 1)
+        splitView.delegate = self
         agentPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         contentView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
         agentPanel.delegate = self
@@ -639,6 +642,16 @@ extension BrowserWindowController {
     func agentPanelContext(_ panel: AgentPanelView) -> String {
         guard let tab = selectedTab else { return "[Mini: no tab is open]" }
         return "[Mini: selected tab \(tab.browserID), \"\(tab.displayTitle)\", \(tab.isBlank ? "about:blank" : tab.url)]"
+    }
+
+    /// Widens the divider's grab area into the panel. The divider is a point
+    /// wide, and the page beside it takes the mouse for itself.
+    func splitView(
+        _ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect, forDrawnRect drawnRect: NSRect,
+        ofDividerAt dividerIndex: Int
+    ) -> NSRect {
+        guard !agentPanel.isHidden else { return .zero }
+        return NSRect(x: drawnRect.minX, y: drawnRect.minY, width: drawnRect.width + 6, height: drawnRect.height)
     }
 }
 
