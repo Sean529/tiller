@@ -76,7 +76,7 @@ final class TranscriptView: NSView {
 
 // MARK: Rows
 
-/// A user message: a tinted bubble on the right.
+/// A user message: its images, then a tinted bubble with its text, on the right.
 final class UserMessageView: NSView, TranscriptRow {
     private let bubble = NSView()
     private let label: NSTextField
@@ -84,7 +84,8 @@ final class UserMessageView: NSView, TranscriptRow {
     private static let leftMargin: CGFloat = 36
     private static let padding = NSEdgeInsets(top: 7, left: 12, bottom: 7, right: 12)
 
-    init(text: String) {
+    /// `onOpenImage` gets the index of a clicked image.
+    init(text: String, images: [NSImage] = [], onOpenImage: ((Int) -> Void)? = nil) {
         label = NSTextField(wrappingLabelWithString: text)
         super.init(frame: .zero)
         label.font = .systemFont(ofSize: 13)
@@ -93,15 +94,24 @@ final class UserMessageView: NSView, TranscriptRow {
         bubble.wantsLayer = true
         bubble.layer?.cornerRadius = 14
         bubble.layer?.cornerCurve = .continuous
-        for view in [bubble, label] {
+        let grid = ThumbnailGrid(side: 64, alignment: .trailing)
+        grid.images = images
+        grid.onOpen = onOpenImage
+        for view in [grid, bubble, label] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
+        addSubview(grid)
         addSubview(bubble)
         bubble.addSubview(label)
+        bubble.isHidden = text.isEmpty
         let p = Self.padding
         NSLayoutConstraint.activate([
-            bubble.topAnchor.constraint(equalTo: topAnchor),
-            bubble.bottomAnchor.constraint(equalTo: bottomAnchor),
+            grid.topAnchor.constraint(equalTo: topAnchor),
+            grid.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.leftMargin),
+            grid.trailingAnchor.constraint(equalTo: trailingAnchor),
+            text.isEmpty
+                ? grid.bottomAnchor.constraint(equalTo: bottomAnchor)
+                : bubble.topAnchor.constraint(equalTo: grid.bottomAnchor, constant: images.isEmpty ? 0 : 6),
             bubble.trailingAnchor.constraint(equalTo: trailingAnchor),
             bubble.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: Self.leftMargin),
             label.topAnchor.constraint(equalTo: bubble.topAnchor, constant: p.top),
@@ -109,6 +119,7 @@ final class UserMessageView: NSView, TranscriptRow {
             label.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: p.left),
             label.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -p.right),
         ])
+        if !text.isEmpty { bubble.bottomAnchor.constraint(equalTo: bottomAnchor).isActive = true }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -121,6 +132,134 @@ final class UserMessageView: NSView, TranscriptRow {
 
     override func updateLayer() {
         bubble.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.2).cgColor
+    }
+}
+
+/// Square image thumbnails in rows that wrap to the grid's width. Clicking one
+/// opens it; with `onRemove` set, each also gets a remove button.
+final class ThumbnailGrid: NSView {
+    enum Alignment { case leading, trailing }
+
+    var onOpen: ((Int) -> Void)?
+    var onRemove: ((Int) -> Void)?
+    var images: [NSImage] = [] {
+        didSet { rebuild() }
+    }
+
+    private let side: CGFloat
+    private let alignment: Alignment
+    private var thumbnails: [ThumbnailView] = []
+    private static let spacing: CGFloat = 6
+
+    override var isFlipped: Bool { true }
+
+    init(side: CGFloat, alignment: Alignment) {
+        self.side = side
+        self.alignment = alignment
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func rebuild() {
+        thumbnails.forEach { $0.removeFromSuperview() }
+        thumbnails = images.enumerated().map { index, image in
+            let thumbnail = ThumbnailView(image: image, removable: onRemove != nil)
+            thumbnail.onOpen = { [weak self] in self?.onOpen?(index) }
+            thumbnail.onRemove = { [weak self] in self?.onRemove?(index) }
+            addSubview(thumbnail)
+            return thumbnail
+        }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    /// Before the grid has a width, everything goes in one row.
+    private var perRow: Int {
+        guard bounds.width > 0 else { return max(1, images.count) }
+        return max(1, Int((bounds.width + Self.spacing) / (side + Self.spacing)))
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let rows = (images.count + perRow - 1) / perRow
+        return NSSize(width: NSView.noIntrinsicMetric, height: rows == 0 ? 0 : CGFloat(rows) * (side + Self.spacing) - Self.spacing)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged { invalidateIntrinsicContentSize() }
+    }
+
+    override func layout() {
+        super.layout()
+        let perRow = perRow
+        for (index, thumbnail) in thumbnails.enumerated() {
+            let column = CGFloat(index % perRow), row = CGFloat(index / perRow)
+            let offset = column * (side + Self.spacing)
+            let x = alignment == .leading ? offset : bounds.width - side - offset
+            thumbnail.frame = NSRect(x: x, y: row * (side + Self.spacing), width: side, height: side)
+        }
+    }
+}
+
+/// One thumbnail: the image filling a rounded square, with an optional
+/// remove button in its corner.
+private final class ThumbnailView: NSView {
+    var onOpen: (() -> Void)?
+    var onRemove: (() -> Void)?
+    private let image: NSImage
+
+    init(image: NSImage, removable: Bool) {
+        self.image = image
+        super.init(frame: .zero)
+        wantsLayer = true
+        toolTip = "Click to preview"
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Image")
+        guard removable else { return }
+        let remove = NSButton()
+        remove.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove Image")?
+            .withSymbolConfiguration(.init(paletteColors: [.white, NSColor.black.withAlphaComponent(0.6)]))
+        remove.isBordered = false
+        remove.imagePosition = .imageOnly
+        remove.toolTip = "Remove"
+        remove.target = self
+        remove.action = #selector(removeClicked(_:))
+        remove.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(remove)
+        NSLayoutConstraint.activate([
+            remove.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            remove.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func removeClicked(_ sender: Any?) { onRemove?() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        guard let layer else { return }
+        layer.contents = image.layerContents(forContentsScale: window?.backingScaleFactor ?? 2)
+        layer.contentsGravity = .resizeAspectFill
+        layer.masksToBounds = true
+        layer.cornerRadius = 8
+        layer.cornerCurve = .continuous
+        layer.borderWidth = 1
+        layer.borderColor = NSColor.separatorColor.cgColor
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onOpen?() }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onOpen?()
+        return true
     }
 }
 
@@ -213,6 +352,8 @@ final class ToolRowView: NSView, TranscriptRow {
         if let text = input["text"] { parts.append("\"\(text)\"") }
         if let expression = input["expression"] { parts.append("\(expression)") }
         if let command = input["command"] { parts.append("\(command)") }
+        if let pattern = input["pattern"] { parts.append("\(pattern)") }
+        if let path = input["file_path"] ?? input["path"] { parts.append("\(path)") }
         if parts.isEmpty, let tab = input["tab_id"] { parts.append("tab \(tab)") }
         let string = parts.joined(separator: " ").replacingOccurrences(of: "\n", with: " ")
         return string.count > 80 ? String(string.prefix(80)) + "…" : string

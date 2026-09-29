@@ -61,7 +61,8 @@ enum MainMenu {
         hidden(view, "Zoom In", #selector(BrowserWindowController.zoomIn(_:)), "+", [.command])
         view.addItem(withTitle: "Zoom Out", action: #selector(BrowserWindowController.zoomOut(_:)), keyEquivalent: "-")
         view.addItem(.separator())
-        view.addItem(withTitle: "Show Agent", action: #selector(BrowserWindowController.toggleAgentPanel(_:)), keyEquivalent: "A")
+        agentItem = view.addItem(withTitle: "Show Agent", action: #selector(BrowserWindowController.toggleAgentPanel(_:)), keyEquivalent: "")
+        applyAgentShortcut()
         add(view, titled: "View", to: main)
 
         let history = NSMenu(title: "History")
@@ -92,6 +93,30 @@ enum MainMenu {
     }
 
     @MainActor private static let historyMenu = HistoryMenuDelegate()
+
+    /// View > Show Agent, whose shortcut Settings can change.
+    @MainActor private static var agentItem: NSMenuItem?
+
+    /// Gives Show Agent the shortcut in Settings.
+    @MainActor
+    static func applyAgentShortcut() {
+        let shortcut = Settings.agentShortcut
+        agentItem?.keyEquivalent = shortcut?.key ?? ""
+        agentItem?.keyEquivalentModifierMask = shortcut?.modifiers ?? []
+    }
+
+    /// The title of another menu item that already uses `shortcut`, hidden ones included.
+    @MainActor
+    static func conflict(with shortcut: Shortcut) -> String? {
+        func search(_ menu: NSMenu) -> String? {
+            for item in menu.items {
+                if item !== agentItem, Shortcut(menuItem: item) == shortcut { return item.title }
+                if let submenu = item.submenu, let title = search(submenu) { return title }
+            }
+            return nil
+        }
+        return NSApp.mainMenu.flatMap(search)
+    }
 
     @MainActor
     @discardableResult

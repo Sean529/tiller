@@ -373,6 +373,13 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     /// What the lookup found, for kinds whose lookup has finished. Nil values mean not found.
     private var detected: [AgentKind: String?] = [:]
     private var instructionsView: NSTextView?
+    private let folderField = NSTextField()
+    private let folderNote = SettingsPane.note()
+    private let shortcutRecorder = ShortcutRecorder()
+    private lazy var restoreShortcutButton = NSButton(
+        title: "Restore Default", target: self, action: #selector(restoreShortcut(_:))
+    )
+    private let shortcutNote = SettingsPane.note()
 
     init() { super.init(title: "Agent") }
 
@@ -390,6 +397,15 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
         )
 
+        shortcutRecorder.shortcut = Settings.agentShortcut
+        shortcutRecorder.onRecord = { [weak self] shortcut in self?.shortcutRecorded(shortcut) }
+        shortcutRecorder.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        let shortcutRow = NSStackView(views: [shortcutRecorder, restoreShortcutButton])
+        shortcutRow.spacing = 8
+        addRow("Show and hide:", shortcutRow)
+        addNote(shortcutNote)
+        showShortcutState()
+
         for (index, kind) in AgentKind.allCases.enumerated() {
             let field = NSTextField()
             field.stringValue = UserDefaults.standard.string(forKey: kind.pathDefaultsKey) ?? ""
@@ -405,6 +421,38 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             pathNotes[kind] = note
             showPathState(kind)
         }
+
+        let checkboxes = AgentTool.allCases.enumerated().map { index, tool in
+            let checkbox = NSButton(checkboxWithTitle: tool.displayName, target: self, action: #selector(toolChanged(_:)))
+            checkbox.tag = index
+            checkbox.state = Settings.agentToolEnabled(tool) ? .on : .off
+            return checkbox
+        }
+        let tools = NSStackView(views: checkboxes)
+        tools.orientation = .vertical
+        tools.alignment = .leading
+        tools.spacing = 6
+        let toolsRow = addRow("Also allow:", tools)
+        toolsRow.rowAlignment = .none
+        toolsRow.cell(at: 0).yPlacement = .top
+        let toolsNote = Self.note(
+            "These run without asking, and pages can try to steer the agent. Codex can always read "
+                + "and run read-only commands, and writing lets its commands write in the folder too. "
+                + "Applies from the next new chat."
+        )
+        toolsNote.lineBreakMode = .byWordWrapping
+        toolsNote.preferredMaxLayoutWidth = Self.controlWidth
+        addNote(toolsNote)
+
+        folderField.stringValue = Settings.agentFolder
+        folderField.placeholderString = "An empty folder"
+        folderField.delegate = self
+        let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseFolder(_:)))
+        let folderRow = NSStackView(views: [Self.fixWidth(folderField, Self.controlWidth - 90), choose])
+        folderRow.spacing = 8
+        addRow("Work in:", folderRow)
+        addNote(folderNote)
+        showFolderState()
 
         let scroll = NSTextView.scrollableTextView()
         scroll.borderType = .bezelBorder
@@ -463,7 +511,49 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         }
     }
 
+    private func showFolderState() {
+        guard let folder = Settings.agentFolderPath else {
+            Self.show("Leave empty so no project's files or instructions load.", in: folderNote)
+            return
+        }
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: folder, isDirectory: &isDirectory), isDirectory.boolValue {
+            Self.show("Its instructions and project settings load too.", in: folderNote)
+        } else {
+            Self.show("Not a folder.", in: folderNote, warning: true)
+        }
+    }
+
+    @objc private func toolChanged(_ sender: NSButton) {
+        guard AgentTool.allCases.indices.contains(sender.tag) else { return }
+        Settings.setAgentTool(AgentTool.allCases[sender.tag], enabled: sender.state == .on)
+    }
+
+    @objc private func chooseFolder(_ sender: NSButton) {
+        guard let window = view.window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.message = "Choose the folder the agent works in"
+        if let current = Settings.agentFolderPath { panel.directoryURL = URL(fileURLWithPath: current) }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.folderField.stringValue = url.path
+                Settings.agentFolder = url.path
+                self.showFolderState()
+            }
+        }
+    }
+
     func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSTextField === folderField {
+            Settings.agentFolder = folderField.stringValue
+            showFolderState()
+            return
+        }
         guard let field = notification.object as? NSTextField,
             let kind = pathFields.first(where: { $0.value === field })?.key
         else { return }
@@ -479,6 +569,37 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     @objc private func agentChanged(_ sender: NSPopUpButton) {
         guard let kind = (sender.selectedItem?.representedObject as? String).flatMap(AgentKind.init) else { return }
         AgentKind.current = kind
+    }
+
+    private func shortcutRecorded(_ shortcut: Shortcut?) {
+        if let shortcut {
+            if shortcut.modifiers.isDisjoint(with: [.command, .control]) {
+                return Self.show("Use a combination with ⌘ or ⌃.", in: shortcutNote, warning: true)
+            }
+            if let title = MainMenu.conflict(with: shortcut) {
+                return Self.show("\(shortcut.displayString) is used by \(title).", in: shortcutNote, warning: true)
+            }
+        }
+        Settings.agentShortcut = shortcut
+        MainMenu.applyAgentShortcut()
+        showShortcutState()
+    }
+
+    @objc private func restoreShortcut(_ sender: Any?) {
+        Settings.resetAgentShortcut()
+        MainMenu.applyAgentShortcut()
+        showShortcutState()
+    }
+
+    private func showShortcutState() {
+        shortcutRecorder.shortcut = Settings.agentShortcut
+        restoreShortcutButton.isEnabled = Settings.agentShortcut != Settings.defaultAgentShortcut
+        Self.show(
+            Settings.agentShortcut == nil
+                ? "No shortcut. Click to record one."
+                : "Click to record another. Delete clears it, Escape cancels.",
+            in: shortcutNote
+        )
     }
 
     /// The panel's picker changed the agent.

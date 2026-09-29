@@ -130,6 +130,70 @@ enum Settings {
         get { defaults.string(forKey: "agentInstructions") ?? "" }
         set { defaults.set(newValue, forKey: "agentInstructions") }
     }
+
+    /// Built-in tools the agent gets besides Mini's. All off by default.
+    static func agentToolEnabled(_ tool: AgentTool) -> Bool {
+        defaults.bool(forKey: tool.defaultsKey)
+    }
+
+    static func setAgentTool(_ tool: AgentTool, enabled: Bool) {
+        defaults.set(enabled, forKey: tool.defaultsKey)
+    }
+
+    static var agentTools: [AgentTool] { AgentTool.allCases.filter(agentToolEnabled) }
+
+    /// As typed. Empty means Mini's own empty folder.
+    static var agentFolder: String {
+        get { defaults.string(forKey: "agentFolder") ?? "" }
+        set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "agentFolder") }
+    }
+
+    /// The folder the agent works in, with `~` expanded. Nil means Mini's own.
+    static var agentFolderPath: String? {
+        agentFolder.isEmpty ? nil : NSString(string: agentFolder).expandingTildeInPath
+    }
+
+    static let defaultAgentShortcut = Shortcut(key: "s", modifiers: [.command, .shift])
+
+    /// Shows and hides the agent panel. Stored as text like `shift+cmd+s`;
+    /// unset means the default and empty means none.
+    static var agentShortcut: Shortcut? {
+        get {
+            guard let text = defaults.string(forKey: "agentShortcut") else { return defaultAgentShortcut }
+            return Shortcut(text: text)
+        }
+        set { defaults.set(newValue?.text ?? "", forKey: "agentShortcut") }
+    }
+
+    static func resetAgentShortcut() {
+        defaults.removeObject(forKey: "agentShortcut")
+    }
+}
+
+/// Groups of built-in agent tools that Settings can turn on.
+enum AgentTool: String, CaseIterable {
+    case read
+    case write
+    case shell
+
+    var defaultsKey: String { "agentTool.\(rawValue)" }
+
+    var displayName: String {
+        switch self {
+        case .read: "Read files"
+        case .write: "Write and edit files"
+        case .shell: "Run commands"
+        }
+    }
+
+    /// The tool names Claude Code and Qoder CLI use.
+    var toolNames: [String] {
+        switch self {
+        case .read: ["Read", "Grep", "Glob"]
+        case .write: ["Write", "Edit"]
+        case .shell: ["Bash"]
+        }
+    }
 }
 
 extension Notification.Name {

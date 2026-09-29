@@ -13,6 +13,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Holds every tab's view. Only the selected one is visible.
     private let contentView = NSView()
     private let agentPanel = AgentPanelView(frame: NSRect(x: 0, y: 0, width: 360, height: 600))
+    /// Where the panel is going. It stays unhidden while it slides out.
+    private var agentPanelShown = UserDefaults.standard.bool(forKey: BrowserWindowController.agentVisibleKey)
+    /// Counts toggles, so a slide's completion knows a later toggle took over.
+    private var agentToggleCount = 0
     private let agentButton = NSButton()
     private let tabStrip = TabStripView()
     private let addressBar = AddressBarView(frame: NSRect(x: 0, y: 0, width: 800, height: 40))
@@ -77,7 +81,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         agentPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         contentView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
         agentPanel.delegate = self
-        agentPanel.isHidden = !UserDefaults.standard.bool(forKey: Self.agentVisibleKey)
+        agentPanel.isHidden = !agentPanelShown
+        agentPanel.wantsLayer = true
         splitView.autosaveName = "MiniAgentSplit"
         window.contentView = splitView
         window.toolbarStyle = .unified
@@ -415,25 +420,75 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         if focusPage { selectedTab?.focus() }
     }
 
+    /// Slides the panel in or out. The page resizes once, before sliding in and
+    /// after sliding out, since Chromium laying it out every frame would stutter.
     @objc func toggleAgentPanel(_ sender: Any?) {
-        agentPanel.isHidden.toggle()
-        UserDefaults.standard.set(!agentPanel.isHidden, forKey: Self.agentVisibleKey)
-        splitView.adjustSubviews()
-        agentButton.state = agentPanel.isHidden ? .off : .on
-        if agentPanel.isHidden {
-            selectedTab?.focus()
-        } else {
+        agentPanelShown.toggle()
+        UserDefaults.standard.set(agentPanelShown, forKey: Self.agentVisibleKey)
+        agentButton.state = agentPanelShown ? .on : .off
+        agentToggleCount += 1
+        let count = agentToggleCount
+        if agentPanelShown {
+            agentPanel.isHidden = false
+            splitView.adjustSubviews()
             window?.makeFirstResponder(agentPanel.input)
+            slideAgentPanel(to: 0, count: count)
+        } else {
+            selectedTab?.focus()
+            slideAgentPanel(to: agentPanel.bounds.width, count: count) { [weak self] in
+                self?.agentPanel.isHidden = true
+                self?.splitView.adjustSubviews()
+            }
         }
+    }
+
+    /// Moves the panel from wherever it is now to `offset` points right of its
+    /// place, then runs `completion` unless another toggle came first.
+    private func slideAgentPanel(to offset: CGFloat, count: Int, completion: (() -> Void)? = nil) {
+        guard let layer = agentPanel.layer else {
+            completion?()
+            return
+        }
+        let key = "slide"
+        let current = layer.presentation()?.value(forKeyPath: "transform.translation.x") as? CGFloat
+        // Coming out of hiding, start off the right edge.
+        let start = layer.animation(forKey: key) == nil
+            ? (offset == 0 ? agentPanel.bounds.width : 0) : current ?? 0
+        layer.removeAnimation(forKey: key)
+        let finish = { [weak self] in
+            guard let self, self.agentToggleCount == count else { return }
+            completion?()
+            layer.removeAnimation(forKey: key)
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            return finish()
+        }
+        let animation = CABasicAnimation(keyPath: "transform.translation.x")
+        animation.fromValue = start
+        animation.toValue = offset
+        animation.duration = 0.2
+        animation.timingFunction = CAMediaTimingFunction(name: offset == 0 ? .easeOut : .easeIn)
+        // Stays at the end until `finish` hides the panel, so it doesn't flash back.
+        animation.fillMode = .forwards
+        animation.isRemovedOnCompletion = false
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { MainActor.assumeIsolated { finish() } }
+        layer.add(animation, forKey: key)
+        CATransaction.commit()
     }
 
     private static let agentVisibleKey = "agentPanelVisible"
 
     #if DEBUG
     /// For testing without typing: `open Mini.app --args -agentPrompt "..."`.
+    /// `-agentPasteImage YES` pastes the clipboard twice first.
     func sendAgentPrompt(_ text: String) {
-        if agentPanel.isHidden { toggleAgentPanel(nil) }
-        agentPanel.send(text)
+        if !agentPanelShown { toggleAgentPanel(nil) }
+        if UserDefaults.standard.bool(forKey: "agentPasteImage") {
+            agentPanel.pasteAndSendForTesting(text)
+        } else {
+            agentPanel.send(text)
+        }
         let stopAfter = UserDefaults.standard.double(forKey: "agentStopAfter")
         if stopAfter > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter) { [weak self] in
@@ -468,7 +523,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleAgentPanel(_:)) {
-            item.title = agentPanel.isHidden ? "Show Agent" : "Hide Agent"
+            item.title = agentPanelShown ? "Hide Agent" : "Show Agent"
         }
         return switch item.action {
         case #selector(goBack(_:)): selectedTab?.canGoBack ?? false

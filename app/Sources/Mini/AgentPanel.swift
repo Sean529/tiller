@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 
 @MainActor
 protocol AgentPanelDelegate: AnyObject {
@@ -32,8 +33,17 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
     private var liveTextRenderPending = false
     private static let liveTextInterval = 0.05
     private var toolRows: [String: ToolRowView] = [:]
+    /// This panel's attached images, kept until a new chat or the window closes.
+    private let attachmentDirectory = AgentAttachment.directory.appendingPathComponent(UUID().uuidString)
+    private let quickLook = QuickLookItems()
+
+    /// Images left behind by a Mini that quit without cleaning up.
+    private static let removeStaleAttachments: Void = {
+        try? FileManager.default.removeItem(at: AgentAttachment.directory)
+    }()
 
     override init(frame: NSRect) {
+        Self.removeStaleAttachments
         super.init(frame: frame)
         build()
         showIdle()
@@ -44,8 +54,15 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Ends the agent process. Called when the window closes.
+    /// Ends the agent process and deletes the chat's images. Called when the
+    /// window closes.
     func shutDown() {
+        endSession()
+        composer.attachments = []
+        try? FileManager.default.removeItem(at: attachmentDirectory)
+    }
+
+    private func endSession() {
         session?.stop()
         session = nil
     }
@@ -104,6 +121,13 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
         composer.textView.delegate = self
         composer.sendButton.target = self
         composer.sendButton.action = #selector(sendOrStop(_:))
+        composer.attachButton.target = self
+        composer.attachButton.action = #selector(chooseImages(_:))
+        composer.onImages = { [weak self] images in self?.attach(images) }
+        composer.onOpenImage = { [weak self] index in
+            guard let self else { return }
+            self.preview(self.composer.attachments.map(\.url), at: index)
+        }
 
         for view in [background, agentPicker, status, newChatButton, scrollView, separator, emptyState, composer] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -177,6 +201,9 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
     }
 
     private func startNewChat() {
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().dataSource === quickLook {
+            QLPreviewPanel.shared().orderOut(nil)
+        }
         shutDown()
         transcript.clear()
         liveText = nil
@@ -187,6 +214,19 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
 
     #if DEBUG
     func stopForTesting() { sendOrStop(nil) }
+
+    /// Pastes the clipboard into the composer twice, as Cmd+V would, then
+    /// sends `text` with it after a few seconds.
+    func pasteAndSendForTesting(_ text: String) {
+        composer.textView.paste(nil)
+        composer.textView.paste(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.composer.text = text
+                self?.submit()
+            }
+        }
+    }
     #endif
 
     @objc private func sendOrStop(_ sender: Any?) {
@@ -233,25 +273,82 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
 
     private func submit() {
         let text = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, session?.isBusy != true else { return }
+        let images = composer.attachments
+        guard !text.isEmpty || !images.isEmpty, session?.isBusy != true else { return }
         composer.text = ""
-        send(text)
+        composer.attachments = []
+        send(text, images: images)
     }
 
-    func send(_ text: String) {
+    func send(_ text: String, images: [AgentAttachment] = []) {
         let session = self.session ?? makeSession()
         emptyState.isHidden = true
-        transcript.add(UserMessageView(text: text))
+        transcript.add(UserMessageView(text: text, images: images.map(\.image)) { [weak self] index in
+            self?.preview(images.map(\.url), at: index)
+        })
         do {
-            try session.send(text, context: delegate?.agentPanelContext(self) ?? "")
+            try session.send(text, images: images, context: delegate?.agentPanelContext(self) ?? "")
             if session.isRunning { status.show("Working…", busy: true) }
             setBusy(true)
         } catch {
             addError((error as? ControlError)?.message ?? error.localizedDescription)
-            shutDown()
+            endSession()
             showIdle()
         }
         scrollToBottom()
+    }
+
+    // MARK: Images
+
+    /// Adds pasted, dropped or chosen images to the message, up to the limit.
+    /// Beeps for any that don't fit or can't be read.
+    private func attach(_ images: [NSImage]) {
+        let room = max(0, AgentAttachment.maxCount - composer.attachments.count)
+        let added = images.prefix(room).compactMap { AgentAttachment(image: $0, in: attachmentDirectory) }
+        if added.count < images.count { NSSound.beep() }
+        composer.attachments += added
+    }
+
+    @objc private func chooseImages(_ sender: Any?) {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.message = "Choose images to send to the agent."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            if response == .OK { self.attach(panel.urls.compactMap(NSImage.init(contentsOf:))) }
+            window.makeFirstResponder(self.input)
+        }
+    }
+
+    /// Shows the images in Quick Look, starting at `index`. The panel asks the
+    /// responder chain for a controller, so the focus moves into this panel
+    /// if it is elsewhere.
+    private func preview(_ urls: [URL], at index: Int) {
+        quickLook.urls = urls
+        quickLook.index = index
+        if !hasKeyboardFocus { window?.makeFirstResponder(input) }
+        guard let panel = QLPreviewPanel.shared() else { return }
+        if panel.isVisible {
+            panel.updateController()
+            panel.reloadData()
+            panel.currentPreviewItemIndex = index
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = quickLook
+        panel.reloadData()
+        panel.currentPreviewItemIndex = quickLook.index
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = nil
     }
 
     private func makeSession() -> AgentSession {
@@ -578,13 +675,34 @@ private final class SuggestionButton: NSView {
 // MARK: Composer
 
 /// The message field: a rounded box whose text grows with what is typed, up
-/// to a few lines, with the send/stop button in its corner.
+/// to a few lines, with the attach button and the send/stop button in its
+/// bottom corners. Attached images show above the text. Images pasted or
+/// dropped on it go to `onImages`.
 private final class Composer: NSView {
     let textView = PlaceholderTextView()
     let sendButton = NSButton()
+    let attachButton = NSButton()
+    var onImages: (([NSImage]) -> Void)?
+    var onOpenImage: ((Int) -> Void)?
     private let undo = UndoManager()
     private let scrollView = NSScrollView()
+    private let thumbnails = ThumbnailGrid(side: 48, alignment: .leading)
     private var textHeight: NSLayoutConstraint!
+    private var textBelowTop: NSLayoutConstraint!
+    private var textBelowThumbnails: NSLayoutConstraint!
+    private var isDropTarget = false {
+        didSet { needsDisplay = true }
+    }
+
+    var attachments: [AgentAttachment] = [] {
+        didSet {
+            thumbnails.images = attachments.map(\.image)
+            thumbnails.isHidden = attachments.isEmpty
+            textBelowTop.isActive = attachments.isEmpty
+            textBelowThumbnails.isActive = !attachments.isEmpty
+            updateSendButton()
+        }
+    }
 
     private static let font = NSFont.systemFont(ofSize: 13)
     private static let maxLines: CGFloat = 8
@@ -631,6 +749,17 @@ private final class Composer: NSView {
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
         textView.onFocusChange = { [weak self] in self?.needsDisplay = true }
+        textView.onPasteboardImages = { [weak self] pasteboard in self?.takeImages(from: pasteboard) ?? false }
+        textView.imageDropTarget = self
+        registerForDraggedTypes(AgentAttachment.pasteboardTypes)
+
+        thumbnails.isHidden = true
+        thumbnails.onOpen = { [weak self] index in self?.onOpenImage?(index) }
+        thumbnails.onRemove = { [weak self] index in
+            guard let self else { return }
+            let removed = self.attachments.remove(at: index)
+            try? FileManager.default.removeItem(at: removed.url)
+        }
 
         scrollView.documentView = textView
         scrollView.drawsBackground = false
@@ -643,17 +772,34 @@ private final class Composer: NSView {
         sendButton.imagePosition = .imageOnly
         updateSendButton()
 
-        for view in [scrollView, sendButton] {
+        attachButton.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach Images")?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        attachButton.toolTip = "Attach Images"
+        attachButton.isBordered = false
+        attachButton.bezelStyle = .accessoryBarAction
+        attachButton.imagePosition = .imageOnly
+        attachButton.contentTintColor = .secondaryLabelColor
+
+        for view in [thumbnails, scrollView, attachButton, sendButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         textHeight = scrollView.heightAnchor.constraint(equalToConstant: Self.lineHeight)
+        textBelowTop = scrollView.topAnchor.constraint(equalTo: topAnchor, constant: 10)
+        textBelowThumbnails = scrollView.topAnchor.constraint(equalTo: thumbnails.bottomAnchor, constant: 8)
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            thumbnails.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            thumbnails.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            thumbnails.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            textBelowTop,
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            scrollView.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 2),
             scrollView.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -6),
             textHeight,
+            attachButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            attachButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            attachButton.widthAnchor.constraint(equalToConstant: 26),
+            attachButton.heightAnchor.constraint(equalToConstant: 26),
             sendButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             sendButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
             sendButton.widthAnchor.constraint(equalToConstant: 26),
@@ -678,7 +824,7 @@ private final class Composer: NSView {
     }
 
     private func updateSendButton() {
-        let empty = textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let empty = textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty
         sendButton.image = isBusy ? Self.stopImage : Self.sendImage
         sendButton.toolTip = isBusy ? "Stop (Esc)" : "Send (Return)"
         sendButton.contentTintColor = isBusy ? .labelColor : empty ? .tertiaryLabelColor : .controlAccentColor
@@ -692,22 +838,107 @@ private final class Composer: NSView {
         layer?.cornerRadius = 16
         layer?.cornerCurve = .continuous
         layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.7).cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = (focused ? NSColor.controlAccentColor.withAlphaComponent(0.6) : NSColor.separatorColor).cgColor
+        layer?.borderWidth = isDropTarget ? 2 : 1
+        layer?.borderColor = (isDropTarget ? NSColor.controlAccentColor
+            : focused ? NSColor.controlAccentColor.withAlphaComponent(0.6) : NSColor.separatorColor).cgColor
     }
 
     /// Clicks anywhere in the box go to the text.
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(textView)
     }
+
+    /// Hands the pasteboard's images to `onImages`, and returns false if it
+    /// has none, so it is pasted as text.
+    private func takeImages(from pasteboard: NSPasteboard) -> Bool {
+        guard AgentAttachment.canRead(pasteboard) else { return false }
+        onImages?(AgentAttachment.images(on: pasteboard))
+        return true
+    }
+
+    // MARK: Dropping images
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        isDropTarget = AgentAttachment.canRead(sender.draggingPasteboard)
+        return isDropTarget ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        isDropTarget ? .copy : []
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        isDropTarget = false
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        isDropTarget = false
+        return takeImages(from: sender.draggingPasteboard)
+    }
+}
+
+/// The images Quick Look shows for the panel.
+private final class QuickLookItems: NSObject, QLPreviewPanelDataSource {
+    var urls: [URL] = []
+    var index = 0
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { urls.count }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
+        urls[index] as NSURL
+    }
 }
 
 /// A text view that shows a grey hint while empty and reports focus changes.
+/// Images pasted into it go to `onPasteboardImages`, and images dragged onto
+/// it go to `imageDropTarget`.
 final class PlaceholderTextView: NSTextView {
     var placeholder = "" {
         didSet { needsDisplay = true }
     }
     var onFocusChange: (() -> Void)?
+    /// Takes the pasteboard's images, returning false if it has none.
+    var onPasteboardImages: ((NSPasteboard) -> Bool)?
+    weak var imageDropTarget: NSView?
+
+    override func paste(_ sender: Any?) {
+        if onPasteboardImages?(.general) != true { super.paste(sender) }
+    }
+
+    /// Paste is on for an image, which plain text can't take.
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), onPasteboardImages != nil, AgentAttachment.canRead(.general) { return true }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] {
+        super.acceptableDragTypes + AgentAttachment.pasteboardTypes
+    }
+
+    private func dropsImages(_ sender: (any NSDraggingInfo)?) -> Bool {
+        guard let sender, imageDropTarget != nil else { return false }
+        return AgentAttachment.canRead(sender.draggingPasteboard)
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        dropsImages(sender) ? imageDropTarget!.draggingEntered(sender) : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        dropsImages(sender) ? imageDropTarget!.draggingUpdated(sender) : super.draggingUpdated(sender)
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        if dropsImages(sender) { imageDropTarget!.draggingExited(sender) } else { super.draggingExited(sender) }
+    }
+
+    override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        dropsImages(sender) || super.prepareForDragOperation(sender)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        dropsImages(sender) ? imageDropTarget!.performDragOperation(sender) : super.performDragOperation(sender)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
