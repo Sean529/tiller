@@ -137,12 +137,27 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     private var searchPopUp: NSPopUpButton?
     private let templateField = NSTextField()
     private let templateNote = SettingsPane.note()
+    private let defaultBrowserButton = NSButton(title: "Make Default", target: nil, action: nil)
+    private let defaultBrowserStatus = NSTextField(labelWithString: "")
 
     init() { super.init(title: "General") }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func buildRows() {
+        defaultBrowserButton.target = self
+        defaultBrowserButton.action = #selector(makeDefaultBrowser(_:))
+        let defaultBrowser = NSStackView(views: [defaultBrowserButton, defaultBrowserStatus])
+        defaultBrowser.spacing = 8
+        addRow("Default browser:", defaultBrowser)
+        addNote(Self.note("For every profile. Links open in the profile used last."))
+        showDefaultBrowserState()
+        for name in [NSApplication.didBecomeActiveNotification, .defaultBrowserDidChange] {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(defaultBrowserChanged(_:)), name: name, object: nil
+            )
+        }
+
         homepageField.stringValue = Settings.homepage
         homepageField.placeholderString = Settings.defaultHomepage
         homepageField.delegate = self
@@ -188,6 +203,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     /// An import from Chrome may have changed these while the window was closed.
     override func viewWillAppear() {
         super.viewWillAppear()
+        showDefaultBrowserState()
         homepageField.stringValue = Settings.homepage
         templateField.stringValue = Settings.searchTemplate
         launchPopUp?.selectItem(at: LaunchTabs.allCases.firstIndex(of: Settings.launchTabs) ?? 0)
@@ -205,6 +221,24 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
             Settings.searchTemplate = field.stringValue
             showTemplateState()
         }
+    }
+
+    @objc private func makeDefaultBrowser(_ sender: NSButton) {
+        DefaultBrowser.makeDefault { [weak self] _ in self?.showDefaultBrowserState() }
+    }
+
+    /// Another app may have taken over as the default while Tiller was in the background.
+    @objc private func defaultBrowserChanged(_ notification: Notification) {
+        showDefaultBrowserState()
+    }
+
+    private func showDefaultBrowserState() {
+        let isDefault = DefaultBrowser.isDefault
+        defaultBrowserButton.isHidden = isDefault
+        defaultBrowserButton.isEnabled = DefaultBrowser.isAvailable
+        defaultBrowserStatus.stringValue = isDefault
+            ? "Tiller is the default browser."
+            : DefaultBrowser.isAvailable ? "" : "Only Tiller.app can be the default."
     }
 
     @objc private func launchTabsChanged(_ sender: NSPopUpButton) {

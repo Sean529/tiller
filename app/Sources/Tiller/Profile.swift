@@ -84,6 +84,12 @@ enum Profiles {
         update { $0.lastUsed = current.id }
     }
 
+    /// The profile a plain launch and the CLI pick, which may be another Tiller's.
+    static var lastUsedID: String {
+        let list = read()
+        return list.lastUsed.flatMap { id in list.profiles.first { $0.id == id }?.id } ?? current.id
+    }
+
     static func create(named name: String) throws -> Profile {
         var profile: Profile?
         try update { list in
@@ -140,9 +146,16 @@ enum Profiles {
 
     // MARK: Opening
 
-    /// Brings the profile's Tiller forward, or starts one for it.
+    /// The control socket another profile's Tiller listens on, unless it was
+    /// started with TILLER_SOCKET.
+    static func socketPath(for id: String) -> String {
+        folder(for: id) + "/control.sock"
+    }
+
+    /// Brings the profile's Tiller forward, or starts one for it. A new one
+    /// opens `urls` in tabs.
     @MainActor
-    static func open(_ id: String) {
+    static func open(_ id: String, urls: [URL] = []) {
         if let pid = runningProcess(id) {
             NSRunningApplication(processIdentifier: pid)?.activate()
             return
@@ -150,6 +163,11 @@ enum Profiles {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
         configuration.arguments = ["-profile", id]
+        // As an argument: macOS may hand URLs opened this way to a Tiller
+        // that is running already rather than the new one.
+        if !urls.isEmpty {
+            configuration.arguments += ["-openURLs", urls.map(\.absoluteString).joined(separator: "\n")]
+        }
         // The new process must find the same profiles. TILLER_SOCKET isn't
         // passed on, since two processes can't share a socket.
         if let dir = ProcessInfo.processInfo.environment["TILLER_DATA_DIR"], !dir.isEmpty {

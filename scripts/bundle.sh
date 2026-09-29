@@ -42,6 +42,19 @@ write_plist() {
     [ "$4" = "1" ] && ui_element="<key>LSUIElement</key><string>1</string>"
     local icon=""
     [ "$4" = "0" ] && icon="<key>CFBundleIconFile</key><string>Tiller</string>"
+    # Web links and HTML files, so macOS offers Tiller as the default browser.
+    local browser=""
+    [ "$4" = "0" ] && browser="<key>CFBundleURLTypes</key><array><dict>
+        <key>CFBundleURLName</key><string>Web site URL</string>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>CFBundleURLSchemes</key><array><string>http</string><string>https</string></array>
+    </dict></array>
+    <key>CFBundleDocumentTypes</key><array><dict>
+        <key>CFBundleTypeName</key><string>HTML document</string>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>LSHandlerRank</key><string>Default</string>
+        <key>LSItemContentTypes</key><array><string>public.html</string><string>public.xhtml</string></array>
+    </dict></array>"
     cat > "$1/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -64,6 +77,7 @@ write_plist() {
     <key>NSMicrophoneUsageDescription</key><string>A website wants to use the microphone.</string>
     <key>NSAppleEventsUsageDescription</key><string>Tiller asks Finder to copy Chrome's data when security software blocks reading it directly.</string>
     $ui_element
+    $browser
     $icon
 </dict>
 </plist>

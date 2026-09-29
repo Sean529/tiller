@@ -4,10 +4,11 @@ Tiller's settings, the switches it passes to Chromium, and where it stores data.
 
 ## Settings
 
-Tiller > Settings… (Cmd+,) has five panes: General, Passwords, Extensions (see [Extensions](browser.md#extensions)), Agent and Profiles (see [Profiles](browser.md#profiles)). Changes are saved as you make them, and apply to the current profile only.
+Tiller > Settings… (Cmd+,) has five panes: General, Passwords, Extensions (see [Extensions](browser.md#extensions)), Agent and Profiles (see [Profiles](browser.md#profiles)). Changes are saved as you make them, and apply to the current profile only, except the default browser, which macOS keeps for the app.
 
 | Pane | Setting | Default | Takes effect |
 |---|---|---|---|
+| General | Default browser: Make Default (see [Default browser](browser.md#default-browser)) | not the default | right away, for every profile |
 | General | Homepage | `https://www.google.com/` | next launch if chosen below or there are no tabs to restore, and new tabs if chosen below |
 | General | At launch, open: Tabs from Last Time or Homepage | Tabs from Last Time | next launch |
 | General | New tabs open with: Blank Page or Homepage | Blank Page | next new tab |

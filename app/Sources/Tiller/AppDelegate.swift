@@ -6,6 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: BrowserWindowController?
     private let controlServer = ControlServer()
     private var settingsController: SettingsWindowController?
+    /// Links that arrived before the window, which opens them.
+    private var pendingURLs: [URL] = []
 
     @objc func showSettings(_ sender: Any?) {
         let controller = settingsController ?? SettingsWindowController()
@@ -51,12 +53,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.quitRequested() }
         }
 
-        // Last time's tabs, unless they were all blank. `-url` opens after them.
+        // Last time's tabs, unless they were all blank. `-url` and links from
+        // other apps open after them.
         let session = SessionStore.shared
         let restore = Settings.launchTabs == .restore && session.openTabs.contains { !$0.isBlank }
         let restored = restore ? session.openTabs : []
-        let url = UserDefaults.standard.string(forKey: "url") ?? (restored.isEmpty ? Settings.homepageURL : nil)
-        let controller = BrowserWindowController(restoring: restored, selected: session.selectedIndex, opening: url)
+        // `-openURLs`, one per line, carries links another profile's Tiller passed on.
+        var urls = (UserDefaults.standard.string(forKey: "openURLs") ?? "").split(separator: "\n").map(String.init)
+        urls += pendingURLs.map(\.absoluteString)
+        pendingURLs = []
+        if let url = UserDefaults.standard.string(forKey: "url") { urls.insert(url, at: 0) }
+        if urls.isEmpty && restored.isEmpty { urls = [Settings.homepageURL] }
+        let controller = BrowserWindowController(restoring: restored, selected: session.selectedIndex, opening: urls.first)
+        for url in urls.dropFirst() { controller.openInNewTab(url) }
         controller.onClose = { [weak self] in self?.windowController = nil }
         controller.showWindow(nil)
         windowController = controller
@@ -69,6 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Tiller: control socket unavailable, agent tools will not work")
         }
         NSApp.activate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak controller] in
+            MainActor.assumeIsolated { DefaultBrowser.askOnce(on: controller?.window) }
+        }
         #if DEBUG
         if let prompt = UserDefaults.standard.string(forKey: "agentPrompt") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak controller] in
@@ -108,6 +120,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         #endif
+    }
+
+    /// Web links and HTML files from other apps, with Tiller as the default
+    /// browser or chosen in Open With. Links that start Tiller open in it: a
+    /// plain launch picks the profile used last already, and a profile started
+    /// to open links must not pass them back.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard windowController != nil else {
+            pendingURLs += urls
+            return
+        }
+        IncomingLinks.route(urls) { [weak self] urls in
+            guard let windowController = self?.windowController else { return }
+            for url in urls { windowController.openInNewTab(url.absoluteString) }
+            NSApp.activate()
+        }
+    }
+
+    func applicationWillBecomeActive(_ notification: Notification) {
+        IncomingLinks.willBecomeActive()
     }
 
     /// Another Tiller may have added, renamed or removed profiles meanwhile.

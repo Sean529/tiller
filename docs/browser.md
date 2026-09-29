@@ -101,6 +101,16 @@ What works: content scripts, background service workers, messaging, storage, `sc
 
 Chromium runs extensions in English, so Tiller shows their names from their English messages. Extensions have the same access to pages as in Chrome, and like the agent's tools, one that reads pages can read a password you fill.
 
+## Default browser
+
+Tiller can be the Mac's default browser, for web links and HTML files opened from other apps. The first launch asks once, and Settings > General has a Make Default button, replaced by "Tiller is the default browser." once it is. macOS confirms the change with its own dialog. There is no way to stop being the default from Tiller: choose another browser in System Settings > Desktop & Dock, or in that browser.
+
+- It applies to every profile, since macOS knows only the app. Links open in the profile used last (see [Profiles](#profiles)).
+- A link opens in a new tab and brings Tiller forward. Links that start Tiller open after the restored tabs, in place of the homepage.
+- Tiller.app can also open HTML files from Open With, whether or not it is the default.
+- Only a bundled Tiller.app can be the default. macOS remembers the choice by bundle id and finds the app by where it is, so a moved or rebuilt copy is found again, but a deleted one isn't.
+- `-askedDefaultBrowser YES` skips the question at launch, for scripted runs. The answer is stored in `dev.sorrycc.tiller`, shared by every profile.
+
 ## Profiles
 
 A profile has its own cookies and site data, history, open tabs, saved passwords, settings and agent chats. Each open profile runs as a separate Tiller, with its own Dock icon.
@@ -111,4 +121,5 @@ A profile has its own cookies and site data, history, open tabs, saved passwords
 - With more than one profile, each Tiller shows its profile's name at the right of the toolbar, where clicking it opens the Profiles menu, in the Dock badge and in the window title.
 - Opening Tiller from the Dock or Finder opens the profile used last, meaning the one whose Tiller was last active. `open Tiller.app --args -profile <name or id>` opens a given one.
 - A profile can only be open once. Launching it again brings the running Tiller forward.
+- Links and HTML files from other apps open in the profile used last too. When macOS hands them to another profile's Tiller, it passes them on over the profile's control socket, or starts the profile with them.
 - Names must differ, since [`tiller --profile`](tools.md#command-line-tool) picks a profile by name.
