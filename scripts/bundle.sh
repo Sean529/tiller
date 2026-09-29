@@ -78,6 +78,7 @@ cp "$RUST_OUT/tiller_mcp" "$APP/Contents/MacOS/tiller_mcp"
 # case-insensitive disk.
 cp "$RUST_OUT/tiller" "$APP/Contents/Helpers/tiller"
 cp "$ROOT/app/Resources/Tiller.icns" "$APP/Contents/Resources/Tiller.icns"
+cp -R "$ROOT/app/Resources/Agents" "$APP/Contents/Resources/Agents"
 write_plist "$APP/Contents" "Tiller" "$BUNDLE_ID" 0
 
 # ditto keeps the framework's symlinks and permissions intact.

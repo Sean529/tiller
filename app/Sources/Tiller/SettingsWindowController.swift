@@ -109,12 +109,14 @@ class SettingsPane: NSViewController {
     }
 
     static func popUp<T: RawRepresentable<String>>(
-        _ cases: [T], title: (T) -> String, selected: T, target: AnyObject, action: Selector
+        _ cases: [T], title: (T) -> String, image: ((T) -> NSImage?)? = nil, selected: T, target: AnyObject,
+        action: Selector
     ) -> NSPopUpButton where T: Equatable {
         let button = NSPopUpButton()
         for value in cases {
             button.addItem(withTitle: title(value))
             button.lastItem?.representedObject = value.rawValue
+            button.lastItem?.image = image?(value)
         }
         button.selectItem(at: cases.firstIndex(of: selected) ?? 0)
         button.target = target
@@ -395,7 +397,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     override func buildRows() {
         let popUp = Self.popUp(
-            AgentKind.allCases, title: \.displayName, selected: .current,
+            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
             target: self, action: #selector(agentChanged(_:))
         )
         agentPopUp = popUp

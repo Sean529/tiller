@@ -65,6 +65,7 @@ final class AgentPanelView: NSView {
         for kind in AgentKind.allCases {
             agentPicker.addItem(withTitle: kind.displayName)
             agentPicker.lastItem?.representedObject = kind.rawValue
+            agentPicker.lastItem?.image = kind.logo(size: 16)
         }
         agentPicker.isBordered = false
         agentPicker.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -360,10 +361,15 @@ private final class StatusPill: NSView {
 /// What a new chat shows: what the agent can do, and a few things to ask.
 final class AgentEmptyState: NSView {
     var onSuggestion: ((String) -> Void)?
-    var agentName = "" {
-        didSet { title.stringValue = "Ask \(agentName)" }
+    var kind: AgentKind? {
+        didSet {
+            guard let kind, kind != oldValue else { return }
+            title.stringValue = "Ask \(kind.displayName)"
+            badge.logo = kind.logo(size: 28)
+        }
     }
 
+    private let badge = SymbolBadge(symbol: "sparkles")
     private let title = NSTextField(labelWithString: "")
 
     private static let suggestions: [(symbol: String, text: String)] = [
@@ -374,8 +380,6 @@ final class AgentEmptyState: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        let badge = SymbolBadge(symbol: "sparkles")
-
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         title.alignment = .center
 
@@ -415,13 +419,26 @@ final class AgentEmptyState: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-/// An SF Symbol on a soft accent-colored circle.
+/// An SF Symbol on a soft accent-colored circle, or a logo on a plain one.
 private final class SymbolBadge: NSView {
+    /// Shown instead of the symbol, in its own colors.
+    var logo: NSImage? {
+        didSet {
+            image.image = logo ?? symbol
+            image.contentTintColor = logo == nil ? .controlAccentColor : nil
+            needsDisplay = true
+        }
+    }
+
+    private let symbol: NSImage
+    private let image: NSImageView
+
     init(symbol: String) {
+        self.symbol = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
+            .withSymbolConfiguration(.init(pointSize: 20, weight: .medium))!
+        image = NSImageView(image: self.symbol)
         super.init(frame: .zero)
         wantsLayer = true
-        let image = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
-            .withSymbolConfiguration(.init(pointSize: 20, weight: .medium))!)
         image.contentTintColor = .controlAccentColor
         image.translatesAutoresizingMaskIntoConstraints = false
         addSubview(image)
@@ -439,7 +456,8 @@ private final class SymbolBadge: NSView {
 
     override func updateLayer() {
         layer?.cornerRadius = 24
-        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+        let color = logo == nil ? NSColor.controlAccentColor.withAlphaComponent(0.14) : .labelColor.withAlphaComponent(0.06)
+        layer?.backgroundColor = color.cgColor
     }
 }
 

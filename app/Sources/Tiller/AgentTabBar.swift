@@ -283,6 +283,7 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
         return HistoryCellView(
             title: item.conversation.title,
             subtitle: subtitle + " · " + item.conversation.kind.displayName,
+            logo: item.conversation.kind.logo(size: 18),
             isCurrent: isCurrent
         )
     }
@@ -340,13 +341,14 @@ private final class HistoryRowView: NSTableRowView {
     override func mouseExited(with event: NSEvent) { isHovered = false }
 }
 
-/// A chat bubble icon beside the chat's title and where or when it was.
+/// The agent's logo, or a chat bubble icon without one, beside the chat's
+/// title and where or when it was.
 private final class HistoryCellView: NSView {
-    init(title: String, subtitle: String, isCurrent: Bool) {
+    init(title: String, subtitle: String, logo: NSImage?, isCurrent: Bool) {
         super.init(frame: .zero)
-        let icon = NSImageView(image: NSImage(systemSymbolName: "bubble.left", accessibilityDescription: nil)!
+        let icon = NSImageView(image: logo ?? NSImage(systemSymbolName: "bubble.left", accessibilityDescription: nil)!
             .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))!)
-        icon.contentTintColor = isCurrent ? .controlAccentColor : .secondaryLabelColor
+        if logo == nil { icon.contentTintColor = isCurrent ? .controlAccentColor : .secondaryLabelColor }
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
         titleLabel.lineBreakMode = .byTruncatingTail

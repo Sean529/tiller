@@ -479,7 +479,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         setBusy(false)
         setStatus(session == nil ? "" : "Ready", busy: false)
         composer.placeholder = "Ask \(kind.displayName) about this page…"
-        emptyState.agentName = kind.displayName
+        emptyState.kind = kind
         emptyState.isHidden = !transcript.isEmpty
     }
 
