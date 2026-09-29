@@ -1,5 +1,5 @@
 import AppKit
-import CMiniCore
+import CTillerCore
 
 @MainActor
 protocol TabDelegate: AnyObject {
@@ -53,7 +53,7 @@ final class Tab {
         self.url = url
         self.title = title
         let size = hostView.bounds.size
-        let callbacks = MiniBrowserCallbacks(
+        let callbacks = TillerBrowserCallbacks(
             ctx: Unmanaged.passUnretained(self).toOpaque(),
             address_changed: { ctx, url in
                 guard let ctx, let url else { return }
@@ -94,41 +94,41 @@ final class Tab {
             }
         )
         let view = Unmanaged.passUnretained(hostView).toOpaque()
-        browserID = mini_browser_create(view, Int32(size.width), Int32(size.height), url, callbacks)
+        browserID = tiller_browser_create(view, Int32(size.width), Int32(size.height), url, callbacks)
     }
 
     // MARK: Commands
 
     func load(_ url: String) {
         self.url = url
-        mini_browser_load_url(browserID, url)
+        tiller_browser_load_url(browserID, url)
     }
 
-    func goBack() { mini_browser_go_back(browserID) }
-    func goForward() { mini_browser_go_forward(browserID) }
-    func reload() { mini_browser_reload(browserID) }
-    func stop() { mini_browser_stop(browserID) }
+    func goBack() { tiller_browser_go_back(browserID) }
+    func goForward() { tiller_browser_go_forward(browserID) }
+    func reload() { tiller_browser_reload(browserID) }
+    func stop() { tiller_browser_stop(browserID) }
 
     /// Zooms out (`step` < 0), back to 100% (0) or in (> 0).
-    func zoom(_ step: Int32) { mini_browser_zoom(browserID, step) }
+    func zoom(_ step: Int32) { tiller_browser_zoom(browserID, step) }
 
     /// The zoom as a factor, 1 for 100%.
-    var zoomFactor: Double { browserID < 0 ? 1 : mini_browser_zoom_factor(browserID) }
+    var zoomFactor: Double { browserID < 0 ? 1 : tiller_browser_zoom_factor(browserID) }
 
     /// Highlights `text` in the page. With `next`, moves to the next or
     /// previous match of the text already searched for.
     func find(_ text: String, forward: Bool = true, next: Bool = false) {
-        mini_browser_find(browserID, text, forward, next)
+        tiller_browser_find(browserID, text, forward, next)
     }
 
-    func stopFinding() { mini_browser_stop_finding(browserID) }
+    func stopFinding() { tiller_browser_stop_finding(browserID) }
 
     /// Runs `code` in the main frame. Does nothing once the tab has closed.
-    func executeJavaScript(_ code: String) { mini_browser_execute_js(browserID, code) }
+    func executeJavaScript(_ code: String) { tiller_browser_execute_js(browserID, code) }
 
     func focus() {
         hostView.window?.makeFirstResponder(hostView)
-        mini_browser_set_focus(browserID, true)
+        tiller_browser_set_focus(browserID, true)
     }
 
     /// Runs beforeunload, then calls `tabReadyToClose` unless the page cancels.
@@ -136,13 +136,13 @@ final class Tab {
         if browserID < 0 {
             delegate?.tabReadyToClose(self)
         } else {
-            mini_browser_close(browserID)
+            tiller_browser_close(browserID)
         }
     }
 
     /// Stops callbacks. Call before the tab is released.
     func detach() {
-        if browserID >= 0 { mini_browser_detach(browserID) }
+        if browserID >= 0 { tiller_browser_detach(browserID) }
     }
 
     // MARK: Callbacks from CEF, always on the main thread

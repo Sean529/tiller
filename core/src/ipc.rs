@@ -5,7 +5,7 @@
 //! Connections are served on background threads. Every request is handed to
 //! the CEF UI thread (the main thread): `cdp` goes straight to the browser's
 //! DevTools agent, and everything else goes to the Swift handler, which
-//! answers with `mini_ipc_reply`.
+//! answers with `tiller_ipc_reply`.
 
 use crate::browser;
 use cef::*;
@@ -25,7 +25,7 @@ use std::{
 };
 
 /// Called on the main thread with a request line. The handler must eventually
-/// call `mini_ipc_reply` with the same token.
+/// call `tiller_ipc_reply` with the same token.
 pub type Handler = unsafe extern "C" fn(ctx: *mut c_void, request: *const c_char, token: u64);
 
 #[derive(Clone, Copy)]

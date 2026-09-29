@@ -1,5 +1,5 @@
-//! Browser tools over the running Mini app's control socket, shared by the
-//! `mini_mcp` server and the `mini` CLI. Tab operations the app answers itself,
+//! Browser tools over the running Tiller app's control socket, shared by the
+//! `tiller_mcp` server and the `tiller` CLI. Tab operations the app answers itself,
 //! and `cdp` calls go to a tab's DevTools agent.
 
 use serde_json::{Value, json};
@@ -198,7 +198,7 @@ impl Browser {
             other => other,
         }
         .map_err(|f| match f {
-            Failure::Connection(e) => format!("Mini is not running or its control socket is unavailable ({e})"),
+            Failure::Connection(e) => format!("Tiller is not running or its control socket is unavailable ({e})"),
             Failure::App(message) => message,
         })
     }
@@ -217,7 +217,7 @@ impl Browser {
         if reader.read_line(&mut reply).map_err(|e| Failure::Connection(e.to_string()))? == 0 {
             return Err(Failure::Connection("connection closed".into()));
         }
-        let reply: Value = serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Mini: {e}")))?;
+        let reply: Value = serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Tiller: {e}")))?;
         match reply.get("error") {
             Some(error) => Err(Failure::App(error.as_str().unwrap_or("error").to_string())),
             None => Ok(reply["result"].clone()),
@@ -231,9 +231,9 @@ enum Failure {
 }
 
 fn socket_path() -> String {
-    std::env::var("MINI_SOCKET").unwrap_or_else(|_| {
-        let dir = std::env::var("MINI_DATA_DIR").unwrap_or_else(|_| {
-            format!("{}/Library/Application Support/Mini", std::env::var("HOME").unwrap_or_default())
+    std::env::var("TILLER_SOCKET").unwrap_or_else(|_| {
+        let dir = std::env::var("TILLER_DATA_DIR").unwrap_or_else(|_| {
+            format!("{}/Library/Application Support/Tiller", std::env::var("HOME").unwrap_or_default())
         });
         format!("{dir}/control.sock")
     })
@@ -251,17 +251,17 @@ fn target_selector(args: &Value) -> Result<String, String> {
         _ => None,
     };
     match (reference, args["selector"].as_str()) {
-        (Some(r), _) => Ok(format!("[data-mini-ref=\"{}\"]", r.replace(['"', '\\'], ""))),
+        (Some(r), _) => Ok(format!("[data-tiller-ref=\"{}\"]", r.replace(['"', '\\'], ""))),
         (None, Some(s)) => Ok(s.to_string()),
         (None, None) => Err("give either ref or selector".into()),
     }
 }
 
 /// Numbers the page's visible interactive elements by setting a
-/// `data-mini-ref` attribute on each, and returns them with the page text.
+/// `data-tiller-ref` attribute on each, and returns them with the page text.
 const READ_PAGE_JS: &str = r#"(max) => {
   const selector = 'a[href], button, input:not([type=hidden]), select, textarea, summary, [contenteditable=""], [contenteditable=true], [role=button], [role=link], [role=checkbox], [role=radio], [role=tab], [role=menuitem], [role=option], [role=switch], [role=textbox], [role=combobox], [onclick]';
-  document.querySelectorAll('[data-mini-ref]').forEach(el => el.removeAttribute('data-mini-ref'));
+  document.querySelectorAll('[data-tiller-ref]').forEach(el => el.removeAttribute('data-tiller-ref'));
   const elements = [];
   for (const el of document.querySelectorAll(selector)) {
     if (elements.length >= 400) break;
@@ -269,7 +269,7 @@ const READ_PAGE_JS: &str = r#"(max) => {
     const style = getComputedStyle(el);
     if (rect.width === 0 || rect.height === 0 || style.visibility === 'hidden' || el.disabled) continue;
     const ref = String(elements.length + 1);
-    el.setAttribute('data-mini-ref', ref);
+    el.setAttribute('data-tiller-ref', ref);
     const tag = el.tagName.toLowerCase();
     const label = (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.getAttribute('alt') || '')
       .replace(/\s+/g, ' ').trim().slice(0, 100);

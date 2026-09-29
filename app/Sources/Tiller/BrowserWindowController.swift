@@ -62,10 +62,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             backing: .buffered,
             defer: false
         )
-        window.title = "Mini"
+        window.title = "Tiller"
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName("MiniBrowserWindow")
+        window.setFrameAutosaveName("TillerBrowserWindow")
         super.init(window: window)
 
         window.delegate = self
@@ -83,10 +83,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         agentPanel.delegate = self
         agentPanel.isHidden = !agentPanelShown
         agentPanel.wantsLayer = true
-        splitView.autosaveName = "MiniAgentSplit"
+        splitView.autosaveName = "TillerAgentSplit"
         window.contentView = splitView
         window.toolbarStyle = .unified
-        let toolbar = NSToolbar(identifier: "MiniToolbar")
+        let toolbar = NSToolbar(identifier: "TillerToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
@@ -97,7 +97,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         accessory.layoutAttribute = .bottom
         window.addTitlebarAccessoryViewController(accessory)
 
-        if !window.setFrameUsingName("MiniBrowserWindow") { window.center() }
+        if !window.setFrameUsingName("TillerBrowserWindow") { window.center() }
 
         configureControls()
         tabStrip.delegate = self
@@ -178,7 +178,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tab.hostView.removeFromSuperview()
         tabs.remove(at: index)
 
-        // The window closes and Mini quits with it. The session saved before
+        // The window closes and Tiller quits with it. The session saved before
         // still has this tab, so the next launch reopens it.
         guard !tabs.isEmpty else {
             selectedTab = nil
@@ -480,7 +480,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private static let agentVisibleKey = "agentPanelVisible"
 
     #if DEBUG
-    /// For testing without typing: `open Mini.app --args -agentPrompt "..."`.
+    /// For testing without typing: `open Tiller.app --args -agentPrompt "..."`.
     /// `-agentPasteImage YES` pastes the clipboard twice first.
     func sendAgentPrompt(_ text: String) {
         if !agentPanelShown { toggleAgentPanel(nil) }
@@ -639,7 +639,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 // MARK: Control socket
 
 extension BrowserWindowController {
-    /// Tab operations for mini_mcp. Tab ids are CEF browser ids, the same ids
+    /// Tab operations for tiller_mcp. Tab ids are CEF browser ids, the same ids
     /// the core's DevTools calls take. A missing `tab_id` means the selected tab.
     func control(_ method: String, params: [String: Any]) throws -> Any {
         switch method {
@@ -695,8 +695,8 @@ extension BrowserWindowController {
 
 extension BrowserWindowController {
     func agentPanelContext(_ panel: AgentPanelView) -> String {
-        guard let tab = selectedTab else { return "[Mini: no tab is open]" }
-        return "[Mini: selected tab \(tab.browserID), \"\(tab.displayTitle)\", \(tab.isBlank ? "about:blank" : tab.url)]"
+        guard let tab = selectedTab else { return "[Tiller: no tab is open]" }
+        return "[Tiller: selected tab \(tab.browserID), \"\(tab.displayTitle)\", \(tab.isBlank ? "about:blank" : tab.url)]"
     }
 
     /// Widens the divider's grab area into the panel. The divider is a point
@@ -726,7 +726,7 @@ extension BrowserWindowController {
         guard let window else { return }
         let alert = NSAlert()
         alert.messageText = "Clear all history?"
-        alert.informativeText = "Removes every page from Mini's history, including pages imported from Chrome, and forgets recently closed tabs. Cookies and saved passwords stay."
+        alert.informativeText = "Removes every page from Tiller's history, including pages imported from Chrome, and forgets recently closed tabs. Cookies and saved passwords stay."
         alert.addButton(withTitle: "Clear History")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { response in

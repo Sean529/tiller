@@ -1,5 +1,5 @@
 //! CEF subprocess entry point. `scripts/bundle.sh` copies this binary into the
-//! five `Mini Helper*.app` bundles (GPU, Renderer, Plugin, Alerts, plain).
+//! five `Tiller Helper*.app` bundles (GPU, Renderer, Plugin, Alerts, plain).
 
 use cef::{args::Args, *};
 

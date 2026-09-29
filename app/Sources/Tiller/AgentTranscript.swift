@@ -273,7 +273,9 @@ final class ToolRowView: NSView, TranscriptRow {
 
     /// `detail` is what `detail(_:)` made of the call's input.
     init(name: String, detail: String) {
-        let tool = name.hasPrefix("mcp__mini__") ? String(name.dropFirst("mcp__mini__".count)) : name
+        // Chats saved before the rename from Mini carry the old server name.
+        let prefix = ["mcp__tiller__", "mcp__mini__"].first { name.hasPrefix($0) }
+        let tool = prefix.map { String(name.dropFirst($0.count)) } ?? name
         let text = NSMutableAttributedString(string: tool, attributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
             .foregroundColor: NSColor.labelColor,

@@ -38,7 +38,7 @@ final class SessionStore {
         session = data.flatMap { try? JSONDecoder().decode(Session.self, from: $0) } ?? Session()
     }
 
-    /// The tabs open when Mini last saved, in order.
+    /// The tabs open when Tiller last saved, in order.
     var openTabs: [SavedTab] { session.tabs }
     var selectedIndex: Int { session.selected }
     var hasClosedTabs: Bool { !session.closed.isEmpty }
@@ -76,7 +76,7 @@ final class SessionStore {
             try JSONEncoder().encode(session).write(to: URL(fileURLWithPath: path), options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
         } catch {
-            NSLog("Mini: could not save session: %@", error.localizedDescription)
+            NSLog("Tiller: could not save session: %@", error.localizedDescription)
         }
     }
 

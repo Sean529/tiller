@@ -1,4 +1,4 @@
-# Mini
+# Tiller
 
 A small macOS browser: Chromium (via the Rust `cef` crate) inside a native Swift/AppKit shell, with an agent side panel that drives the browser through an MCP server.
 
@@ -6,11 +6,11 @@ A small macOS browser: Chromium (via the Rust `cef` crate) inside a native Swift
 
 | Path | What it is |
 |---|---|
-| `core/` | Rust static library linked into the app. Loads CEF, owns the browsers and sets imported cookies. C header in `app/Sources/CMiniCore/mini_core.h`. |
-| `helper/` | Rust binary for CEF subprocesses, copied into the five `Mini Helper*.app` bundles. |
-| `mcp/` | Rust crate with the browser tools: the stdio MCP server `mini_mcp` that the agent CLI launches, and the `mini` command-line tool. |
+| `core/` | Rust static library linked into the app. Loads CEF, owns the browsers and sets imported cookies. C header in `app/Sources/CTillerCore/tiller_core.h`. |
+| `helper/` | Rust binary for CEF subprocesses, copied into the five `Tiller Helper*.app` bundles. |
+| `mcp/` | Rust crate with the browser tools: the stdio MCP server `tiller_mcp` that the agent CLI launches, and the `tiller` command-line tool. |
 | `app/` | SwiftPM package with the AppKit app. Menu is built in code, so no Xcode or `ibtool` needed. |
-| `scripts/bundle.sh` | Builds everything and assembles an ad-hoc signed `build/Mini.app`. |
+| `scripts/bundle.sh` | Builds everything and assembles an ad-hoc signed `build/Tiller.app`. |
 
 ## One-time setup
 
@@ -28,13 +28,13 @@ cargo run -p export-cef-dir -- --force $HOME/.local/share/cef
 
 ```sh
 scripts/bundle.sh            # release; pass `debug` for a debug build
-open build/Mini.app
-open build/Mini.app --args -url https://example.com   # also open this page, selected, after any restored tabs
+open build/Tiller.app
+open build/Tiller.app --args -url https://example.com   # also open this page, selected, after any restored tabs
 ```
 
 ## Settings
 
-Mini > Settings… (Cmd+,) has three panes: General, Passwords and Agent. Changes are saved as you make them.
+Tiller > Settings… (Cmd+,) has three panes: General, Passwords and Agent. Changes are saved as you make them.
 
 | Pane | Setting | Default | Takes effect |
 |---|---|---|---|
@@ -47,14 +47,14 @@ Mini > Settings… (Cmd+,) has three panes: General, Passwords and Agent. Change
 | Agent | Chat tabs: how many chats the panel keeps open at once, 1 to 9 | 3 | right away; tabs already open stay |
 | Agent | Show and hide shortcut: click, then press a combination with Cmd or Ctrl. Delete clears it; one already in a menu is refused | Cmd+Shift+S | right away |
 | Agent | Path for each CLI | empty, meaning look it up | next new chat |
-| Agent | Extra instructions, added after Mini's system prompt | empty | next new chat |
+| Agent | Extra instructions, added after Tiller's system prompt | empty | next new chat |
 
-Settings live in the `dev.sorrycc.mini` user defaults. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.
+Settings live in the `dev.sorrycc.tiller` user defaults. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.
 
-Mini passes two switches to Chromium:
+Tiller passes two switches to Chromium:
 
 - `--use-mock-keychain`, so it never asks for the login keychain password. The cost is that cookies are encrypted with a fixed key instead of one kept in the keychain.
-- `--disable-backgrounding-occluded-windows`, so a window covered by other apps still counts as visible. Otherwise Chromium drops the agent's mouse and key input while you work elsewhere. The cost is that a covered Mini window keeps drawing.
+- `--disable-backgrounding-occluded-windows`, so a window covered by other apps still counts as visible. Otherwise Chromium drops the agent's mouse and key input while you work elsewhere. The cost is that a covered Tiller window keeps drawing.
 
 ## Tabs
 
@@ -73,9 +73,9 @@ Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A,
 
 Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view.
 
-Mini saves its open tabs as they change and opens them again at the next launch, however it quit: Cmd+Q, closing the window, closing the last tab, or a crash. Each tab reloads its last URL; back/forward history, scroll position and form contents aren't kept. A session of only blank tabs opens the homepage instead. Tabs are still saved when Settings says to open the homepage, so switching back restores the last run's tabs.
+Tiller saves its open tabs as they change and opens them again at the next launch, however it quit: Cmd+Q, closing the window, closing the last tab, or a crash. Each tab reloads its last URL; back/forward history, scroll position and form contents aren't kept. A session of only blank tabs opens the homepage instead. Tabs are still saved when Settings says to open the homepage, so switching back restores the last run's tabs.
 
-The last 25 closed tabs are kept for Cmd+Shift+T, across restarts too. Tabs that close because the window closed or Mini quit aren't among them, since they come back at launch. Clear History… forgets them.
+The last 25 closed tabs are kept for Cmd+Shift+T, across restarts too. Tabs that close because the window closed or Tiller quit aren't among them, since they come back at launch. Clear History… forgets them.
 
 Both are stored in `session.json` in the data folder, readable only by you.
 
@@ -87,16 +87,16 @@ File > Import from Chrome… brings over data from one Chrome profile. Pick the 
 
 | Data | What happens |
 |---|---|
-| Cookies | Set through Chromium's cookie manager, replacing Mini's cookie with the same name, domain and path. Partitioned cookies (third-party embeds) are skipped because CEF can't set them, as are expired ones. |
-| Saved passwords | Stored in Mini's password store (below). A saved login with the same site and username is replaced. Sites marked "never save" and non-web logins are skipped. |
-| History | Merged into Mini's history. A page Mini already has keeps its title and takes the higher visit count and later visit. |
-| Search engine and homepage | Google, Bing and DuckDuckGo map to Mini's engines; any other engine becomes a custom search URL. Chrome's startup page becomes Mini's homepage, or failing that its Home button page. |
+| Cookies | Set through Chromium's cookie manager, replacing Tiller's cookie with the same name, domain and path. Partitioned cookies (third-party embeds) are skipped because CEF can't set them, as are expired ones. |
+| Saved passwords | Stored in Tiller's password store (below). A saved login with the same site and username is replaced. Sites marked "never save" and non-web logins are skipped. |
+| History | Merged into Tiller's history. A page Tiller already has keeps its title and takes the higher visit count and later visit. |
+| Search engine and homepage | Google, Bing and DuckDuckGo map to Tiller's engines; any other engine becomes a custom search URL. Chrome's startup page becomes Tiller's homepage, or failing that its Home button page. |
 
 Re-running the import is safe: nothing is duplicated.
 
-Chrome encrypts cookies and passwords with a key in its "Chrome Safe Storage" keychain item, so macOS asks for your login password before Mini can read it. The import reads copies of Chrome's databases, which works while Chrome is running, but cookies Chrome changed in the last 30 seconds or so may not be on disk yet.
+Chrome encrypts cookies and passwords with a key in its "Chrome Safe Storage" keychain item, so macOS asks for your login password before Tiller can read it. The import reads copies of Chrome's databases, which works while Chrome is running, but cookies Chrome changed in the last 30 seconds or so may not be on disk yet.
 
-macOS may block Mini from reading Chrome's folder at all. The sheet then says so and has a button that opens Privacy & Security > Full Disk Access, where you can allow Mini.
+macOS may block Tiller from reading Chrome's folder at all. The sheet then says so and has a button that opens Privacy & Security > Full Disk Access, where you can allow Tiller.
 
 Some sites tie a session to the browser it started in, so they may still ask you to sign in again.
 
@@ -119,30 +119,39 @@ A blank tab shows your most visited sites as tiles, one per site, each opening t
 
 ## History
 
-Mini keeps its own history in `history.sqlite` in its data folder. Chromium's History file can't be used: CEF has no API for it and holds it locked. A page is saved once it finishes loading, and again when its URL or title changes after that.
+Tiller keeps its own history in `history.sqlite` in its data folder. Chromium's History file can't be used: CEF has no API for it and holds it locked. A page is saved once it finishes loading, and again when its URL or title changes after that.
 
 - Typing in the address bar lists matching pages. Up and Down move through the list, Return opens the highlighted page, Escape closes the list. When the best match's address starts with what you typed, it is highlighted from the start, so Return goes there instead of searching.
 - The History menu lists the 15 most recent pages. History > Clear History… empties it, along with the start page's saved favicons and the recently closed tabs.
 
 ## Saved passwords
 
-Passwords come from the Chrome import; Mini doesn't offer to save new ones. On a page with a saved login, a key button appears at the left of the address bar. Click it, or choose Edit > Fill Saved Password, to fill the username and password. With several logins for the site, a menu asks which. Logins match the page's exact origin (scheme, host and port).
+Passwords come from the Chrome import; Tiller doesn't offer to save new ones. On a page with a saved login, a key button appears at the left of the address bar. Click it, or choose Edit > Fill Saved Password, to fill the username and password. With several logins for the site, a menu asks which. Logins match the page's exact origin (scheme, host and port).
 
-Mini never fills on its own. The agent's tools can read anything on the page, so a password you fill can be read by the agent until the page navigates away.
+Tiller never fills on its own. The agent's tools can read anything on the page, so a password you fill can be read by the agent until the page navigates away.
 
 Settings > Passwords lists the saved logins, with buttons to copy a password or remove logins.
 
-Storage: `passwords.json` in the data folder, readable only by you. Sites and usernames are stored in the clear, as Chrome stores them, so Mini knows which pages have a login without unlocking anything. Each password is sealed with AES-GCM under a key kept in the login keychain as "Mini Saved Passwords". Mini is ad-hoc signed, so after a rebuild macOS may ask before the new binary can read that key.
+Storage: `passwords.json` in the data folder, readable only by you. Sites and usernames are stored in the clear, as Chrome stores them, so Tiller knows which pages have a login without unlocking anything. Each password is sealed with AES-GCM under a key kept in the login keychain as "Tiller Saved Passwords". Tiller is ad-hoc signed, so after a rebuild macOS may ask before the new binary can read that key.
 
 ## Data folder
 
-Mini keeps its profile, history, passwords, open tabs and control socket in `~/Library/Application Support/Mini`. Set `MINI_DATA_DIR` to use another folder, for example to run a second Mini alongside the first. Unix socket paths are limited to 104 bytes, so for a long folder path also set `MINI_SOCKET` to a shorter socket path; the app and `mini_mcp` both read it.
+Tiller keeps its profile, history, passwords, open tabs and control socket in `~/Library/Application Support/Tiller`. Set `TILLER_DATA_DIR` to use another folder, for example to run a second Tiller alongside the first. Unix socket paths are limited to 104 bytes, so for a long folder path also set `TILLER_SOCKET` to a shorter socket path; the app and `tiller_mcp` both read it.
+
+Tiller was called Mini. At its first launch it brings over what Mini kept (`RenameMigration.swift`):
+
+- It moves `~/Library/Application Support/Mini` to `Tiller`, unless `TILLER_DATA_DIR` is set or the `Tiller` folder already exists. If Mini is running, Tiller asks you to quit it and exits. Saved chats that ran in the old folder are pointed at the new one, but Claude Code and Qoder CLI keep sessions by folder path, so those chats can't be continued.
+- It copies the `dev.sorrycc.mini` user defaults while `dev.sorrycc.tiller` has none.
+- It removes the `~/.local/bin/mini` link to a `Mini.app`. Install `tiller` again from the Tiller menu.
+- The first time it needs the password key, it copies "Mini Saved Passwords" in the keychain to "Tiller Saved Passwords", and macOS asks first.
+
+Mini's defaults and keychain item are left in place. Full Disk Access and permission to control Finder belong to the bundle id, so grant them to Tiller again.
 
 Debug builds take three more launch arguments for testing the import: `-chromeDataDir <folder>` reads a Chrome data folder other than the real one, `-chromeSafeStoragePassword <password>` uses that password instead of the keychain's, and `-importChrome YES` imports everything from the last-used profile at launch and logs the result.
 
 ## Browser tools (MCP)
 
-`build/Mini.app/Contents/MacOS/mini_mcp` is a stdio MCP server. It talks to the running app over a Unix socket at `control.sock` in the data folder (only your user can open it). Set `MINI_SOCKET` to use another path.
+`build/Tiller.app/Contents/MacOS/tiller_mcp` is a stdio MCP server. It talks to the running app over a Unix socket at `control.sock` in the data folder (only your user can open it). Set `TILLER_SOCKET` to use another path.
 
 | Tool | What it does |
 |---|---|
@@ -159,32 +168,32 @@ Debug builds take three more launch arguments for testing the import: `-chromeDa
 
 Tools act on the selected tab unless given `tab_id`. `click`, `type` and `screenshot` select their tab first, because background tabs don't draw and Chromium drops their input.
 
-`read_page` marks each element it lists with a `data-mini-ref` attribute, which pages can see. Refs are renumbered on every call.
+`read_page` marks each element it lists with a `data-tiller-ref` attribute, which pages can see. Refs are renumbered on every call.
 
 How it's wired: tab operations (`tabs.*`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
 
 To try it without an agent:
 
 ```sh
-open build/Mini.app
+open build/Tiller.app
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_page","arguments":{}}}' \
-  | build/Mini.app/Contents/MacOS/mini_mcp
+  | build/Tiller.app/Contents/MacOS/tiller_mcp
 ```
 
 ## Command-line tool
 
-`mini` runs the same browser tools from a shell, so scripts and agents outside Mini, such as Claude Code with its Bash tool, can drive the browser. It ships at `build/Mini.app/Contents/Helpers/mini`, not next to `Mini` in `Contents/MacOS`, where the two names would be one file on a case-insensitive disk. Mini > Install Command Line Tool… links it as `~/.local/bin/mini` and says if that folder isn't on your PATH. Install again after moving the app.
+`tiller` runs the same browser tools from a shell, so scripts and agents outside Tiller, such as Claude Code with its Bash tool, can drive the browser. It ships at `build/Tiller.app/Contents/Helpers/tiller`, not next to `Tiller` in `Contents/MacOS`, where the two names would be one file on a case-insensitive disk. Tiller > Install Command Line Tool… links it as `~/.local/bin/tiller` and says if that folder isn't on your PATH. Install again after moving the app.
 
 ```sh
-mini tabs                        # * marks the selected tab
-mini new example.com             # opens a tab and waits for the load
-mini read                        # text, then [ref] lines for links, buttons and fields
-mini click 3
-mini type 5 "hello" --submit
-mini type --selector '#q' hi     # CSS selector instead of a ref
-mini screenshot -o page.jpg      # prints the path; a temp file without -o
-mini eval 'document.title'
-mini close 2
+tiller tabs                        # * marks the selected tab
+tiller new example.com             # opens a tab and waits for the load
+tiller read                        # text, then [ref] lines for links, buttons and fields
+tiller click 3
+tiller type 5 "hello" --submit
+tiller type --selector '#q' hi     # CSS selector instead of a ref
+tiller screenshot -o page.jpg      # prints the path; a temp file without -o
+tiller eval 'document.title'
+tiller close 2
 ```
 
 | Command | Tool |
@@ -200,9 +209,9 @@ mini close 2
 | `screenshot [-o file]` | `screenshot` |
 | `eval <expression>` | `eval_js` |
 
-`--tab <id>` acts on another tab than the selected one, and `--json` prints the raw result instead of text. Refs are stored in the page, so a `read` in one call and a `click` in the next agree. Errors go to stderr with exit code 1, or 2 for bad arguments. Like `mini_mcp`, it needs Mini running and honors `MINI_SOCKET`.
+`--tab <id>` acts on another tab than the selected one, and `--json` prints the raw result instead of text. Refs are stored in the page, so a `read` in one call and a `click` in the next agree. Errors go to stderr with exit code 1, or 2 for bad arguments. Like `tiller_mcp`, it needs Tiller running and honors `TILLER_SOCKET`.
 
-The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and `mcp/src/bin/mini.rs` as the CLI.
+The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and `mcp/src/bin/tiller.rs` as the CLI.
 
 ## Agent panel
 
@@ -210,21 +219,21 @@ Click the sparkles button at the right of the toolbar, or press Cmd+Shift+S, to 
 
 Chats open in tabs, three by default (Settings > Agent > Chat tabs). A row above the message field has a numbered button per tab on the left: click one to switch, right-click it to close it. Each tab has its own agent process, so one can keep working while you use another; a dot on the number shows it is busy. All tabs drive the same browser, so two agents running at once can get in each other's way. On the right of the row, the plus button opens a new tab while there is room, the pencil button starts a new chat in the selected tab, and the clock button lists past chats, newest first. Picking a chat that is open switches to its tab; picking another one opens it in the selected tab. Right-click a chat in the list to delete it. Switching agents with a chat in the tab also starts a new chat.
 
-A chat is saved with its first message. Its title is the first line of that message until the agent names it: Codex sends a name, and Claude Code and Qoder CLI may write one to their session file, which Mini reads after each turn. The open tabs come back at the next launch, and a chat from the list or from last time continues where it left off: the next message restarts the agent on its saved session (`--resume <id>`, or Codex's `thread/resume`) in the folder it first ran in. Tools and instructions come from the current Settings. Since the CLIs save these sessions, they also appear in each CLI's own resume list. If the session can't be resumed, the panel says so and the next message starts a new conversation without the earlier context. Chats are kept in `~/Library/Application Support/Mini/agent-chats`: `index.json` lists them and the open tabs, and each chat has a folder with its transcript and images.
+A chat is saved with its first message. Its title is the first line of that message until the agent names it: Codex sends a name, and Claude Code and Qoder CLI may write one to their session file, which Tiller reads after each turn. The open tabs come back at the next launch, and a chat from the list or from last time continues where it left off: the next message restarts the agent on its saved session (`--resume <id>`, or Codex's `thread/resume`) in the folder it first ran in. Tools and instructions come from the current Settings. Since the CLIs save these sessions, they also appear in each CLI's own resume list. If the session can't be resumed, the panel says so and the next message starts a new conversation without the earlier context. Chats are kept in `~/Library/Application Support/Tiller/agent-chats`: `index.json` lists them and the open tabs, and each chat has a folder with its transcript and images.
 
-A message can carry up to five images. Paste one with Cmd+V (a screenshot, an image copied from a page, or image files copied in Finder), drop images on the field, or pick them with the paperclip button. They show as thumbnails above the text, each with a button to remove it, and clicking a thumbnail, there or in the transcript, opens it in Quick Look. Mini scales each image down to 2000 pixels on its long edge and saves it as PNG, or as JPEG if the PNG is over 3.5 MB, in the chat's folder. Claude Code and Qoder CLI get the image in the message, and Codex gets the file's path. The images stay with the chat and are deleted with it; images attached but never sent are deleted when the tab closes.
+A message can carry up to five images. Paste one with Cmd+V (a screenshot, an image copied from a page, or image files copied in Finder), drop images on the field, or pick them with the paperclip button. They show as thumbnails above the text, each with a button to remove it, and clicking a thumbnail, there or in the transcript, opens it in Quick Look. Tiller scales each image down to 2000 pixels on its long edge and saves it as PNG, or as JPEG if the PNG is over 3.5 MB, in the chat's folder. Claude Code and Qoder CLI get the image in the message, and Codex gets the file's path. The images stay with the chat and are deleted with it; images attached but never sent are deleted when the tab closes.
 
-Mini runs Qoder CLI and Claude Code in print mode with stream-json on stdin and stdout, and Codex as `codex app-server`, which speaks JSON-RPC on stdin and stdout. The process stays alive between messages so the conversation carries over, and the CLI also saves the conversation so it can be resumed later. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code and Codex, with its markdown headings, lists, quotes, code and links rendered. Each tool call gets a row with a spinner that turns into a check, or a cross with the error. The transcript follows new output unless you've scrolled up to read.
+Tiller runs Qoder CLI and Claude Code in print mode with stream-json on stdin and stdout, and Codex as `codex app-server`, which speaks JSON-RPC on stdin and stdout. The process stays alive between messages so the conversation carries over, and the CLI also saves the conversation so it can be resumed later. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code and Codex, with its markdown headings, lists, quotes, code and links rendered. Each tool call gets a row with a spinner that turns into a check, or a cross with the error. The transcript follows new output unless you've scrolled up to read.
 
-By default the agent gets Mini's browser tools and, apart from Codex's shell, nothing else:
+By default the agent gets Tiller's browser tools and, apart from Codex's shell, nothing else:
 
 | | Qoder CLI | Claude Code | Codex (in `thread/start`) |
 |---|---|---|---|
 | Built-in tools off | `--tools ""` and `--disallowed-tools ListAgents,SendMessage` | `--tools ""` | web search, apps, goals, sub-agents, image generation and memories off; the shell can't be removed, so it runs in a `read-only` sandbox |
-| Only Mini's MCP server | `--mcp-config <file> --strict-mcp-config` | same | `mcp_servers.mini` in `config`, with Mini's own `CODEX_HOME` so your `config.toml` servers don't load |
-| Mini's tools allowed without asking | `--allowed-tools mcp__mini --permission-mode dont_ask` | `--allowedTools mcp__mini --permission-mode dontAsk` | `default_tools_approval_mode = "approve"` on the server, `approvalPolicy: "never"` for everything else |
+| Only Tiller's MCP server | `--mcp-config <file> --strict-mcp-config` | same | `mcp_servers.tiller` in `config`, with Tiller's own `CODEX_HOME` so your `config.toml` servers don't load |
+| Tiller's tools allowed without asking | `--allowed-tools mcp__tiller --permission-mode dont_ask` | `--allowedTools mcp__tiller --permission-mode dontAsk` | `default_tools_approval_mode = "approve"` on the server, `approvalPolicy: "never"` for everything else |
 
-The MCP config is written to `~/Library/Application Support/Mini/agent-mcp.json` and points at the `mini_mcp` inside the running app. The agent runs in the empty directory `~/Library/Application Support/Mini/agent`, or in the folder set in Settings > Agent > Work in. A real project folder loads that project's instructions and settings too.
+The MCP config is written to `~/Library/Application Support/Tiller/agent-mcp.json` and points at the `tiller_mcp` inside the running app. The agent runs in the empty directory `~/Library/Application Support/Tiller/agent`, or in the folder set in Settings > Agent > Work in. A real project folder loads that project's instructions and settings too.
 
 Settings > Agent > Also allow turns on built-in tools, all off by default. They run without asking, and pages the agent reads can try to steer it, so turn on only what you need. Changes apply from the next new chat.
 
@@ -234,10 +243,10 @@ Settings > Agent > Also allow turns on built-in tools, all off by default. They 
 | Write and edit files | `Write`, `Edit` | `workspace-write` sandbox: the shell and patches can write in the folder (and temp folders), not elsewhere |
 | Run commands | `Bash`, not sandboxed: it can do anything your user can | nothing changes; the shell is always there |
 
-The names go in `--tools` and the allow list. Qoder CLI's `dont_ask` refuses built-in tools even when allowed, so with any on Mini uses `--permission-mode bypass_permissions`; `--tools` still limits which tools exist. The system prompt tells the agent which tools it has and not to act on instructions from pages with them. Your user settings still load, so your hooks, model choice and user-level instructions (such as `~/.claude/CLAUDE.md`) apply.
+The names go in `--tools` and the allow list. Qoder CLI's `dont_ask` refuses built-in tools even when allowed, so with any on Tiller uses `--permission-mode bypass_permissions`; `--tools` still limits which tools exist. The system prompt tells the agent which tools it has and not to act on instructions from pages with them. Your user settings still load, so your hooks, model choice and user-level instructions (such as `~/.claude/CLAUDE.md`) apply.
 
-Codex is set apart more. It runs with `CODEX_HOME` set to `~/Library/Application Support/Mini/codex`, so your `~/.codex/config.toml`, its MCP servers, plugins, hooks and `AGENTS.md` don't load, and Codex uses its default model. That folder's `auth.json` is a link to `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), so Codex uses your login and a token refresh updates the file you already have. If you aren't logged in, the panel asks you to run `codex login`. Skills in `~/.agents/skills` and system hooks in `/etc/codex` still load. Threads are saved in Mini's `CODEX_HOME`, and Mini declines any approval or question Codex sends, since the panel can't ask you. Current Codex models call tools from a script they write, and the panel still shows each of Mini's tools as its own row. The sandboxed shell can read files on your disk, and its commands show as `shell` rows and its patches as `edit` rows.
+Codex is set apart more. It runs with `CODEX_HOME` set to `~/Library/Application Support/Tiller/codex`, so your `~/.codex/config.toml`, its MCP servers, plugins, hooks and `AGENTS.md` don't load, and Codex uses its default model. That folder's `auth.json` is a link to `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), so Codex uses your login and a token refresh updates the file you already have. If you aren't logged in, the panel asks you to run `codex login`. Skills in `~/.agents/skills` and system hooks in `/etc/codex` still load. Threads are saved in Tiller's `CODEX_HOME`, and Tiller declines any approval or question Codex sends, since the panel can't ask you. Current Codex models call tools from a script they write, and the panel still shows each of Tiller's tools as its own row. The sandboxed shell can read files on your disk, and its commands show as `shell` rows and its patches as `edit` rows.
 
-Mini looks for the CLI in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.bun/bin`, `~/.volta/bin`, `~/.npm-global/bin`, then asks a login shell. Shell functions and aliases are skipped, so wrappers defined in `.zshrc` don't run. To use another binary, set its path in Settings > Agent, which shows the one found automatically when the field is empty.
+Tiller looks for the CLI in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.bun/bin`, `~/.volta/bin`, `~/.npm-global/bin`, then asks a login shell. Shell functions and aliases are skipped, so wrappers defined in `.zshrc` don't run. To use another binary, set its path in Settings > Agent, which shows the one found automatically when the field is empty.
 
 Debug builds take three launch arguments for testing without typing: `-agentPrompt "..."` opens the panel and sends that message, `-agentStopAfter <seconds>` presses Stop after that many seconds, and `-agentPasteImage YES` pastes the clipboard into the field twice before sending the prompt three seconds later.

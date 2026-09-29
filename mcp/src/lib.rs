@@ -1,3 +1,3 @@
-//! Browser tools shared by the `mini_mcp` server and the `mini` CLI.
+//! Browser tools shared by the `tiller_mcp` server and the `tiller` CLI.
 
 pub mod browser;

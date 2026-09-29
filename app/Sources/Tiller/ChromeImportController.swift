@@ -1,5 +1,5 @@
 import AppKit
-import CMiniCore
+import CTillerCore
 
 /// What an import can bring over.
 enum ImportKind: CaseIterable, Sendable {
@@ -27,7 +27,7 @@ struct ImportResult: Sendable {
     let error: Error?
 }
 
-/// Reads a Chrome profile and brings the chosen data into Mini.
+/// Reads a Chrome profile and brings the chosen data into Tiller.
 @MainActor
 enum ChromeImporter {
     /// Everything read from Chrome, gathered off the main thread.
@@ -128,7 +128,7 @@ enum ChromeImporter {
         return results
     }
 
-    /// Mini's engine for Chrome's search URL, with a template for a custom
+    /// Tiller's engine for Chrome's search URL, with a template for a custom
     /// one. Chrome's URLs use `{searchTerms}` and other `{…}` parameters.
     static func searchSetting(for url: String) -> (SearchEngine, String?)? {
         let host = URL(string: url)?.host()?.lowercased() ?? ""
@@ -160,7 +160,7 @@ enum ChromeImporter {
         let json = String(decoding: data, as: UTF8.self)
         return await withCheckedContinuation { continuation in
             let ctx = Unmanaged.passRetained(CookieCompletion { continuation.resume(returning: ($0, $1)) }).toOpaque()
-            mini_cookies_import(json, ctx) { ctx, imported, failed in
+            tiller_cookies_import(json, ctx) { ctx, imported, failed in
                 guard let ctx else { return }
                 Unmanaged<CookieCompletion>.fromOpaque(ctx).takeRetainedValue().done(Int(imported), Int(failed))
             }
@@ -186,7 +186,7 @@ final class ChromeImportController: NSWindowController {
     private let importButton = NSButton(title: "Import", target: nil, action: nil)
     private var profiles: [ChromeProfile] = []
     /// Temp folder holding a Finder-made copy of Chrome's data, used when
-    /// security software blocks Mini from reading the real folder.
+    /// security software blocks Tiller from reading the real folder.
     private var copyRoot: URL?
     private var finished = false
     private var onEnd: (() -> Void)?
@@ -226,7 +226,7 @@ final class ChromeImportController: NSWindowController {
         grid.setContentHuggingPriority(.required, for: .horizontal)
         grid.setContentHuggingPriority(.required, for: .vertical)
 
-        let note = SettingsPane.note("For cookies and passwords, macOS asks for your login password so Mini can read Chrome's key. Imported cookies replace Mini's for the same site.")
+        let note = SettingsPane.note("For cookies and passwords, macOS asks for your login password so Tiller can read Chrome's key. Imported cookies replace Tiller's for the same site.")
         note.lineBreakMode = .byWordWrapping
         note.maximumNumberOfLines = 0
         note.preferredMaxLayoutWidth = 420
@@ -282,7 +282,7 @@ final class ChromeImportController: NSWindowController {
         }
     }
 
-    /// Fallback for when security software blocks Mini from Chrome's folder:
+    /// Fallback for when security software blocks Tiller from Chrome's folder:
     /// have Finder make a readable copy and import from that instead.
     @objc private func copyViaFinder(_ sender: Any?) {
         guard copyRoot == nil else { return }
@@ -319,7 +319,7 @@ final class ChromeImportController: NSWindowController {
                     profilePopUp.selectItem(at: copiedProfiles.firstIndex { $0.directory == lastUsed } ?? 0)
                 }
                 setControlsEnabled(true)
-                showStatus("Copied. Mini will import from Finder's copy — click Import.")
+                showStatus("Copied. Tiller will import from Finder's copy — click Import.")
             }
         }
     }

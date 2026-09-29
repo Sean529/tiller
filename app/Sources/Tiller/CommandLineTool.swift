@@ -1,15 +1,15 @@
 import AppKit
 
-/// Puts the bundled `mini` CLI on the user's PATH as a symlink in ~/.local/bin.
+/// Puts the bundled `tiller` CLI on the user's PATH as a symlink in ~/.local/bin.
 @MainActor
 enum CommandLineTool {
-    static var linkPath: String { NSHomeDirectory() + "/.local/bin/mini" }
+    static var linkPath: String { NSHomeDirectory() + "/.local/bin/tiller" }
 
     /// Creates or replaces the symlink. A real file at that path is left alone.
     static func install() throws {
-        let tool = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/mini").path
+        let tool = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/tiller").path
         guard FileManager.default.isExecutableFile(atPath: tool) else {
-            throw ControlError("This copy of Mini has no command-line tool. Rebuild it with scripts/bundle.sh.")
+            throw ControlError("This copy of Tiller has no command-line tool. Rebuild it with scripts/bundle.sh.")
         }
         let files = FileManager.default
         try files.createDirectory(atPath: (linkPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
@@ -29,24 +29,24 @@ enum CommandLineTool {
         let alert = NSAlert()
         do {
             try install()
-            // A login shell, since Mini's own PATH is Finder's minimal one.
-            let found = await Task.detached { AgentEnvironment.loginShellLookup("mini") }.value
-            alert.messageText = "Installed the mini command"
-            var info = "\(linkPath) now points to the mini tool inside this app. Run `mini --help` in Terminal to start."
+            // A login shell, since Tiller's own PATH is Finder's minimal one.
+            let found = await Task.detached { AgentEnvironment.loginShellLookup("tiller") }.value
+            alert.messageText = "Installed the tiller command"
+            var info = "\(linkPath) now points to the tiller tool inside this app. Run `tiller --help` in Terminal to start."
             if found == nil {
                 info += "\n\n~/.local/bin doesn't seem to be on your PATH. Add this to ~/.zshrc:\nexport PATH=\"$HOME/.local/bin:$PATH\""
             } else if let found, found != linkPath {
-                info += "\n\nAnother mini at \(found) comes first on your PATH, so your shell runs that one."
+                info += "\n\nAnother tiller at \(found) comes first on your PATH, so your shell runs that one."
             }
-            info += "\n\nIf you move Mini, install again."
+            info += "\n\nIf you move Tiller, install again."
             alert.informativeText = info
         } catch let error as ControlError {
             alert.alertStyle = .warning
-            alert.messageText = "Couldn't install the mini command"
+            alert.messageText = "Couldn't install the tiller command"
             alert.informativeText = error.message
         } catch {
             alert.alertStyle = .warning
-            alert.messageText = "Couldn't install the mini command"
+            alert.messageText = "Couldn't install the tiller command"
             alert.informativeText = error.localizedDescription
         }
         alert.runModal()

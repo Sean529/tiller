@@ -10,7 +10,7 @@ use std::{
     ffi::{CString, c_char, c_void},
 };
 
-/// Mirrors `MiniBrowserCallbacks` in mini_core.h.
+/// Mirrors `TillerBrowserCallbacks` in tiller_core.h.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Callbacks {
@@ -69,7 +69,7 @@ pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, call
         runtime_style: RuntimeStyle::ALLOY,
         ..Default::default()
     };
-    let mut client = MiniClient::new();
+    let mut client = TillerClient::new();
     let Some(browser) = browser_host_create_browser_sync(
         Some(&window_info),
         Some(&mut client),
@@ -127,7 +127,7 @@ pub fn devtools_call(id: i32, method: &str, params: Value, token: u64) {
     let attached = BROWSERS.with_borrow_mut(|map| {
         let Some(entry) = map.get_mut(&id) else { return false };
         if entry.devtools.is_none() {
-            let mut observer = MiniDevToolsObserver::new();
+            let mut observer = TillerDevToolsObserver::new();
             entry.devtools = host.add_dev_tools_message_observer(Some(&mut observer));
         }
         entry.devtools.is_some()
@@ -158,7 +158,7 @@ fn fail_devtools_calls(browser_id: i32) {
 }
 
 wrap_dev_tools_message_observer! {
-    struct MiniDevToolsObserver;
+    struct TillerDevToolsObserver;
 
     impl DevToolsMessageObserver {
         /// Answers the matching call. Events and replies to anyone else's calls
@@ -178,33 +178,33 @@ wrap_dev_tools_message_observer! {
 }
 
 wrap_client! {
-    struct MiniClient;
+    struct TillerClient;
 
     impl Client {
         fn display_handler(&self) -> Option<DisplayHandler> {
-            Some(MiniDisplayHandler::new())
+            Some(TillerDisplayHandler::new())
         }
 
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
-            Some(MiniLifeSpanHandler::new())
+            Some(TillerLifeSpanHandler::new())
         }
 
         fn keyboard_handler(&self) -> Option<KeyboardHandler> {
-            Some(MiniKeyboardHandler::new())
+            Some(TillerKeyboardHandler::new())
         }
 
         fn load_handler(&self) -> Option<LoadHandler> {
-            Some(MiniLoadHandler::new())
+            Some(TillerLoadHandler::new())
         }
 
         fn find_handler(&self) -> Option<FindHandler> {
-            Some(MiniFindHandler::new())
+            Some(TillerFindHandler::new())
         }
     }
 }
 
 wrap_find_handler! {
-    struct MiniFindHandler;
+    struct TillerFindHandler;
 
     impl FindHandler {
         fn on_find_result(
@@ -224,7 +224,7 @@ wrap_find_handler! {
 }
 
 wrap_display_handler! {
-    struct MiniDisplayHandler;
+    struct TillerDisplayHandler;
 
     impl DisplayHandler {
         fn on_address_change(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
@@ -245,7 +245,7 @@ wrap_display_handler! {
                 return;
             };
             if let Some(host) = browser.host() {
-                let mut callback = MiniFaviconCallback::new(browser.identifier(), page_origin(browser));
+                let mut callback = TillerFaviconCallback::new(browser.identifier(), page_origin(browser));
                 host.download_image(Some(&CefString::from(url.as_str())), 1, 64, 0, Some(&mut callback));
             }
         }
@@ -297,7 +297,7 @@ fn send_favicon(id: i32, png: &[u8]) {
 }
 
 wrap_download_image_callback! {
-    struct MiniFaviconCallback {
+    struct TillerFaviconCallback {
         browser_id: i32,
         // The site the icon belongs to. An icon that arrives after the tab
         // went to another site is dropped, so it can't be shown or saved
@@ -325,7 +325,7 @@ wrap_download_image_callback! {
 }
 
 wrap_keyboard_handler! {
-    struct MiniKeyboardHandler;
+    struct TillerKeyboardHandler;
 
     impl KeyboardHandler {
         /// Gives the menu bar first pick of Command and Control shortcuts, so
@@ -352,7 +352,7 @@ wrap_keyboard_handler! {
 }
 
 wrap_load_handler! {
-    struct MiniLoadHandler;
+    struct TillerLoadHandler;
 
     impl LoadHandler {
         fn on_loading_state_change(&self, browser: Option<&mut Browser>, is_loading: i32, can_go_back: i32, can_go_forward: i32) {
@@ -364,7 +364,7 @@ wrap_load_handler! {
 }
 
 wrap_life_span_handler! {
-    struct MiniLifeSpanHandler;
+    struct TillerLifeSpanHandler;
 
     impl LifeSpanHandler {
         /// Opens popups and new-window links as tabs. The new tab is a separate
@@ -420,7 +420,7 @@ wrap_life_span_handler! {
 }
 
 wrap_app! {
-    pub struct MiniApp;
+    pub struct TillerApp;
 
     impl App {
         fn on_before_command_line_processing(&self, process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {

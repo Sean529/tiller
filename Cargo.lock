@@ -662,31 +662,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "mini-core"
-version = "0.1.0"
-dependencies = [
- "cef",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "serde_json",
-]
-
-[[package]]
-name = "mini-helper"
-version = "0.1.0"
-dependencies = [
- "cef",
-]
-
-[[package]]
-name = "mini-mcp"
-version = "0.1.0"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "miniz_oxide"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1071,6 +1046,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tiller-core"
+version = "0.1.0"
+dependencies = [
+ "cef",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "serde_json",
+]
+
+[[package]]
+name = "tiller-helper"
+version = "0.1.0"
+dependencies = [
+ "cef",
+]
+
+[[package]]
+name = "tiller-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

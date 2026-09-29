@@ -1,8 +1,8 @@
 import Foundation
 
-/// The agent CLIs Mini can run. Qoder CLI and Claude Code speak the same
+/// The agent CLIs Tiller can run. Qoder CLI and Claude Code speak the same
 /// stream-json protocol over stdio in print mode. Codex runs its app server,
-/// which speaks JSON-RPC over stdio. All are limited to Mini's MCP tools plus
+/// which speaks JSON-RPC over stdio. All are limited to Tiller's MCP tools plus
 /// the built-in tools turned on in Settings, except that Codex always keeps a
 /// shell, confined to a read-only sandbox unless writing is on.
 enum AgentKind: String, CaseIterable, Codable {
@@ -32,11 +32,11 @@ enum AgentKind: String, CaseIterable, Codable {
     }
 
     /// Print mode with stream-json both ways, only the built-in tools in
-    /// `tools`, only the `mini` MCP server, and all of those allowed without
+    /// `tools`, only the `tiller` MCP server, and all of those allowed without
     /// asking. `resume` continues that saved session.
     func arguments(mcpConfig: String, systemPrompt: String, tools: [AgentTool], resume: String?) -> [String] {
         let toolNames = tools.flatMap(\.toolNames)
-        let allowed = (["mcp__mini"] + toolNames).joined(separator: ",")
+        let allowed = (["mcp__tiller"] + toolNames).joined(separator: ",")
         var common = [
             "-p",
             "--input-format", "stream-json",
@@ -159,7 +159,7 @@ final class AgentSession {
         process.currentDirectoryURL = directory
         process.environment = try AgentEnvironment.environment(for: kind)
 
-        // Writing to an agent that has exited should fail, not kill Mini.
+        // Writing to an agent that has exited should fail, not kill Tiller.
         signal(SIGPIPE, SIG_IGN)
         generation += 1
         let generation = generation
@@ -228,7 +228,7 @@ final class AgentSession {
             MainActor.assumeIsolated {
                 guard let self, self.isBusy else { return }
                 self.stop()
-                self.onEvent?(.exited(message: "\(self.kind.displayName) didn't stop in time, so Mini ended it."))
+                self.onEvent?(.exited(message: "\(self.kind.displayName) didn't stop in time, so Tiller ended it."))
             }
         }
     }
@@ -371,7 +371,7 @@ final class AgentSession {
     /// thread starts wait in `queuedInput`.
     private func startCodexThread(cwd: URL) throws {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
-        try request("initialize", ["clientInfo": ["name": "mini", "title": "Mini", "version": version]])
+        try request("initialize", ["clientInfo": ["name": "tiller", "title": "Tiller", "version": version]])
         try write(["method": "initialized"])
         try requestCodexThread(cwd: cwd)
     }
@@ -379,7 +379,7 @@ final class AgentSession {
     private func requestCodexThread(cwd: URL) throws {
         var params = AgentEnvironment.codexThreadParams(cwd: cwd)
         if let sessionID {
-            // Mini shows its own copy of the transcript.
+            // Tiller shows its own copy of the transcript.
             params["threadId"] = sessionID
             params["excludeTurns"] = true
             try request("thread/resume", params)
@@ -485,11 +485,11 @@ final class AgentSession {
             // A final error also arrives with turn/completed.
             if params["willRetry"] as? Bool == true { onEvent?(.retrying) }
         case "mcpServer/startupStatus/updated":
-            guard params["name"] as? String == "mini", params["status"] as? String == "failed",
+            guard params["name"] as? String == "tiller", params["status"] as? String == "failed",
                 !reportedToolFailure
             else { return }
             reportedToolFailure = true
-            onEvent?(.error("Mini's browser tools didn't start: " + (params["error"] as? String ?? "unknown error")))
+            onEvent?(.error("Tiller's browser tools didn't start: " + (params["error"] as? String ?? "unknown error")))
         default:
             break
         }
@@ -510,7 +510,7 @@ final class AgentSession {
                 let server = item["server"] as? String ?? "", tool = item["tool"] as? String ?? "tool"
                 onEvent?(.toolUse(
                     id: id,
-                    name: server == "mini" ? tool : "\(server).\(tool)",
+                    name: server == "tiller" ? tool : "\(server).\(tool)",
                     input: item["arguments"] as? [String: Any] ?? [:]
                 ))
             } else {
@@ -538,7 +538,7 @@ final class AgentSession {
         }
     }
 
-    /// Mini can't ask the user, so approvals and questions are declined.
+    /// Tiller can't ask the user, so approvals and questions are declined.
     private func answerCodex(id: Any, method: String) {
         let result: [String: Any]? = switch method {
         case "item/commandExecution/requestApproval", "item/fileChange/requestApproval": ["decision": "decline"]
@@ -549,7 +549,7 @@ final class AgentSession {
         if let result {
             try? write(["id": id, "result": result])
         } else {
-            try? write(["id": id, "error": ["code": -32601, "message": "Mini doesn't support \(method)"]])
+            try? write(["id": id, "error": ["code": -32601, "message": "Tiller doesn't support \(method)"]])
         }
     }
 
@@ -579,15 +579,15 @@ final class AgentSession {
 @MainActor
 enum AgentEnvironment {
     private static let basePrompt = """
-        You are running inside Mini, a web browser for macOS. The user talks to you in a narrow \
-        side panel next to the page. You act on the browser only through the mini tools \
+        You are running inside Tiller, a web browser for macOS. The user talks to you in a narrow \
+        side panel next to the page. You act on the browser only through the tiller tools \
         (list_tabs, new_tab, select_tab, close_tab, navigate, read_page, click, type, screenshot, \
         eval_js). Each user message starts with the selected tab's id, title and URL, which is \
         usually the page the user means. Call read_page before clicking or typing and use the \
         refs it returns. Keep replies short.
         """
 
-    /// Mini's prompt, a line on the file and shell tools if any are on, then
+    /// Tiller's prompt, a line on the file and shell tools if any are on, then
     /// the extra instructions from Settings.
     static var systemPrompt: String {
         var parts = [basePrompt]
@@ -653,13 +653,13 @@ enum AgentEnvironment {
         var env = ProcessInfo.processInfo.environment
         let path = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (searchDirectories + [path]).joined(separator: ":")
-        // Set when Mini itself was started from a Claude Code session.
+        // Set when Tiller itself was started from a Claude Code session.
         for key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] { env[key] = nil }
         if kind == .codex { env["CODEX_HOME"] = try codexHome() }
         return env
     }
 
-    /// Codex's own folder for Mini, so the user's config.toml, MCP servers,
+    /// Codex's own folder for Tiller, so the user's config.toml, MCP servers,
     /// plugins and hooks don't load. Its auth.json links to the user's, so
     /// Codex uses their login, and a token refresh writes through the link.
     private static func codexHome() throws -> String {
@@ -678,7 +678,7 @@ enum AgentEnvironment {
         return home
     }
 
-    /// Codex's equivalent of the other CLIs' flags: only the mini MCP server,
+    /// Codex's equivalent of the other CLIs' flags: only the tiller MCP server,
     /// its tools allowed without asking, and the shell in a sandbox that never
     /// asks for approval. Codex has no separate read or shell tools, so only
     /// writing changes anything: it lets the shell and patches write in the
@@ -691,12 +691,12 @@ enum AgentEnvironment {
             "developerInstructions": systemPrompt,
             "config": [
                 "mcp_servers": [
-                    "mini": [
+                    "tiller": [
                         "command": mcpServerPath,
                         "args": [String](),
                         // Codex starts MCP servers with only a few variables
-                        // set, so pass on the ones that pick Mini's socket.
-                        "env_vars": ["MINI_DATA_DIR", "MINI_SOCKET"],
+                        // set, so pass on the ones that pick Tiller's socket.
+                        "env_vars": ["TILLER_DATA_DIR", "TILLER_SOCKET"],
                         "default_tools_approval_mode": "approve",
                     ],
                 ],
@@ -724,15 +724,15 @@ enum AgentEnvironment {
         return url
     }
 
-    /// The mini_mcp next to Mini's own executable.
+    /// The tiller_mcp next to Tiller's own executable.
     private static var mcpServerPath: String {
-        Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/mini_mcp").path
+        Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/tiller_mcp").path
     }
 
-    /// Points the agent at mini_mcp.
+    /// Points the agent at tiller_mcp.
     static func writeMCPConfig() throws -> String {
         let config: [String: Any] = [
-            "mcpServers": ["mini": ["type": "stdio", "command": mcpServerPath, "args": [String]()]],
+            "mcpServers": ["tiller": ["type": "stdio", "command": mcpServerPath, "args": [String]()]],
         ]
         try FileManager.default.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
         let path = supportDirectory + "/agent-mcp.json"

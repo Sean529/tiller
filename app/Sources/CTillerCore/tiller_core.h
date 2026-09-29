@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 // Called on the main thread. `ctx` is passed back unchanged.
-typedef struct MiniBrowserCallbacks {
+typedef struct TillerBrowserCallbacks {
     void *ctx;
     void (*address_changed)(void *ctx, const char *url);
     void (*title_changed)(void *ctx, const char *title);
@@ -24,45 +24,45 @@ typedef struct MiniBrowserCallbacks {
     // A find in the page moved on: how many matches, which one is selected
     // (1-based), and whether the search has finished counting.
     void (*find_result)(void *ctx, int count, int active, bool final_update);
-} MiniBrowserCallbacks;
+} TillerBrowserCallbacks;
 
 // Static version string. Do not free.
-const char *mini_core_version(void);
+const char *tiller_core_version(void);
 
 // Loads CEF, installs the CEF-compatible NSApplication subclass and initializes
 // CEF. Call first in main, before touching NSApp. Returns 0 or an exit code.
-int mini_core_start(void);
+int tiller_core_start(void);
 
 // Runs the message loop until the last browser closes, then shuts CEF down.
-void mini_core_run(void);
+void tiller_core_run(void);
 
 // Called on the main thread when the app is asked to quit (Cmd+Q, the Dock,
 // logging out), before any tab starts closing. NULL clears it.
-void mini_core_set_quit_handler(void (*handler)(void));
+void tiller_core_set_quit_handler(void (*handler)(void));
 
 // Creates a browser filling `parent_view` (an NSView *). Returns its id or -1.
-int mini_browser_create(void *parent_view, int width, int height, const char *url,
-                        MiniBrowserCallbacks callbacks);
-void mini_browser_load_url(int id, const char *url);
-void mini_browser_go_back(int id);
-void mini_browser_go_forward(int id);
-void mini_browser_reload(int id);
-void mini_browser_stop(int id);
-void mini_browser_set_focus(int id, bool focus);
+int tiller_browser_create(void *parent_view, int width, int height, const char *url,
+                        TillerBrowserCallbacks callbacks);
+void tiller_browser_load_url(int id, const char *url);
+void tiller_browser_go_back(int id);
+void tiller_browser_go_forward(int id);
+void tiller_browser_reload(int id);
+void tiller_browser_stop(int id);
+void tiller_browser_set_focus(int id, bool focus);
 
 // Zooms out (command < 0), resets to 100% (0) or zooms in (> 0).
-void mini_browser_zoom(int id, int command);
+void tiller_browser_zoom(int id, int command);
 // The zoom as a factor, 1 for 100%.
-double mini_browser_zoom_factor(int id);
+double tiller_browser_zoom_factor(int id);
 
 // Finds text in the page. find_next continues the current search in the
 // given direction. Results arrive through the find_result callback.
-void mini_browser_find(int id, const char *text, bool forward, bool find_next);
+void tiller_browser_find(int id, const char *text, bool forward, bool find_next);
 // Ends the search and clears its highlights.
-void mini_browser_stop_finding(int id);
+void tiller_browser_stop_finding(int id);
 
 // Runs JavaScript in the tab's main frame. Nothing comes back.
-void mini_browser_execute_js(int id, const char *code);
+void tiller_browser_execute_js(int id, const char *code);
 
 // Sets cookies, replacing any with the same name, domain and path.
 // `cookies_json` is an array of objects:
@@ -75,22 +75,22 @@ void mini_browser_execute_js(int id, const char *code);
 //   priority   "low", "medium" or "high"
 // `done` runs on the main thread once every cookie is set and the store is
 // written to disk, with how many were set and how many were rejected.
-void mini_cookies_import(const char *cookies_json, void *ctx,
+void tiller_cookies_import(const char *cookies_json, void *ctx,
                          void (*done)(void *ctx, int imported, int failed));
 
 // Closes a tab. beforeunload runs first and may cancel. If it doesn't,
 // close_ready fires.
-void mini_browser_close(int id);
+void tiller_browser_close(int id);
 
 // Stops callbacks for this browser. Call before freeing the callback context.
-void mini_browser_detach(int id);
+void tiller_browser_detach(int id);
 
-// Starts the control socket mini_mcp connects to. `handler` runs on the main
+// Starts the control socket tiller_mcp connects to. `handler` runs on the main
 // thread for every request except DevTools calls, which the core answers
-// itself. Each request must be answered with mini_ipc_reply using its token.
+// itself. Each request must be answered with tiller_ipc_reply using its token.
 // Returns false if the socket can't be created.
-bool mini_ipc_start(const char *socket_path, void *ctx,
+bool tiller_ipc_start(const char *socket_path, void *ctx,
                     void (*handler)(void *ctx, const char *request_json, uint64_t token));
 
 // Answers a request. `reply_json` is {"result": ...} or {"error": "..."}.
-void mini_ipc_reply(uint64_t token, const char *reply_json);
+void tiller_ipc_reply(uint64_t token, const char *reply_json);

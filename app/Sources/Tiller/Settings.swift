@@ -40,7 +40,7 @@ enum NewTabPage: String, CaseIterable {
     }
 }
 
-/// What opens when Mini starts.
+/// What opens when Tiller starts.
 enum LaunchTabs: String, CaseIterable {
     case restore
     case homepage
@@ -125,13 +125,13 @@ enum Settings {
         }
     }
 
-    /// Added after Mini's own system prompt.
+    /// Added after Tiller's own system prompt.
     static var agentInstructions: String {
         get { defaults.string(forKey: "agentInstructions") ?? "" }
         set { defaults.set(newValue, forKey: "agentInstructions") }
     }
 
-    /// Built-in tools the agent gets besides Mini's. All off by default.
+    /// Built-in tools the agent gets besides Tiller's. All off by default.
     static func agentToolEnabled(_ tool: AgentTool) -> Bool {
         defaults.bool(forKey: tool.defaultsKey)
     }
@@ -142,13 +142,13 @@ enum Settings {
 
     static var agentTools: [AgentTool] { AgentTool.allCases.filter(agentToolEnabled) }
 
-    /// As typed. Empty means Mini's own empty folder.
+    /// As typed. Empty means Tiller's own empty folder.
     static var agentFolder: String {
         get { defaults.string(forKey: "agentFolder") ?? "" }
         set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "agentFolder") }
     }
 
-    /// The folder the agent works in, with `~` expanded. Nil means Mini's own.
+    /// The folder the agent works in, with `~` expanded. Nil means Tiller's own.
     static var agentFolderPath: String? {
         agentFolder.isEmpty ? nil : NSString(string: agentFolder).expandingTildeInPath
     }
@@ -213,7 +213,7 @@ enum AgentTool: String, CaseIterable {
 
 extension Notification.Name {
     /// Posted when `AgentKind.current` changes, from the panel or from Settings.
-    static let agentKindDidChange = Notification.Name("MiniAgentKindDidChange")
+    static let agentKindDidChange = Notification.Name("TillerAgentKindDidChange")
     /// Posted when `Settings.agentTabs` changes.
-    static let agentTabsDidChange = Notification.Name("MiniAgentTabsDidChange")
+    static let agentTabsDidChange = Notification.Name("TillerAgentTabsDidChange")
 }

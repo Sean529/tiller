@@ -32,16 +32,16 @@ enum PasswordStoreError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .keyMissing: "Mini's password key is missing from the keychain, so its saved passwords can't be read. Remove them in Settings > Passwords, then import again."
+        case .keyMissing: "Tiller's password key is missing from the keychain, so its saved passwords can't be read. Remove them in Settings > Passwords, then import again."
         case .keychain(let status): "Keychain error \(status)."
-        case .keychainDenied: "Access to Mini's password key in the keychain was denied."
+        case .keychainDenied: "Access to Tiller's password key in the keychain was denied."
         case .unreadable: "This password couldn't be decrypted."
         }
     }
 }
 
 /// Saved passwords, in `passwords.json` in the data folder. Sites and
-/// usernames are stored in the clear, as Chrome stores them, so Mini can tell
+/// usernames are stored in the clear, as Chrome stores them, so Tiller can tell
 /// which pages have a login without asking for the keychain. Each password is
 /// sealed with AES-GCM under a key kept in the login keychain.
 @MainActor
@@ -77,7 +77,7 @@ final class PasswordStore {
         byOrigin[origin] ?? []
     }
 
-    /// The password of `entry`. macOS may ask before handing Mini its key.
+    /// The password of `entry`. macOS may ask before handing Tiller its key.
     func password(for entry: Entry) async throws -> String {
         let key = try await Task.detached { try PasswordKey.load(create: false) }.value
         guard let box = try? AES.GCM.SealedBox(combined: entry.sealed),
@@ -122,14 +122,16 @@ final class PasswordStore {
     }
 }
 
-/// The 256-bit key sealing Mini's passwords, as a generic password item in
-/// the login keychain. Mini is ad-hoc signed, so after each rebuild macOS asks
+/// The 256-bit key sealing Tiller's passwords, as a generic password item in
+/// the login keychain. Tiller is ad-hoc signed, so after each rebuild macOS asks
 /// before letting the new binary read it.
 enum PasswordKey {
-    private static let service = "Mini Saved Passwords"
+    private static let service = "Tiller Saved Passwords"
+    /// Where the key was kept while the app was called Mini.
+    private static let oldService = "Mini Saved Passwords"
     private static let account = "key"
 
-    private static var baseQuery: [String: Any] {
+    private static func baseQuery(service: String = service) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -137,9 +139,23 @@ enum PasswordKey {
         ]
     }
 
-    /// Reads the key, creating it if missing and `create` is set.
+    /// Reads the key, creating it if missing and `create` is set. A key saved
+    /// by Mini is copied under the new name, and the old item is left as is.
     static func load(create: Bool) throws -> SymmetricKey {
-        var query = baseQuery
+        if let key = try read(service: service) { return key }
+        if let key = try read(service: oldService) {
+            try add(key)
+            return key
+        }
+        guard create else { throw PasswordStoreError.keyMissing }
+        let key = SymmetricKey(size: .bits256)
+        try add(key)
+        return key
+    }
+
+    /// Nil if there is no item for `service`.
+    private static func read(service: String) throws -> SymmetricKey? {
+        var query = baseQuery(service: service)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -149,14 +165,7 @@ enum PasswordKey {
             guard let data = result as? Data, data.count == 32 else { throw PasswordStoreError.keyMissing }
             return SymmetricKey(data: data)
         case errSecItemNotFound:
-            guard create else { throw PasswordStoreError.keyMissing }
-            let key = SymmetricKey(size: .bits256)
-            var add = baseQuery
-            add[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
-            add[kSecAttrLabel as String] = service
-            let added = SecItemAdd(add as CFDictionary, nil)
-            guard added == errSecSuccess else { throw PasswordStoreError.keychain(added) }
-            return key
+            return nil
         case errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed:
             throw PasswordStoreError.keychainDenied
         default:
@@ -164,8 +173,16 @@ enum PasswordKey {
         }
     }
 
+    private static func add(_ key: SymmetricKey) throws {
+        var add = baseQuery()
+        add[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
+        add[kSecAttrLabel as String] = service
+        let added = SecItemAdd(add as CFDictionary, nil)
+        guard added == errSecSuccess else { throw PasswordStoreError.keychain(added) }
+    }
+
     static func delete() {
-        SecItemDelete(baseQuery as CFDictionary)
+        SecItemDelete(baseQuery() as CFDictionary)
     }
 }
 
@@ -203,5 +220,5 @@ enum LoginFill {
 }
 
 extension Notification.Name {
-    static let passwordsDidChange = Notification.Name("MiniPasswordsDidChange")
+    static let passwordsDidChange = Notification.Name("TillerPasswordsDidChange")
 }

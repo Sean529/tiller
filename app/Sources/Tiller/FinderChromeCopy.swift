@@ -1,9 +1,9 @@
 import Foundation
 
 /// Copies Chrome's files by asking Finder to do it. Security (EDR) software
-/// can block Mini — and even Terminal — from opening anything under Chrome's
+/// can block Tiller — and even Terminal — from opening anything under Chrome's
 /// folder, but it virtually always lets Finder through, and the copies
-/// themselves are readable by anyone. Mini only has to control Finder, which
+/// themselves are readable by anyone. Tiller only has to control Finder, which
 /// is a normal Automation permission prompt.
 enum FinderChromeCopy: Sendable {
     enum CopyError: LocalizedError {
@@ -14,7 +14,7 @@ enum FinderChromeCopy: Sendable {
         var errorDescription: String? {
             switch self {
             case .automationDenied:
-                "macOS didn't let Mini ask Finder for a copy. Allow Mini to control Finder in System Settings → Privacy & Security → Automation, then try again."
+                "macOS didn't let Tiller ask Finder for a copy. Allow Tiller to control Finder in System Settings → Privacy & Security → Automation, then try again."
             case .nothingCopied:
                 "Finder couldn't copy anything from Chrome's folder."
             case .failed(let message):
@@ -30,7 +30,7 @@ enum FinderChromeCopy: Sendable {
 
     static func makeTempRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mini-chrome-copy-\(UUID().uuidString)")
+            .appendingPathComponent("tiller-chrome-copy-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }

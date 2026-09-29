@@ -1,8 +1,8 @@
-//! Command-line front end to the running Mini app: the same browser tools as
-//! mini_mcp, one per command, printed as short text or, with --json, as the
+//! Command-line front end to the running Tiller app: the same browser tools as
+//! tiller_mcp, one per command, printed as short text or, with --json, as the
 //! raw result.
 
-use mini_mcp::browser::{Browser, Output};
+use tiller_mcp::browser::{Browser, Output};
 use serde_json::{Map, Value, json};
 use std::{
     env, fs,
@@ -12,9 +12,9 @@ use std::{
 };
 
 const USAGE: &str = "\
-Usage: mini <command> [options]
+Usage: tiller <command> [options]
 
-Controls the running Mini browser.
+Controls the running Tiller browser.
 
 Commands:
   tabs                      List open tabs. * marks the selected one.
@@ -48,11 +48,11 @@ fn main() -> ExitCode {
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Error::Usage(message)) => {
-            eprintln!("mini: {message}\nRun `mini --help` for usage.");
+            eprintln!("tiller: {message}\nRun `tiller --help` for usage.");
             ExitCode::from(2)
         }
         Err(Error::Failed(message)) => {
-            eprintln!("mini: {message}");
+            eprintln!("tiller: {message}");
             ExitCode::FAILURE
         }
     }
@@ -178,7 +178,7 @@ fn run(args: Vec<String>) -> Result<(), Error> {
         Output::Image(data) => {
             let path = options.output.clone().unwrap_or_else(|| {
                 let millis = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or_default();
-                env::temp_dir().join(format!("mini-screenshot-{millis}.jpg"))
+                env::temp_dir().join(format!("tiller-screenshot-{millis}.jpg"))
             });
             let bytes = decode_base64(&data).ok_or_else(|| Error::Failed("the screenshot was not valid base64".into()))?;
             fs::write(&path, bytes).map_err(|e| Error::Failed(format!("could not write {}: {e}", path.display())))?;

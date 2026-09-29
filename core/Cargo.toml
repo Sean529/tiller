@@ -1,11 +1,11 @@
 [package]
-name = "mini-core"
+name = "tiller-core"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "mini_core"
+name = "tiller_core"
 crate-type = ["staticlib"]
 
 [dependencies]

@@ -1,13 +1,13 @@
 //! MCP server over stdio that the agent CLI launches. Speaks newline-delimited
 //! JSON-RPC. Each browser tool becomes one or more requests to the running
-//! Mini app over its control socket (see `mini_mcp::browser`).
+//! Tiller app over its control socket (see `tiller_mcp::browser`).
 
-use mini_mcp::browser::{Browser, Output};
+use tiller_mcp::browser::{Browser, Output};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
-const INSTRUCTIONS: &str = "Controls the Mini web browser the user is looking at. \
+const INSTRUCTIONS: &str = "Controls the Tiller web browser the user is looking at. \
 Call read_page to see a page's text and its numbered interactive elements, then pass \
 an element's ref to click or type. Tools act on the selected tab unless given a tab_id.";
 
@@ -32,7 +32,7 @@ fn main() -> io::Result<()> {
             "initialize" => Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "mini", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "tiller", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": INSTRUCTIONS,
             })),
             "ping" => Ok(json!({})),

@@ -1,5 +1,5 @@
-//! Browser core for Mini. Built as a static library and linked into the Swift app.
-//! Every exported function is declared in `app/Sources/CMiniCore/mini_core.h`.
+//! Browser core for Tiller. Built as a static library and linked into the Swift app.
+//! Every exported function is declared in `app/Sources/CTillerCore/tiller_core.h`.
 
 mod app_mac;
 mod browser;
@@ -9,11 +9,11 @@ mod ipc;
 use cef::*;
 use std::ffi::{CStr, c_char, c_int, c_void};
 
-static VERSION: &CStr = c"mini-core 0.1.0 (cef 154.2.0+154.0.28)";
+static VERSION: &CStr = c"tiller-core 0.1.0 (cef 154.2.0+154.0.28)";
 
 /// Returns a static, NUL-terminated version string. The caller must not free it.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_core_version() -> *const c_char {
+pub extern "C" fn tiller_core_version() -> *const c_char {
     VERSION.as_ptr()
 }
 
@@ -21,13 +21,13 @@ pub extern "C" fn mini_core_version() -> *const c_char {
 /// Must be the first thing `main` does, before anything touches `NSApp`.
 /// Returns 0 on success, or a nonzero exit code.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_core_start() -> c_int {
+pub extern "C" fn tiller_core_start() -> c_int {
     let Ok(exe) = std::env::current_exe() else {
         return 1;
     };
     let loader = library_loader::LibraryLoader::new(&exe, false);
     if !loader.load() {
-        eprintln!("mini: Chromium Embedded Framework not found. Run Mini from Mini.app.");
+        eprintln!("tiller: Chromium Embedded Framework not found. Run Tiller from Tiller.app.");
         return 1;
     }
     // The framework has to stay loaded for the life of the process.
@@ -35,7 +35,7 @@ pub extern "C" fn mini_core_start() -> c_int {
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
     if !app_mac::install() {
-        eprintln!("mini: NSApp was created before mini_core_start");
+        eprintln!("tiller: NSApp was created before tiller_core_start");
         return 1;
     }
 
@@ -48,9 +48,9 @@ pub extern "C" fn mini_core_start() -> c_int {
     }
 
     // Same folder as DataDirectory.swift.
-    let root = match std::env::var("MINI_DATA_DIR") {
+    let root = match std::env::var("TILLER_DATA_DIR") {
         Ok(dir) if !dir.is_empty() => dir,
-        _ => std::env::var("HOME").map(|h| format!("{h}/Library/Application Support/Mini")).unwrap_or_default(),
+        _ => std::env::var("HOME").map(|h| format!("{h}/Library/Application Support/Tiller")).unwrap_or_default(),
     };
     let settings = Settings {
         root_cache_path: CefString::from(root.as_str()),
@@ -59,9 +59,9 @@ pub extern "C" fn mini_core_start() -> c_int {
         log_severity: LogSeverity::WARNING,
         ..Default::default()
     };
-    let mut app = browser::MiniApp::new();
+    let mut app = browser::TillerApp::new();
     if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) != 1 {
-        eprintln!("mini: CEF failed to initialize");
+        eprintln!("tiller: CEF failed to initialize");
         return 1;
     }
     0
@@ -70,7 +70,7 @@ pub extern "C" fn mini_core_start() -> c_int {
 /// Runs the AppKit/CEF message loop until the last browser closes, then shuts
 /// CEF down.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_core_run() {
+pub extern "C" fn tiller_core_run() {
     run_message_loop();
     shutdown();
 }
@@ -78,7 +78,7 @@ pub extern "C" fn mini_core_run() {
 /// Sets a function run on the main thread when the app is asked to quit (Cmd+Q,
 /// the Dock, logging out), before any tab starts closing. Null clears it.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_core_set_quit_handler(handler: Option<unsafe extern "C" fn()>) {
+pub extern "C" fn tiller_core_set_quit_handler(handler: Option<unsafe extern "C" fn()>) {
     app_mac::set_quit_handler(handler);
 }
 
@@ -88,7 +88,7 @@ pub extern "C" fn mini_core_set_quit_handler(handler: Option<unsafe extern "C" f
 /// # Safety
 /// `parent_view` must be a live NSView and `url` a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mini_browser_create(
+pub unsafe extern "C" fn tiller_browser_create(
     parent_view: *mut c_void,
     width: c_int,
     height: c_int,
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn mini_browser_create(
 /// # Safety
 /// `url` must be a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mini_browser_load_url(id: c_int, url: *const c_char) {
+pub unsafe extern "C" fn tiller_browser_load_url(id: c_int, url: *const c_char) {
     let url = unsafe { cstr(url) };
     if let Some(frame) = browser::get(id).and_then(|b| b.main_frame()) {
         frame.load_url(Some(&CefString::from(url.as_str())));
@@ -110,35 +110,35 @@ pub unsafe extern "C" fn mini_browser_load_url(id: c_int, url: *const c_char) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_go_back(id: c_int) {
+pub extern "C" fn tiller_browser_go_back(id: c_int) {
     if let Some(b) = browser::get(id) {
         b.go_back();
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_go_forward(id: c_int) {
+pub extern "C" fn tiller_browser_go_forward(id: c_int) {
     if let Some(b) = browser::get(id) {
         b.go_forward();
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_reload(id: c_int) {
+pub extern "C" fn tiller_browser_reload(id: c_int) {
     if let Some(b) = browser::get(id) {
         b.reload();
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_stop(id: c_int) {
+pub extern "C" fn tiller_browser_stop(id: c_int) {
     if let Some(b) = browser::get(id) {
         b.stop_load();
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_set_focus(id: c_int, focus: bool) {
+pub extern "C" fn tiller_browser_set_focus(id: c_int, focus: bool) {
     if let Some(host) = browser::get(id).and_then(|b| b.host()) {
         host.set_focus(focus.into());
     }
@@ -147,7 +147,7 @@ pub extern "C" fn mini_browser_set_focus(id: c_int, focus: bool) {
 /// Zooms the page out (`command` < 0), back to 100% (0) or in (> 0), in
 /// Chromium's zoom steps.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_zoom(id: c_int, command: c_int) {
+pub extern "C" fn tiller_browser_zoom(id: c_int, command: c_int) {
     if let Some(host) = browser::get(id).and_then(|b| b.host()) {
         host.zoom(match command {
             ..0 => ZoomCommand::OUT,
@@ -159,7 +159,7 @@ pub extern "C" fn mini_browser_zoom(id: c_int, command: c_int) {
 
 /// The page's zoom as a factor, 1 for 100%.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_zoom_factor(id: c_int) -> f64 {
+pub extern "C" fn tiller_browser_zoom_factor(id: c_int) -> f64 {
     browser::get(id).and_then(|b| b.host()).map_or(1.0, |host| 1.2f64.powf(host.zoom_level()))
 }
 
@@ -170,7 +170,7 @@ pub extern "C" fn mini_browser_zoom_factor(id: c_int) -> f64 {
 /// # Safety
 /// `text` must be a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mini_browser_find(id: c_int, text: *const c_char, forward: bool, find_next: bool) {
+pub unsafe extern "C" fn tiller_browser_find(id: c_int, text: *const c_char, forward: bool, find_next: bool) {
     let text = unsafe { cstr(text) };
     if let Some(host) = browser::get(id).and_then(|b| b.host()) {
         host.find(Some(&CefString::from(text.as_str())), forward.into(), 0, find_next.into());
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn mini_browser_find(id: c_int, text: *const c_char, forwa
 
 /// Ends a search and removes its highlights.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_stop_finding(id: c_int) {
+pub extern "C" fn tiller_browser_stop_finding(id: c_int) {
     if let Some(host) = browser::get(id).and_then(|b| b.host()) {
         host.stop_finding(1);
     }
@@ -190,14 +190,14 @@ pub extern "C" fn mini_browser_stop_finding(id: c_int) {
 /// # Safety
 /// `code` must be a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mini_browser_execute_js(id: c_int, code: *const c_char) {
+pub unsafe extern "C" fn tiller_browser_execute_js(id: c_int, code: *const c_char) {
     let code = unsafe { cstr(code) };
     if let Some(frame) = browser::get(id).and_then(|b| b.main_frame()) {
         frame.execute_java_script(Some(&CefString::from(code.as_str())), None, 0);
     }
 }
 
-/// Sets the cookies in `cookies_json` (see mini_core.h), replacing any with
+/// Sets the cookies in `cookies_json` (see tiller_core.h), replacing any with
 /// the same name, domain and path. `done` runs on the main thread once all
 /// are set and written to disk.
 ///
@@ -205,7 +205,7 @@ pub unsafe extern "C" fn mini_browser_execute_js(id: c_int, code: *const c_char)
 /// `cookies_json` must be a NUL-terminated UTF-8 string. `ctx` must stay valid
 /// until `done` runs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mini_cookies_import(cookies_json: *const c_char, ctx: *mut c_void, done: cookies::Done) {
+pub unsafe extern "C" fn tiller_cookies_import(cookies_json: *const c_char, ctx: *mut c_void, done: cookies::Done) {
     let json = unsafe { cstr(cookies_json) };
     cookies::import(&json, ctx, done);
 }
@@ -213,31 +213,31 @@ pub unsafe extern "C" fn mini_cookies_import(cookies_json: *const c_char, ctx: *
 /// Closes a tab. The page's beforeunload runs first and may cancel. When the
 /// close goes ahead, the `close_ready` callback fires.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_close(id: c_int) {
+pub extern "C" fn tiller_browser_close(id: c_int) {
     browser::close(id);
 }
 
 /// Stops all callbacks for this browser. Call before freeing the callback context.
 #[unsafe(no_mangle)]
-pub extern "C" fn mini_browser_detach(id: c_int) {
+pub extern "C" fn tiller_browser_detach(id: c_int) {
     browser::detach(id);
 }
 
-/// Starts the control socket at `socket_path` that `mini_mcp` connects to.
+/// Starts the control socket at `socket_path` that `tiller_mcp` connects to.
 /// `handler` gets every request except `cdp`, on the main thread, and must
-/// answer each one with `mini_ipc_reply`. Returns false if the socket can't be
+/// answer each one with `tiller_ipc_reply`. Returns false if the socket can't be
 /// created.
 ///
 /// # Safety
 /// `socket_path` must be a NUL-terminated UTF-8 string. `ctx` must stay valid
 /// for the life of the process.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mini_ipc_start(socket_path: *const c_char, ctx: *mut c_void, handler: ipc::Handler) -> bool {
+pub unsafe extern "C" fn tiller_ipc_start(socket_path: *const c_char, ctx: *mut c_void, handler: ipc::Handler) -> bool {
     let path = unsafe { cstr(socket_path) };
     match ipc::start(std::path::Path::new(&path), ctx, handler) {
         Ok(()) => true,
         Err(e) => {
-            eprintln!("mini: control socket {path}: {e}");
+            eprintln!("tiller: control socket {path}: {e}");
             false
         }
     }
@@ -249,7 +249,7 @@ pub unsafe extern "C" fn mini_ipc_start(socket_path: *const c_char, ctx: *mut c_
 /// # Safety
 /// `reply_json` must be a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mini_ipc_reply(token: u64, reply_json: *const c_char) {
+pub unsafe extern "C" fn tiller_ipc_reply(token: u64, reply_json: *const c_char) {
     let reply = unsafe { cstr(reply_json) };
     match serde_json::from_str(&reply) {
         Ok(value) => ipc::reply(token, value),

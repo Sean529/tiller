@@ -1,0 +1,5 @@
+module CTillerCore {
+    header "tiller_core.h"
+    link "tiller_core"
+    export *
+}

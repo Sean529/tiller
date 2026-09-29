@@ -4,7 +4,7 @@ import Security
 
 enum ChromeImportError: LocalizedError {
     case notInstalled
-    /// The OS or security software kept Mini out of Chrome's folder. Usually
+    /// The OS or security software kept Tiller out of Chrome's folder. Usually
     /// Full Disk Access, but endpoint/EDR software can block it even with FDA on.
     case noAccess
     case keychainDenied
@@ -15,7 +15,7 @@ enum ChromeImportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notInstalled: "Google Chrome's data wasn't found on this Mac."
-        case .noAccess: "Mini couldn't read Chrome's data. This is usually Full Disk Access — grant it to Mini in System Settings and try again. If it's already on, security or endpoint (EDR) software may be blocking the read; check with your IT/security admin."
+        case .noAccess: "Tiller couldn't read Chrome's data. This is usually Full Disk Access — grant it to Tiller in System Settings and try again. If it's already on, security or endpoint (EDR) software may be blocking the read; check with your IT/security admin."
         case .keychainDenied: "Access to Chrome's key in the keychain was denied."
         case .keyNotFound: "Chrome's key isn't in the keychain."
         case .keychain(let status): "Keychain error \(status)."
@@ -45,7 +45,7 @@ enum ChromeTime {
     static var now: Int64 { Int64((Date().timeIntervalSince1970 + unixOffset) * 1_000_000) }
 }
 
-/// One cookie in the shape `mini_cookies_import` takes. See mini_core.h.
+/// One cookie in the shape `tiller_cookies_import` takes. See tiller_core.h.
 struct ImportedCookie: Encodable, Sendable {
     let url: String
     let name: String
@@ -140,7 +140,7 @@ struct ChromeReader: Sendable {
 
     // MARK: Data
 
-    /// Cookies Mini can set, and how many were left out because they are
+    /// Cookies Tiller can set, and how many were left out because they are
     /// partitioned (CEF can't set those), expired or couldn't be decrypted.
     func cookies(key: ChromeKey) throws -> (cookies: [ImportedCookie], skipped: Int) {
         try withDatabase("Cookies") { db in
@@ -244,7 +244,7 @@ struct ChromeReader: Sendable {
         {
             result.searchURL = url
         }
-        // Mini's homepage opens at launch, which is what Chrome's startup pages
+        // Tiller's homepage opens at launch, which is what Chrome's startup pages
         // do. Chrome's own homepage only backs its Home button, so it comes second.
         let session = prefs["session"] as? [String: Any]
         let startup = (session?["restore_on_startup"] as? Int) == 4 ? session?["startup_urls"] as? [String] : nil
@@ -261,7 +261,7 @@ struct ChromeReader: Sendable {
     /// live file locked. Returns nil if the profile has no such database.
     private func withDatabase<T>(_ name: String, _ body: (SQLiteDatabase) throws -> T) throws -> T? {
         let source = profileDirectory + "/" + name
-        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("mini-chrome-\(UUID().uuidString)")
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("tiller-chrome-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temp) }
         let copy = temp.appendingPathComponent(name).path

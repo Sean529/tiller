@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Builds the Rust crates and the Swift app, then assembles and ad-hoc signs
-# build/Mini.app. Usage: scripts/bundle.sh [debug|release]   (default: release)
+# build/Tiller.app. Usage: scripts/bundle.sh [debug|release]   (default: release)
 set -euo pipefail
 
 CONFIG="${1:-release}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/build"
-APP="$OUT/Mini.app"
-BUNDLE_ID="dev.sorrycc.mini"
+APP="$OUT/Tiller.app"
+BUNDLE_ID="dev.sorrycc.tiller"
 VERSION="0.1.0"
 FRAMEWORK="Chromium Embedded Framework.framework"
 HELPERS=("Helper" "Helper (GPU)" "Helper (Renderer)" "Helper (Plugin)" "Helper (Alerts)")
@@ -29,7 +29,7 @@ echo "==> swift build ($CONFIG)"
 SWIFT_OUT="$(swift build --package-path "$ROOT/app" -c "$CONFIG" --show-bin-path)"
 # SwiftPM doesn't track the Rust static library, so a Rust-only change would
 # not relink. Removing the executable forces the link step.
-rm -f "$SWIFT_OUT/Mini"
+rm -f "$SWIFT_OUT/Tiller"
 swift build --package-path "$ROOT/app" -c "$CONFIG" -Xlinker -L"$RUST_OUT"
 
 echo "==> assembling $APP"
@@ -41,14 +41,14 @@ write_plist() {
     local ui_element=""
     [ "$4" = "1" ] && ui_element="<key>LSUIElement</key><string>1</string>"
     local icon=""
-    [ "$4" = "0" ] && icon="<key>CFBundleIconFile</key><string>Mini</string>"
+    [ "$4" = "0" ] && icon="<key>CFBundleIconFile</key><string>Tiller</string>"
     cat > "$1/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Mini</string>
-    <key>CFBundleDisplayName</key><string>Mini</string>
+    <key>CFBundleName</key><string>Tiller</string>
+    <key>CFBundleDisplayName</key><string>Tiller</string>
     <key>CFBundleExecutable</key><string>$2</string>
     <key>CFBundleIdentifier</key><string>$3</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -62,7 +62,7 @@ write_plist() {
     <key>NSHighResolutionCapable</key><true/>
     <key>NSCameraUsageDescription</key><string>A website wants to use the camera.</string>
     <key>NSMicrophoneUsageDescription</key><string>A website wants to use the microphone.</string>
-    <key>NSAppleEventsUsageDescription</key><string>Mini asks Finder to copy Chrome's data when security software blocks reading it directly.</string>
+    <key>NSAppleEventsUsageDescription</key><string>Tiller asks Finder to copy Chrome's data when security software blocks reading it directly.</string>
     $ui_element
     $icon
 </dict>
@@ -70,22 +70,22 @@ write_plist() {
 PLIST
 }
 
-cp "$SWIFT_OUT/Mini" "$APP/Contents/MacOS/Mini"
-cp "$RUST_OUT/mini_mcp" "$APP/Contents/MacOS/mini_mcp"
-# Not in MacOS/, where `mini` and `Mini` would be the same file on a
+cp "$SWIFT_OUT/Tiller" "$APP/Contents/MacOS/Tiller"
+cp "$RUST_OUT/tiller_mcp" "$APP/Contents/MacOS/tiller_mcp"
+# Not in MacOS/, where `tiller` and `Tiller` would be the same file on a
 # case-insensitive disk.
-cp "$RUST_OUT/mini" "$APP/Contents/Helpers/mini"
-cp "$ROOT/app/Resources/Mini.icns" "$APP/Contents/Resources/Mini.icns"
-write_plist "$APP/Contents" "Mini" "$BUNDLE_ID" 0
+cp "$RUST_OUT/tiller" "$APP/Contents/Helpers/tiller"
+cp "$ROOT/app/Resources/Tiller.icns" "$APP/Contents/Resources/Tiller.icns"
+write_plist "$APP/Contents" "Tiller" "$BUNDLE_ID" 0
 
 # ditto keeps the framework's symlinks and permissions intact.
 ditto "$CEF_PATH/$FRAMEWORK" "$APP/Contents/Frameworks/$FRAMEWORK"
 
 for suffix in "${HELPERS[@]}"; do
-    name="Mini $suffix"
+    name="Tiller $suffix"
     helper="$APP/Contents/Frameworks/$name.app"
     mkdir -p "$helper/Contents/MacOS"
-    cp "$RUST_OUT/mini_helper" "$helper/Contents/MacOS/$name"
+    cp "$RUST_OUT/tiller_helper" "$helper/Contents/MacOS/$name"
     id_suffix="$(echo "$suffix" | tr -d '()' | tr ' ' '.' | tr '[:upper:]' '[:lower:]')"
     write_plist "$helper/Contents" "$name" "$BUNDLE_ID.$id_suffix" 1
 done
@@ -93,10 +93,10 @@ done
 echo "==> ad-hoc signing"
 codesign --force --sign - "$APP/Contents/Frameworks/$FRAMEWORK"
 for suffix in "${HELPERS[@]}"; do
-    codesign --force --sign - "$APP/Contents/Frameworks/Mini $suffix.app"
+    codesign --force --sign - "$APP/Contents/Frameworks/Tiller $suffix.app"
 done
-codesign --force --sign - "$APP/Contents/MacOS/mini_mcp"
-codesign --force --sign - "$APP/Contents/Helpers/mini"
+codesign --force --sign - "$APP/Contents/MacOS/tiller_mcp"
+codesign --force --sign - "$APP/Contents/Helpers/tiller"
 codesign --force --sign - "$APP"
 
 echo "==> verifying signature"

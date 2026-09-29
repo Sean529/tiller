@@ -1,5 +1,5 @@
 //! The `NSApplication` subclass CEF requires on macOS. It has to be the shared
-//! application before AppKit is touched anywhere else, so `mini_core_start`
+//! application before AppKit is touched anywhere else, so `tiller_core_start`
 //! installs it first thing.
 
 use cef::application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol};
@@ -22,17 +22,17 @@ pub fn set_quit_handler(handler: Option<unsafe extern "C" fn()>) {
 }
 
 #[derive(Default)]
-pub struct MiniApplicationIvars {
+pub struct TillerApplicationIvars {
     handling_send_event: Cell<Bool>,
 }
 
 define_class!(
     #[unsafe(super(NSApplication))]
-    #[name = "MiniApplication"]
-    #[ivars = MiniApplicationIvars]
-    pub struct MiniApplication;
+    #[name = "TillerApplication"]
+    #[ivars = TillerApplicationIvars]
+    pub struct TillerApplication;
 
-    impl MiniApplication {
+    impl TillerApplication {
         #[unsafe(method(sendEvent:))]
         unsafe fn send_event(&self, event: &NSEvent) {
             let was_sending = self.ivars().handling_send_event.get().as_bool();
@@ -57,36 +57,36 @@ define_class!(
         }
     }
 
-    unsafe impl CrAppControlProtocol for MiniApplication {
+    unsafe impl CrAppControlProtocol for TillerApplication {
         #[unsafe(method(setHandlingSendEvent:))]
         unsafe fn set_handling_send_event(&self, handling: Bool) {
             self.ivars().handling_send_event.set(handling);
         }
     }
 
-    unsafe impl CrAppProtocol for MiniApplication {
+    unsafe impl CrAppProtocol for TillerApplication {
         #[unsafe(method(isHandlingSendEvent))]
         unsafe fn is_handling_send_event(&self) -> Bool {
             self.ivars().handling_send_event.get()
         }
     }
 
-    unsafe impl CefAppProtocol for MiniApplication {}
+    unsafe impl CefAppProtocol for TillerApplication {}
 );
 
-impl MiniApplication {
+impl TillerApplication {
     extern_methods! {
         #[unsafe(method(sharedApplication))]
         fn shared_application() -> Retained<Self>;
     }
 }
 
-/// Makes `MiniApplication` the shared application. Returns false if something
+/// Makes `TillerApplication` the shared application. Returns false if something
 /// already created a plain `NSApplication`.
 pub fn install() -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
     };
-    let _ = MiniApplication::shared_application();
-    NSApp(mtm).isKindOfClass(MiniApplication::class())
+    let _ = TillerApplication::shared_application();
+    NSApp(mtm).isKindOfClass(TillerApplication::class())
 }

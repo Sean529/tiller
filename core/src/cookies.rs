@@ -29,7 +29,7 @@ thread_local! {
 }
 
 /// Sets every cookie in `json`, a JSON array of objects as described in
-/// mini_core.h. A cookie with the same name, domain and path is replaced.
+/// tiller_core.h. A cookie with the same name, domain and path is replaced.
 /// `done` runs after the last cookie is set and the store is flushed.
 pub fn import(json: &str, ctx: *mut c_void, done: Done) {
     let cookies = match serde_json::from_str::<Value>(json) {
@@ -52,7 +52,7 @@ pub fn import(json: &str, ctx: *mut c_void, done: Done) {
             finish_one(id, index, false);
             continue;
         };
-        let mut callback = MiniSetCookieCallback::new(id, index);
+        let mut callback = TillerSetCookieCallback::new(id, index);
         if manager.set_cookie(Some(&CefString::from(url.as_str())), Some(&cookie), Some(&mut callback)) == 0 {
             finish_one(id, index, false);
         }
@@ -113,7 +113,7 @@ fn finish_one(id: u64, index: usize, success: bool) {
 /// Writes the new cookies to disk, then reports.
 fn flush(id: u64) {
     let flushing = cookie_manager_get_global_manager(None)
-        .is_some_and(|manager| manager.flush_store(Some(&mut MiniFlushCallback::new(id))) != 0);
+        .is_some_and(|manager| manager.flush_store(Some(&mut TillerFlushCallback::new(id))) != 0);
     if !flushing {
         report(id);
     }
@@ -126,7 +126,7 @@ fn report(id: u64) {
 }
 
 wrap_set_cookie_callback! {
-    struct MiniSetCookieCallback {
+    struct TillerSetCookieCallback {
         import_id: u64,
         index: usize,
     }
@@ -139,7 +139,7 @@ wrap_set_cookie_callback! {
 }
 
 wrap_completion_callback! {
-    struct MiniFlushCallback {
+    struct TillerFlushCallback {
         import_id: u64,
     }
 

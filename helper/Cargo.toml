@@ -1,11 +1,11 @@
 [package]
-name = "mini-helper"
+name = "tiller-helper"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "mini_helper"
+name = "tiller_helper"
 path = "src/main.rs"
 
 [dependencies]

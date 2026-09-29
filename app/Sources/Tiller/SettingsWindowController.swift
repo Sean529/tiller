@@ -347,7 +347,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         guard let window = view.window else { return }
         let alert = NSAlert()
         alert.messageText = "Remove all saved passwords?"
-        alert.informativeText = "Removes \(entries.count) passwords from Mini. Chrome keeps its own."
+        alert.informativeText = "Removes \(entries.count) passwords from Tiller. Chrome keeps its own."
         alert.addButton(withTitle: "Remove All")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
@@ -481,7 +481,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         let row = addRow("Extra instructions:", Self.fixWidth(scroll))
         row.rowAlignment = .none
         row.cell(at: 0).yPlacement = .top
-        addNote(Self.note("Added after Mini's prompt. Applies from the next new chat."))
+        addNote(Self.note("Added after Tiller's prompt. Applies from the next new chat."))
     }
 
     override func viewWillAppear() {
@@ -511,7 +511,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         }
         if let path = Settings.agentPath(for: kind) {
             if FileManager.default.isExecutableFile(atPath: path) {
-                Self.show("Mini runs this file.", in: note)
+                Self.show("Tiller runs this file.", in: note)
             } else {
                 Self.show("Not an executable file.", in: note, warning: true)
             }

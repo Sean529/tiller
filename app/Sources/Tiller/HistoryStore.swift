@@ -22,13 +22,13 @@ struct FrequentSite: Sendable {
     let icon: Data?
 }
 
-/// Mini's browsing history: one row per URL, in `history.sqlite` in the data
+/// Tiller's browsing history: one row per URL, in `history.sqlite` in the data
 /// folder. Chromium keeps its own History file, but CEF has no API for it and
 /// holds it locked. Database work runs on a serial queue.
 final class HistoryStore: @unchecked Sendable {
     static let shared = HistoryStore(path: DataDirectory.file("history.sqlite"))
 
-    private let queue = DispatchQueue(label: "dev.sorrycc.mini.history")
+    private let queue = DispatchQueue(label: "dev.sorrycc.tiller.history")
     /// Numbers each search, so one that a newer search has replaced before it
     /// got to run can be skipped.
     private let latestSearch = OSAllocatedUnfairLock(initialState: 0)
@@ -54,7 +54,7 @@ final class HistoryStore: @unchecked Sendable {
                 """)
             self.db = db
         } catch {
-            NSLog("Mini: history unavailable: \(error)")
+            NSLog("Tiller: history unavailable: \(error)")
             db = nil
         }
     }
@@ -186,7 +186,7 @@ final class HistoryStore: @unchecked Sendable {
             do {
                 try db?.run(sql, values)
             } catch {
-                NSLog("Mini: history write failed: \(error)")
+                NSLog("Tiller: history write failed: \(error)")
             }
         }
     }

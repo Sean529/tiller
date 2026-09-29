@@ -1,7 +1,7 @@
 import Foundation
 
 /// A saved agent chat. The CLI keeps the conversation itself under
-/// `sessionID`; Mini keeps what the panel showed, to show it again.
+/// `sessionID`; Tiller keeps what the panel showed, to show it again.
 struct AgentConversation: Codable, Equatable {
     let id: String
     var kind: AgentKind
@@ -145,7 +145,7 @@ final class AgentHistoryStore {
                 try Self.write(JSONEncoder().encode(index), to: indexURL)
             }
         } catch {
-            NSLog("Mini: could not save agent chats: %@", error.localizedDescription)
+            NSLog("Tiller: could not save agent chats: %@", error.localizedDescription)
         }
     }
 
@@ -167,7 +167,7 @@ final class AgentHistoryStore {
     }
 
     /// Folders of chats that were never saved, left by the last run, and the
-    /// images folder older versions of Mini used.
+    /// images folder older versions of Tiller used.
     private func removeUnsavedFolders() {
         let manager = FileManager.default
         try? manager.removeItem(atPath: DataDirectory.path + "/agent-attachments")

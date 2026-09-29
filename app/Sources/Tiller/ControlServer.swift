@@ -1,19 +1,19 @@
 import AppKit
-import CMiniCore
+import CTillerCore
 
 struct ControlError: Error {
     let message: String
     init(_ message: String) { self.message = message }
 }
 
-/// Answers mini_mcp's tab requests (list, open, select, navigate, close) that
+/// Answers tiller_mcp's tab requests (list, open, select, navigate, close) that
 /// arrive on the control socket. DevTools calls on the same socket never reach
 /// Swift; the core sends them to the tab directly.
 @MainActor
 final class ControlServer {
-    /// Where mini_mcp looks. Both honor MINI_SOCKET, for data folders whose
+    /// Where tiller_mcp looks. Both honor TILLER_SOCKET, for data folders whose
     /// path is too long for a socket.
-    static let socketPath = ProcessInfo.processInfo.environment["MINI_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
+    static let socketPath = ProcessInfo.processInfo.environment["TILLER_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
         ?? DataDirectory.file("control.sock")
 
     weak var browser: BrowserWindowController?
@@ -21,7 +21,7 @@ final class ControlServer {
     /// The server lives for the rest of the process once started.
     func start() -> Bool {
         let ctx = Unmanaged.passRetained(self).toOpaque()
-        return mini_ipc_start(Self.socketPath, ctx) { ctx, request, token in
+        return tiller_ipc_start(Self.socketPath, ctx) { ctx, request, token in
             guard let ctx, let request else { return }
             ControlServer.from(ctx).handle(String(cString: request), token: token)
         }
@@ -47,7 +47,7 @@ final class ControlServer {
                 reply = ["error": "\(error)"]
             }
             let data = (try? JSONSerialization.data(withJSONObject: reply)) ?? Data(#"{"error":"could not encode reply"}"#.utf8)
-            String(decoding: data, as: UTF8.self).withCString { mini_ipc_reply(token, $0) }
+            String(decoding: data, as: UTF8.self).withCString { tiller_ipc_reply(token, $0) }
         }
     }
 }

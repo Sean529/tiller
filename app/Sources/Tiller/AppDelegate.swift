@@ -1,5 +1,5 @@
 import AppKit
-import CMiniCore
+import CTillerCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -20,7 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
 
-        mini_core_set_quit_handler {
+        tiller_core_set_quit_handler {
             MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.quitRequested() }
         }
 
@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController = controller
         controlServer.browser = controller
         if !controlServer.start() {
-            NSLog("Mini: control socket unavailable, agent tools will not work")
+            NSLog("Tiller: control socket unavailable, agent tools will not work")
         }
         NSApp.activate()
         #if DEBUG
@@ -52,10 +52,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let (profiles, lastUsed) = try ChromeReader.profiles()
                     guard let profile = profiles.first(where: { $0.directory == lastUsed }) ?? profiles.first else { return }
                     for result in await ChromeImporter.run(profile: profile, kinds: Set(ImportKind.allCases)) {
-                        NSLog("Mini import: %@: %@", result.title, result.error?.localizedDescription ?? result.detail)
+                        NSLog("Tiller import: %@: %@", result.title, result.error?.localizedDescription ?? result.detail)
                     }
                 } catch {
-                    NSLog("Mini import: %@", error.localizedDescription)
+                    NSLog("Tiller import: %@", error.localizedDescription)
                 }
             }
         }
