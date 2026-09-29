@@ -82,9 +82,12 @@ enum MainMenu {
         window.addItem(.separator())
         window.addItem(withTitle: "Show Previous Tab", action: #selector(BrowserWindowController.selectPreviousTab(_:)), keyEquivalent: "{")
         window.addItem(withTitle: "Show Next Tab", action: #selector(BrowserWindowController.selectNextTab(_:)), keyEquivalent: "}")
-        // Ctrl+Tab and Ctrl+Shift+Tab, and Cmd+1 to Cmd+9, work but stay out of sight.
+        // Ctrl+Tab and Ctrl+Shift+Tab, Cmd+Option+Right and Cmd+Option+Left, and
+        // Cmd+1 to Cmd+9, work but stay out of sight.
         hidden(window, "Show Next Tab", #selector(BrowserWindowController.selectNextTab(_:)), "\t", [.control])
         hidden(window, "Show Previous Tab", #selector(BrowserWindowController.selectPreviousTab(_:)), "\t", [.control, .shift])
+        hidden(window, "Show Next Tab", #selector(BrowserWindowController.selectNextTab(_:)), arrowKey(NSRightArrowFunctionKey), [.command, .option])
+        hidden(window, "Show Previous Tab", #selector(BrowserWindowController.selectPreviousTab(_:)), arrowKey(NSLeftArrowFunctionKey), [.command, .option])
         for number in 1...9 {
             let item = hidden(window, "Select Tab \(number)", #selector(BrowserWindowController.selectTabByNumber(_:)), "\(number)", [.command])
             item.tag = number
@@ -124,6 +127,11 @@ enum MainMenu {
             return nil
         }
         return NSApp.mainMenu.flatMap(search)
+    }
+
+    /// The key equivalent for an arrow key, from its `NS…ArrowFunctionKey` code.
+    private static func arrowKey(_ code: Int) -> String {
+        UnicodeScalar(code).map { String(Character($0)) } ?? ""
     }
 
     @MainActor

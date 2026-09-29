@@ -10,7 +10,7 @@ How Tiller's browser features behave. Settings and storage are covered in [Setti
 | Cmd+W | Close tab (the window closes with its last tab, and the app quits) |
 | Cmd+Shift+W | Close window |
 | Cmd+Shift+T | Reopen the last closed tab where it was |
-| Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Cmd+Shift+] / Cmd+Shift+[, Cmd+Option+Right / Cmd+Option+Left, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
 | Middle click on a tab | Close it |
 | Drag a tab | Move it along the row or the sidebar |
