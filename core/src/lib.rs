@@ -17,11 +17,19 @@ pub extern "C" fn tiller_core_version() -> *const c_char {
     VERSION.as_ptr()
 }
 
-/// Loads CEF, installs the CEF-compatible NSApplication and initializes CEF.
-/// Must be the first thing `main` does, before anything touches `NSApp`.
-/// Returns 0 on success, or a nonzero exit code.
+/// Loads CEF, installs the CEF-compatible NSApplication and initializes CEF
+/// with Chromium's data in `data_dir`, the profile's folder. Must be the first
+/// thing `main` does, before anything touches `NSApp`. Returns 0 on success,
+/// or a nonzero exit code.
+///
+/// # Safety
+/// `data_dir` must be a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub extern "C" fn tiller_core_start() -> c_int {
+pub unsafe extern "C" fn tiller_core_start(data_dir: *const c_char) -> c_int {
+    let root = unsafe { cstr(data_dir) };
+    if root.is_empty() {
+        return 1;
+    }
     let Ok(exe) = std::env::current_exe() else {
         return 1;
     };
@@ -47,11 +55,6 @@ pub extern "C" fn tiller_core_start() -> c_int {
         return code;
     }
 
-    // Same folder as DataDirectory.swift.
-    let root = match std::env::var("TILLER_DATA_DIR") {
-        Ok(dir) if !dir.is_empty() => dir,
-        _ => std::env::var("HOME").map(|h| format!("{h}/Library/Application Support/Tiller")).unwrap_or_default(),
-    };
     let settings = Settings {
         root_cache_path: CefString::from(root.as_str()),
         cache_path: CefString::from(format!("{root}/Default").as_str()),

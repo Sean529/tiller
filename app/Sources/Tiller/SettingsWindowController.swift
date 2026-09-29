@@ -1,16 +1,18 @@
 import AppKit
 
-/// The Settings window (Cmd+,), with General, Passwords and Agent panes.
-/// Every change is saved as it is made.
+/// The Settings window (Cmd+,), with General, Passwords, Agent and Profiles
+/// panes. Every change is saved as it is made, in the current profile.
 @MainActor
 final class SettingsWindowController: NSWindowController {
+    private let tabs = NSTabViewController()
+
     init() {
-        let tabs = NSTabViewController()
         tabs.tabStyle = .toolbar
         let panes: [(NSViewController, String)] = [
             (GeneralSettingsPane(), "gearshape"),
             (PasswordsSettingsPane(), "key"),
             (AgentSettingsPane(), "sparkles"),
+            (ProfilesSettingsPane(), "person.2"),
         ]
         for (pane, symbol) in panes {
             let item = NSTabViewItem(viewController: pane)
@@ -26,6 +28,12 @@ final class SettingsWindowController: NSWindowController {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func showPane(titled title: String) {
+        if let index = tabs.tabViewItems.firstIndex(where: { $0.viewController?.title == title }) {
+            tabs.selectedTabViewItemIndex = index
+        }
+    }
 
     /// Cmd+W is File > Close Tab, which otherwise only browser windows answer.
     @objc func closeTab(_ sender: Any?) {
@@ -419,7 +427,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
         for (index, kind) in AgentKind.allCases.enumerated() {
             let field = NSTextField()
-            field.stringValue = UserDefaults.standard.string(forKey: kind.pathDefaultsKey) ?? ""
+            field.stringValue = Settings.defaults.string(forKey: kind.pathDefaultsKey) ?? ""
             field.delegate = self
             let choose = NSButton(title: "Choose…", target: self, action: #selector(choosePath(_:)))
             choose.tag = index
@@ -641,6 +649,176 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
                 self.pathFields[kind]?.stringValue = url.path
                 Settings.setAgentPath(url.path, for: kind)
                 self.showPathState(kind)
+            }
+        }
+    }
+}
+
+// MARK: Profiles
+
+/// Every profile, with buttons to open, add, rename and delete them. Each open
+/// profile is a separate Tiller.
+final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    static let paneTitle = "Profiles"
+
+    private let table = NSTableView()
+    private let openButton = NSButton(title: "Open", target: nil, action: nil)
+    private let addButton = NSButton(title: "New Profile…", target: nil, action: nil)
+    private let renameButton = NSButton(title: "Rename…", target: nil, action: nil)
+    private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
+    private let note = SettingsPane.note()
+    private var profiles: [Profile] = []
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        title = Self.paneTitle
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        for (id, title, width) in [("name", "Name", 320.0), ("status", "Status", 200.0)] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.usesAlternatingRowBackgroundColors = true
+        table.style = .inset
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(openProfile(_:))
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+
+        for (button, action) in [
+            (openButton, #selector(openProfile(_:))),
+            (addButton, #selector(addProfile(_:))),
+            (renameButton, #selector(renameProfile(_:))),
+            (deleteButton, #selector(deleteProfile(_:))),
+        ] {
+            button.target = self
+            button.action = action
+        }
+        let buttons = NSStackView(views: [openButton, addButton, renameButton, NSView(), deleteButton])
+        buttons.spacing = 8
+
+        let stack = NSStackView(views: [scroll, buttons, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let view = NSView()
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalToConstant: 560),
+            scroll.heightAnchor.constraint(equalToConstant: 220),
+            buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+        ])
+        self.view = view
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = view.fittingSize
+        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .profilesDidChange, object: nil)
+        reload(nil)
+    }
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        reload(nil)
+    }
+
+    @objc private func reload(_ notification: Notification?) {
+        let selectedID = selectedProfile?.id
+        profiles = Profiles.all
+        table.reloadData()
+        if let index = profiles.firstIndex(where: { $0.id == selectedID }) {
+            table.selectRowIndexes([index], byExtendingSelection: false)
+        }
+        updateControls()
+    }
+
+    private var selectedProfile: Profile? {
+        profiles.indices.contains(table.selectedRow) ? profiles[table.selectedRow] : nil
+    }
+
+    private func updateControls() {
+        let selected = selectedProfile
+        openButton.isEnabled = selected != nil
+        renameButton.isEnabled = selected != nil
+        deleteButton.isEnabled = selected.map { $0.id != Profiles.current.id } ?? false
+        SettingsPane.show(
+            "Each profile keeps its own cookies, history, tabs, passwords, settings and chats, "
+                + "and opens as a separate Tiller.",
+            in: note
+        )
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { profiles.count }
+
+    func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
+        guard profiles.indices.contains(row) else { return nil }
+        let profile = profiles[row]
+        let text: String
+        if column?.identifier.rawValue == "name" {
+            text = profile.name
+        } else if profile.id == Profiles.current.id {
+            text = "This window"
+        } else {
+            text = Profiles.runningProcess(profile.id) != nil ? "Open" : ""
+        }
+        let label = NSTextField(labelWithString: text)
+        label.lineBreakMode = .byTruncatingTail
+        if column?.identifier.rawValue == "status" { label.textColor = .secondaryLabelColor }
+        return label
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateControls()
+    }
+
+    @objc private func openProfile(_ sender: Any?) {
+        guard let profile = selectedProfile else { return }
+        Profiles.open(profile.id)
+    }
+
+    @objc private func addProfile(_ sender: Any?) {
+        ProfileNamePrompt.run("New Profile", button: "Create", on: view.window) { name in
+            Profiles.open(try Profiles.create(named: name).id)
+        }
+    }
+
+    @objc private func renameProfile(_ sender: Any?) {
+        guard let profile = selectedProfile else { return }
+        ProfileNamePrompt.run("Rename \(profile.name)", button: "Rename", initial: profile.name, on: view.window) { name in
+            try Profiles.rename(profile.id, to: name)
+        }
+    }
+
+    @objc private func deleteProfile(_ sender: Any?) {
+        guard let window = view.window, let profile = selectedProfile else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete \(profile.name)?"
+        alert.informativeText = "Its cookies, history, tabs, passwords, settings and chats go too. "
+            + "Its folder moves to the Trash."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated {
+                do {
+                    try Profiles.delete(profile.id)
+                } catch {
+                    guard let self else { return }
+                    SettingsPane.show(error.localizedDescription, in: self.note, warning: true)
+                }
             }
         }
     }

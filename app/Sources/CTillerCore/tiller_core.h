@@ -30,8 +30,9 @@ typedef struct TillerBrowserCallbacks {
 const char *tiller_core_version(void);
 
 // Loads CEF, installs the CEF-compatible NSApplication subclass and initializes
-// CEF. Call first in main, before touching NSApp. Returns 0 or an exit code.
-int tiller_core_start(void);
+// CEF, keeping Chromium's data in `data_dir` (the profile's folder). Call first
+// in main, before touching NSApp. Returns 0 or an exit code.
+int tiller_core_start(const char *data_dir);
 
 // Runs the message loop until the last browser closes, then shuts CEF down.
 void tiller_core_run(void);

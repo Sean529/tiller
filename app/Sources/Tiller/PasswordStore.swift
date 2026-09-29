@@ -122,28 +122,33 @@ final class PasswordStore {
     }
 }
 
-/// The 256-bit key sealing Tiller's passwords, as a generic password item in
-/// the login keychain. Tiller is ad-hoc signed, so after each rebuild macOS asks
-/// before letting the new binary read it.
+/// The 256-bit key sealing a profile's passwords, as a generic password item
+/// in the login keychain. Tiller is ad-hoc signed, so after each rebuild macOS
+/// asks before letting the new binary read it.
 enum PasswordKey {
     private static let service = "Tiller Saved Passwords"
     /// Where the key was kept while the app was called Mini.
     private static let oldService = "Mini Saved Passwords"
-    private static let account = "key"
 
-    private static func baseQuery(service: String = service) -> [String: Any] {
+    /// The default profile keeps the key from before profiles existed.
+    private static func account(for profileID: String) -> String {
+        profileID == Profiles.defaultID ? "key" : "key." + profileID
+    }
+
+    private static func baseQuery(service: String = service, profileID: String = Profiles.current.id) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            kSecAttrAccount as String: account(for: profileID),
         ]
     }
 
-    /// Reads the key, creating it if missing and `create` is set. A key saved
-    /// by Mini is copied under the new name, and the old item is left as is.
+    /// Reads the current profile's key, creating it if missing and `create` is
+    /// set. For the default profile, a key saved by Mini is copied under the
+    /// new name, and the old item is left as is.
     static func load(create: Bool) throws -> SymmetricKey {
         if let key = try read(service: service) { return key }
-        if let key = try read(service: oldService) {
+        if Profiles.current.id == Profiles.defaultID, let key = try read(service: oldService) {
             try add(key)
             return key
         }
@@ -181,8 +186,8 @@ enum PasswordKey {
         guard added == errSecSuccess else { throw PasswordStoreError.keychain(added) }
     }
 
-    static func delete() {
-        SecItemDelete(baseQuery() as CFDictionary)
+    static func delete(profileID: String = Profiles.current.id) {
+        SecItemDelete(baseQuery(profileID: profileID) as CFDictionary)
     }
 }
 

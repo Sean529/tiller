@@ -53,10 +53,11 @@ enum LaunchTabs: String, CaseIterable {
     }
 }
 
-/// Every setting the Settings window shows, stored in the app's user defaults.
-/// Launch arguments (`-homepage https://…`) override them like any default.
+/// Every setting the Settings window shows, stored in the current profile's
+/// user defaults. Launch arguments (`-homepage https://…`) override them like
+/// any default.
 enum Settings {
-    private static var defaults: UserDefaults { .standard }
+    static var defaults: UserDefaults { Profiles.defaults }
 
     static let defaultHomepage = "https://www.google.com/"
 

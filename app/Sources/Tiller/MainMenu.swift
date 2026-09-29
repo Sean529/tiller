@@ -73,6 +73,10 @@ enum MainMenu {
         history.delegate = historyMenu
         add(history, titled: "History", to: main)
 
+        // Filled each time it opens, since another Tiller may change the profiles.
+        profiles.delegate = profilesMenu
+        add(profiles, titled: "Profiles", to: main)
+
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         window.addItem(.separator())
@@ -93,6 +97,10 @@ enum MainMenu {
     }
 
     @MainActor private static let historyMenu = HistoryMenuDelegate()
+    @MainActor private static let profilesMenu = ProfilesMenuDelegate()
+
+    /// The Profiles menu, which the toolbar's profile button shows too.
+    @MainActor static let profiles = NSMenu(title: "Profiles")
 
     /// View > Show Agent, whose shortcut Settings can change.
     @MainActor private static var agentItem: NSMenuItem?
@@ -166,5 +174,23 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
             separator.tag = Self.recentTag
             menu.insertItem(separator, at: index)
         }
+    }
+}
+
+/// Fills the Profiles menu each time it opens: every profile, the current one
+/// checked, then New Profile and Manage Profiles.
+@MainActor
+private final class ProfilesMenuDelegate: NSObject, NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for profile in Profiles.all {
+            let item = NSMenuItem(title: profile.name, action: #selector(AppDelegate.openProfile(_:)), keyEquivalent: "")
+            item.representedObject = profile.id
+            item.state = profile.id == Profiles.current.id ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "New Profile…", action: #selector(AppDelegate.newProfile(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Manage Profiles…", action: #selector(AppDelegate.manageProfiles(_:)), keyEquivalent: "")
     }
 }

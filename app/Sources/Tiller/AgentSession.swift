@@ -23,10 +23,10 @@ enum AgentKind: String, CaseIterable, Codable {
 
     /// The agent new chats start with.
     static var current: AgentKind {
-        get { UserDefaults.standard.string(forKey: "agent").flatMap(AgentKind.init) ?? .qodercli }
+        get { Settings.defaults.string(forKey: "agent").flatMap(AgentKind.init) ?? .qodercli }
         set {
             guard newValue != current else { return }
-            UserDefaults.standard.set(newValue.rawValue, forKey: "agent")
+            Settings.defaults.set(newValue.rawValue, forKey: "agent")
             NotificationCenter.default.post(name: .agentKindDidChange, object: nil)
         }
     }
@@ -655,6 +655,8 @@ enum AgentEnvironment {
         env["PATH"] = (searchDirectories + [path]).joined(separator: ":")
         // Set when Tiller itself was started from a Claude Code session.
         for key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] { env[key] = nil }
+        // Each profile has its own socket, so tiller_mcp is told which.
+        env["TILLER_SOCKET"] = ControlServer.socketPath
         if kind == .codex { env["CODEX_HOME"] = try codexHome() }
         return env
     }
@@ -695,8 +697,8 @@ enum AgentEnvironment {
                         "command": mcpServerPath,
                         "args": [String](),
                         // Codex starts MCP servers with only a few variables
-                        // set, so pass on the ones that pick Tiller's socket.
-                        "env_vars": ["TILLER_DATA_DIR", "TILLER_SOCKET"],
+                        // set, so pass on the one that picks this profile's socket.
+                        "env_vars": ["TILLER_SOCKET"],
                         "default_tools_approval_mode": "approve",
                     ],
                 ],
@@ -732,7 +734,12 @@ enum AgentEnvironment {
     /// Points the agent at tiller_mcp.
     static func writeMCPConfig() throws -> String {
         let config: [String: Any] = [
-            "mcpServers": ["tiller": ["type": "stdio", "command": mcpServerPath, "args": [String]()]],
+            "mcpServers": [
+                "tiller": [
+                    "type": "stdio", "command": mcpServerPath, "args": [String](),
+                    "env": ["TILLER_SOCKET": ControlServer.socketPath],
+                ],
+            ],
         ]
         try FileManager.default.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
         let path = supportDirectory + "/agent-mcp.json"

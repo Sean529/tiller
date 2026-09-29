@@ -17,6 +17,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await CommandLineTool.installAndReport() }
     }
 
+    /// A profile in the Profiles menu. Its id is the item's represented object.
+    @objc func openProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        Profiles.open(id)
+    }
+
+    @objc func newProfile(_ sender: Any?) {
+        ProfileNamePrompt.run("New Profile", button: "Create", on: nil) { name in
+            Profiles.open(try Profiles.create(named: name).id)
+        }
+    }
+
+    @objc func manageProfiles(_ sender: Any?) {
+        showSettings(sender)
+        settingsController?.showPane(titled: ProfilesSettingsPane.paneTitle)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
 
@@ -33,6 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onClose = { [weak self] in self?.windowController = nil }
         controller.showWindow(nil)
         windowController = controller
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(profilesChanged(_:)), name: .profilesDidChange, object: nil
+        )
+        showProfile()
         controlServer.browser = controller
         if !controlServer.start() {
             NSLog("Tiller: control socket unavailable, agent tools will not work")
@@ -60,6 +81,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         #endif
+    }
+
+    /// Another Tiller may have added, renamed or removed profiles meanwhile.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        Profiles.markUsed()
+        NotificationCenter.default.post(name: .profilesDidChange, object: nil)
+    }
+
+    @objc private func profilesChanged(_ notification: Notification) {
+        showProfile()
+    }
+
+    /// With more than one profile, each Tiller names its own in the Dock badge
+    /// and the toolbar, since every one has the same icon.
+    private func showProfile() {
+        let name = Profiles.all.count > 1 ? Profiles.currentName : nil
+        NSApp.dockTile.badgeLabel = name
+        windowController?.showProfile(name: name)
     }
 
     /// Cmd+Q, the Dock or logging out, before the tabs start closing.

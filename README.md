@@ -34,7 +34,7 @@ open build/Tiller.app --args -url https://example.com   # also open this page, s
 
 ## Settings
 
-Tiller > Settings… (Cmd+,) has three panes: General, Passwords and Agent. Changes are saved as you make them.
+Tiller > Settings… (Cmd+,) has four panes: General, Passwords, Agent and Profiles (see [Profiles](#profiles)). Changes are saved as you make them, and apply to the current profile only.
 
 | Pane | Setting | Default | Takes effect |
 |---|---|---|---|
@@ -49,7 +49,7 @@ Tiller > Settings… (Cmd+,) has three panes: General, Passwords and Agent. Chan
 | Agent | Path for each CLI | empty, meaning look it up | next new chat |
 | Agent | Extra instructions, added after Tiller's system prompt | empty | next new chat |
 
-Settings live in the `dev.sorrycc.tiller` user defaults. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.
+Settings live in the profile's own user defaults, `dev.sorrycc.tiller.profile.<id>`. Window position and size stay in `dev.sorrycc.tiller`, shared by every profile. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.
 
 Tiller passes two switches to Chromium:
 
@@ -132,11 +132,31 @@ Tiller never fills on its own. The agent's tools can read anything on the page, 
 
 Settings > Passwords lists the saved logins, with buttons to copy a password or remove logins.
 
-Storage: `passwords.json` in the data folder, readable only by you. Sites and usernames are stored in the clear, as Chrome stores them, so Tiller knows which pages have a login without unlocking anything. Each password is sealed with AES-GCM under a key kept in the login keychain as "Tiller Saved Passwords". Tiller is ad-hoc signed, so after a rebuild macOS may ask before the new binary can read that key.
+Storage: `passwords.json` in the data folder, readable only by you. Sites and usernames are stored in the clear, as Chrome stores them, so Tiller knows which pages have a login without unlocking anything. Each password is sealed with AES-GCM under a key kept in the login keychain as "Tiller Saved Passwords", one per profile: account `key` for the default profile and `key.<id>` for the others. Tiller is ad-hoc signed, so after a rebuild macOS may ask before the new binary can read that key.
+
+## Profiles
+
+A profile has its own cookies and site data, history, open tabs, saved passwords, settings and agent chats. Each open profile runs as a separate Tiller, with its own Dock icon.
+
+- The Profiles menu lists them, with a check on the current one. Choosing another brings its Tiller forward, or starts one. New Profile… asks for a name and opens it.
+- Settings > Profiles lists them too, with buttons to open, add, rename and delete. The current profile and profiles that are open can't be deleted. Deleting moves the profile's folder to the Trash and removes its settings and password key.
+- With more than one profile, each Tiller shows its profile's name at the right of the toolbar, where clicking it opens the Profiles menu, in the Dock badge and in the window title.
+- Opening Tiller from the Dock or Finder opens the profile used last, meaning the one whose Tiller was last active. `open Tiller.app --args -profile <name or id>` opens a given one.
+- A profile can only be open once. Launching it again brings the running Tiller forward.
+- Names must differ, since `tiller --profile` picks a profile by name.
 
 ## Data folder
 
-Tiller keeps its profile, history, passwords, open tabs and control socket in `~/Library/Application Support/Tiller`. Set `TILLER_DATA_DIR` to use another folder, for example to run a second Tiller alongside the first. Unix socket paths are limited to 104 bytes, so for a long folder path also set `TILLER_SOCKET` to a shorter socket path; the app and `tiller_mcp` both read it.
+Tiller keeps its data in `~/Library/Application Support/Tiller`. Set `TILLER_DATA_DIR` to use another folder. Profiles opened from a Tiller started that way use the same folder.
+
+| Path | What it is |
+|---|---|
+| `profiles.json` | Every profile's id, name and creation date, and the id of the one used last |
+| `Profiles/<id>/` | One profile: Chromium's data, `history.sqlite`, `passwords.json`, `session.json`, `agent-chats/`, the agent's working folder and the control socket |
+
+Unix socket paths are limited to 104 bytes, so for a long folder path set `TILLER_SOCKET` to a shorter socket path. The app and `tiller_mcp` both read it. It applies to one Tiller only: profiles opened from that Tiller don't get it, since two processes can't share a socket.
+
+Before profiles, Tiller kept everything straight in the data folder. At its first launch with profiles, it moves all of it into `Profiles/default/` and moves the settings into that profile's user defaults (`ProfileMigration.swift`). If an older Tiller is running, it asks you to quit it and exits. As with the rename below, saved chats are pointed at the new folder, but Claude Code and Qoder CLI keep sessions by folder path, so chats from before can't be continued.
 
 Tiller was called Mini. At its first launch it brings over what Mini kept (`RenameMigration.swift`):
 
@@ -151,7 +171,7 @@ Debug builds take three more launch arguments for testing the import: `-chromeDa
 
 ## Browser tools (MCP)
 
-`build/Tiller.app/Contents/MacOS/tiller_mcp` is a stdio MCP server. It talks to the running app over a Unix socket at `control.sock` in the data folder (only your user can open it). Set `TILLER_SOCKET` to use another path.
+`build/Tiller.app/Contents/MacOS/tiller_mcp` is a stdio MCP server. It talks to the running app over a Unix socket at `control.sock` in the profile's folder (only your user can open it). Tiller gives its agents that path in `TILLER_SOCKET`. Started any other way, it picks the profile named by `TILLER_PROFILE` (an id or a name), or else the one used last. `TILLER_SOCKET` overrides both.
 
 | Tool | What it does |
 |---|---|
@@ -194,6 +214,7 @@ tiller type --selector '#q' hi     # CSS selector instead of a ref
 tiller screenshot -o page.jpg      # prints the path; a temp file without -o
 tiller eval 'document.title'
 tiller close 2
+tiller --profile work tabs         # another profile's Tiller
 ```
 
 | Command | Tool |
@@ -209,7 +230,7 @@ tiller close 2
 | `screenshot [-o file]` | `screenshot` |
 | `eval <expression>` | `eval_js` |
 
-`--tab <id>` acts on another tab than the selected one, and `--json` prints the raw result instead of text. Refs are stored in the page, so a `read` in one call and a `click` in the next agree. Errors go to stderr with exit code 1, or 2 for bad arguments. Like `tiller_mcp`, it needs Tiller running and honors `TILLER_SOCKET`.
+`--profile <name>` controls that profile's Tiller instead of the one used last, and takes an id too. `--tab <id>` acts on another tab than the selected one, and `--json` prints the raw result instead of text. Options can come before or after the command. Refs are stored in the page, so a `read` in one call and a `click` in the next agree. Errors go to stderr with exit code 1, or 2 for bad arguments. Like `tiller_mcp`, it needs Tiller running and honors `TILLER_SOCKET` and `TILLER_PROFILE`.
 
 The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and `mcp/src/bin/tiller.rs` as the CLI.
 

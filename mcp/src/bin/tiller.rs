@@ -29,6 +29,7 @@ Commands:
   eval <expression>         Run JavaScript in the page and print the value
 
 Options:
+  --profile <name>          Control this profile's Tiller instead of the one used last
   --tab <id>                Act on this tab instead of the selected one
   --selector <css>          Target an element by CSS selector instead of a ref
   --append                  type: keep the field's current text
@@ -72,6 +73,7 @@ fn usage(message: impl Into<String>) -> Error {
 #[derive(Default)]
 struct Options {
     positional: Vec<String>,
+    profile: Option<String>,
     tab: Option<i64>,
     selector: Option<String>,
     append: bool,
@@ -87,6 +89,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, Error> {
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or_else(|| usage(format!("{flag} needs a value")));
         match arg.as_str() {
+            "--profile" => options.profile = Some(value("--profile")?),
             "--tab" => options.tab = Some(number(&value("--tab")?, "--tab")?),
             "--selector" => options.selector = Some(value("--selector")?),
             "--max-chars" => options.max_chars = Some(number(&value("--max-chars")?, "--max-chars")?),
@@ -108,9 +111,12 @@ fn number<T: std::str::FromStr>(text: &str, flag: &str) -> Result<T, Error> {
 }
 
 fn run(args: Vec<String>) -> Result<(), Error> {
-    let mut args = args.into_iter();
-    let command = args.next().unwrap_or_default();
-    let options = parse(args)?;
+    // Options may come before the command too, as in `tiller --profile work tabs`.
+    let mut options = parse(args)?;
+    if options.positional.is_empty() {
+        return Err(usage("no command given"));
+    }
+    let command = options.positional.remove(0);
     let positional = options.positional.as_slice();
 
     let mut call = Map::new();
@@ -172,7 +178,9 @@ fn run(args: Vec<String>) -> Result<(), Error> {
         call.insert("submit".into(), json!(true));
     }
 
-    let output = Browser::default().call_tool(tool, &Value::Object(call)).map_err(Error::Failed)?;
+    let mut browser = Browser::default();
+    browser.profile = options.profile.clone();
+    let output = browser.call_tool(tool, &Value::Object(call)).map_err(Error::Failed)?;
     let value = match output {
         Output::Json(value) => value,
         Output::Image(data) => {

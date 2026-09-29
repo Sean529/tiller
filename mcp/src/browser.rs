@@ -24,6 +24,9 @@ pub enum Output {
 /// reopened if the app restarts.
 #[derive(Default)]
 pub struct Browser {
+    /// The profile whose Tiller to talk to, by id or name. None means the
+    /// one in TILLER_PROFILE, else the one used last.
+    pub profile: Option<String>,
     conn: Option<(UnixStream, BufReader<UnixStream>)>,
     next_id: u64,
 }
@@ -205,7 +208,8 @@ impl Browser {
 
     fn try_request(&mut self, method: &str, params: &Value) -> Result<Value, Failure> {
         if self.conn.is_none() {
-            let stream = UnixStream::connect(socket_path()).map_err(|e| Failure::Connection(e.to_string()))?;
+            let path = socket_path(self.profile.as_deref()).map_err(Failure::App)?;
+            let stream = UnixStream::connect(path).map_err(|e| Failure::Connection(e.to_string()))?;
             let reader = BufReader::new(stream.try_clone().map_err(|e| Failure::Connection(e.to_string()))?);
             self.conn = Some((stream, reader));
         }
@@ -230,13 +234,43 @@ enum Failure {
     App(String),
 }
 
-fn socket_path() -> String {
-    std::env::var("TILLER_SOCKET").unwrap_or_else(|_| {
-        let dir = std::env::var("TILLER_DATA_DIR").unwrap_or_else(|_| {
-            format!("{}/Library/Application Support/Tiller", std::env::var("HOME").unwrap_or_default())
-        });
-        format!("{dir}/control.sock")
-    })
+/// TILLER_SOCKET, or `control.sock` in the folder of the profile named by
+/// `profile` or TILLER_PROFILE (an id or a name), else of the one used last.
+/// Profiles are listed in `profiles.json` in the root folder, which is
+/// TILLER_DATA_DIR or the app's folder, as in Profile.swift.
+fn socket_path(profile: Option<&str>) -> Result<String, String> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    if let Some(path) = var("TILLER_SOCKET") {
+        return Ok(path);
+    }
+    let root = var("TILLER_DATA_DIR").unwrap_or_else(|| {
+        format!("{}/Library/Application Support/Tiller", std::env::var("HOME").unwrap_or_default())
+    });
+    let wanted = profile.map(str::to_owned).or_else(|| var("TILLER_PROFILE"));
+    let list: Value = match std::fs::read(format!("{root}/profiles.json")) {
+        Ok(data) => serde_json::from_slice(&data).unwrap_or(Value::Null),
+        // A Tiller from before profiles keeps its socket in the root folder.
+        Err(_) if wanted.is_none() => return Ok(format!("{root}/control.sock")),
+        Err(e) => return Err(format!("can't read the profiles in {root}: {e}")),
+    };
+    let profiles = list["profiles"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let id = match &wanted {
+        Some(wanted) => {
+            let lower = wanted.to_lowercase();
+            let found = profiles.iter().find(|p| p["id"] == wanted.as_str()).or_else(|| {
+                profiles.iter().find(|p| p["name"].as_str().is_some_and(|name| name.to_lowercase() == lower))
+            });
+            match found.and_then(|p| p["id"].as_str()) {
+                Some(id) => id,
+                None => {
+                    let names: Vec<&str> = profiles.iter().filter_map(|p| p["name"].as_str()).collect();
+                    return Err(format!("no profile named {wanted:?}. Profiles: {}", names.join(", ")));
+                }
+            }
+        }
+        None => list["lastUsed"].as_str().or_else(|| profiles.first().and_then(|p| p["id"].as_str())).unwrap_or("default"),
+    };
+    Ok(format!("{root}/Profiles/{id}/control.sock"))
 }
 
 fn json_out(value: Value) -> Result<Output, String> {

@@ -2,10 +2,18 @@ import AppKit
 import CTillerCore
 
 RenameMigration.run()
+ProfileMigration.run()
+
+// One process per profile. When this profile is open already, bring that
+// process forward instead.
+if let running = Profiles.claim() {
+    NSRunningApplication(processIdentifier: running)?.activate()
+    exit(0)
+}
 
 // tiller_core_start installs the NSApplication subclass CEF needs, so it has to
 // run before anything touches NSApp.
-let code = tiller_core_start()
+let code = tiller_core_start(DataDirectory.path)
 if code != 0 { exit(code) }
 
 let app = NSApplication.shared

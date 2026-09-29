@@ -1,7 +1,8 @@
 import AppKit
 
 /// One window holding a row of tabs. The toolbar has back, forward, the tabs,
-/// a new-tab button and the agent panel toggle. The address bar sits in a row
+/// a new-tab button, the profile's name when there are several, and the agent
+/// panel toggle. The address bar sits in a row
 /// under it. The agent panel sits to the right of the page.
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
@@ -14,7 +15,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let contentView = NSView()
     private let agentPanel = AgentPanelView(frame: NSRect(x: 0, y: 0, width: 360, height: 600))
     /// Where the panel is going. It stays unhidden while it slides out.
-    private var agentPanelShown = UserDefaults.standard.bool(forKey: BrowserWindowController.agentVisibleKey)
+    private var agentPanelShown = Settings.defaults.bool(forKey: BrowserWindowController.agentVisibleKey)
     /// Counts toggles, so a slide's completion knows a later toggle took over.
     private var agentToggleCount = 0
     private let agentButton = NSButton()
@@ -23,6 +24,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let backButton = NSButton()
     private let forwardButton = NSButton()
     private let newTabButton = NSButton()
+    /// Names the profile and opens the Profiles menu. Hidden with one profile.
+    private let profileButton = NSButton()
+    private var profileItem: NSToolbarItem?
+    /// Nil while there is only one profile.
+    private var profileName: String?
     private lazy var suggestions = AddressSuggestions(addressBar: addressBar)
     private lazy var findBar: FindBar = {
         let bar = FindBar()
@@ -424,7 +430,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// after sliding out, since Chromium laying it out every frame would stutter.
     @objc func toggleAgentPanel(_ sender: Any?) {
         agentPanelShown.toggle()
-        UserDefaults.standard.set(agentPanelShown, forKey: Self.agentVisibleKey)
+        Settings.defaults.set(agentPanelShown, forKey: Self.agentVisibleKey)
         agentButton.state = agentPanelShown ? .on : .off
         agentToggleCount += 1
         let count = agentToggleCount
@@ -554,10 +560,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         fitTabStrip()
     }
 
-    /// Room left after the window buttons, back, forward, new tab and the agent button.
+    /// Room left after the window buttons, back, forward, new tab, the profile
+    /// button and the agent button.
     private func fitTabStrip() {
         guard let width = window?.frame.width else { return }
-        tabStripWidth.constant = max(200, width - 330)
+        let profileWidth = profileName == nil ? 0 : profileButton.fittingSize.width + 12
+        tabStripWidth.constant = max(200, width - 330 - profileWidth)
+    }
+
+    /// Shows the profile's name in the toolbar and window title, or hides it
+    /// when `name` is nil.
+    func showProfile(name: String?) {
+        profileName = name
+        profileButton.title = name ?? ""
+        profileItem?.isHidden = name == nil
+        window?.title = name.map { "Tiller – \($0)" } ?? "Tiller"
+        fitTabStrip()
+    }
+
+    @objc private func showProfilesMenu(_ sender: NSButton) {
+        MainMenu.profiles.popUp(
+            positioning: nil, at: NSPoint(x: 0, y: sender.isFlipped ? sender.bounds.maxY + 4 : -4), in: sender
+        )
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -574,6 +598,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         static let tabs = NSToolbarItem.Identifier("tabs")
         static let newTab = NSToolbarItem.Identifier("newTab")
         static let agent = NSToolbarItem.Identifier("agent")
+        static let profile = NSToolbarItem.Identifier("profile")
     }
 
     private func configureControls() {
@@ -591,6 +616,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
         backButton.isEnabled = false
         forwardButton.isEnabled = false
+        profileButton.image = NSImage(systemSymbolName: "person.crop.circle", accessibilityDescription: "Profile")
+        profileButton.imagePosition = .imageLeading
+        profileButton.toolTip = "Profiles"
+        profileButton.bezelStyle = .toolbar
+        profileButton.target = self
+        profileButton.action = #selector(showProfilesMenu(_:))
         agentButton.setButtonType(.pushOnPushOff)
         agentButton.state = agentPanel.isHidden ? .off : .on
 
@@ -606,7 +637,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Item.back, Item.forward, Item.tabs, Item.newTab, .flexibleSpace, Item.agent]
+        [Item.back, Item.forward, Item.tabs, Item.newTab, .flexibleSpace, Item.profile, Item.agent]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -624,6 +655,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case Item.forward: item.view = forwardButton; item.label = "Forward"
         case Item.newTab: item.view = newTabButton; item.label = "New Tab"
         case Item.agent: item.view = agentButton; item.label = "Agent"
+        case Item.profile:
+            item.view = profileButton
+            item.label = "Profile"
+            item.isHidden = profileName == nil
+            profileItem = item
         case Item.tabs:
             item.view = tabStrip
             item.label = "Tabs"

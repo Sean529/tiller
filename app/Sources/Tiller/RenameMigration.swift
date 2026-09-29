@@ -22,7 +22,7 @@ enum RenameMigration {
         let environment = ProcessInfo.processInfo.environment
         guard environment["TILLER_DATA_DIR"]?.isEmpty ?? true,
               manager.fileExists(atPath: oldDataDirectory),
-              !manager.fileExists(atPath: DataDirectory.path) else { return }
+              !manager.fileExists(atPath: Profiles.root) else { return }
         if !NSRunningApplication.runningApplications(withBundleIdentifier: oldBundleID).isEmpty {
             // NSApp can't exist yet, so this alert comes from CoreFoundation.
             CFUserNotificationDisplayAlert(
@@ -33,25 +33,26 @@ enum RenameMigration {
             exit(0)
         }
         do {
-            try manager.moveItem(atPath: oldDataDirectory, toPath: DataDirectory.path)
+            try manager.moveItem(atPath: oldDataDirectory, toPath: Profiles.root)
         } catch {
             NSLog("Tiller: could not move %@: %@", oldDataDirectory, error.localizedDescription)
             return
         }
-        pointChatsAtNewFolder()
+        repointChats(in: Profiles.root, from: oldDataDirectory, to: Profiles.root)
     }
 
-    /// Saved chats record the folder their agent ran in, which was inside the
-    /// old data folder unless Settings chose another.
-    private static func pointChatsAtNewFolder() {
-        let url = URL(fileURLWithPath: DataDirectory.path + "/agent-chats/index.json")
+    /// Saved chats in the data folder `dataDirectory` record the folder their
+    /// agent ran in, which was inside the data folder unless Settings chose
+    /// another. Those inside `old` move to the same place inside `new`.
+    static func repointChats(in dataDirectory: String, from old: String, to new: String) {
+        let url = URL(fileURLWithPath: dataDirectory + "/agent-chats/index.json")
         guard let data = try? Data(contentsOf: url),
               var index = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               var conversations = index["conversations"] as? [[String: Any]] else { return }
         for i in conversations.indices {
             guard let directory = conversations[i]["directory"] as? String,
-                  directory == oldDataDirectory || directory.hasPrefix(oldDataDirectory + "/") else { continue }
-            conversations[i]["directory"] = DataDirectory.path + directory.dropFirst(oldDataDirectory.count)
+                  directory == old || directory.hasPrefix(old + "/") else { continue }
+            conversations[i]["directory"] = new + directory.dropFirst(old.count)
         }
         index["conversations"] = conversations
         if let updated = try? JSONSerialization.data(withJSONObject: index) {

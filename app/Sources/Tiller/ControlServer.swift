@@ -11,8 +11,9 @@ struct ControlError: Error {
 /// Swift; the core sends them to the tab directly.
 @MainActor
 final class ControlServer {
-    /// Where tiller_mcp looks. Both honor TILLER_SOCKET, for data folders whose
-    /// path is too long for a socket.
+    /// `control.sock` in the profile's folder. Both the app and tiller_mcp
+    /// honor TILLER_SOCKET, for folders whose path is too long for a socket.
+    /// Agents are given this path in TILLER_SOCKET.
     static let socketPath = ProcessInfo.processInfo.environment["TILLER_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
         ?? DataDirectory.file("control.sock")
 
