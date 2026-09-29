@@ -7,64 +7,44 @@ protocol AgentPanelDelegate: AnyObject {
     func agentPanelContext(_ panel: AgentPanelView) -> String
 }
 
-/// The side panel: pick an agent, chat with it, and watch its browser tool calls.
-final class AgentPanelView: NSView, NSTextViewDelegate {
+/// The side panel: pick an agent and chat with it, in up to a few tabs, each
+/// with its own agent. A bar above the message field switches tabs, opens
+/// new ones and past chats. The open tabs come back at the next launch.
+final class AgentPanelView: NSView {
     weak var delegate: AgentPanelDelegate?
 
-    /// The message being written.
-    var input: NSView { composer.textView }
+    /// The message being written in the selected tab.
+    var input: NSView { active.input }
 
     private let background = NSVisualEffectView()
     private let agentPicker = NSPopUpButton()
     private let status = StatusPill()
-    private let newChatButton = NSButton()
-    private let separator = NSBox()
-    private let transcript = TranscriptView()
-    private let scrollView = NSScrollView()
-    private let emptyState = AgentEmptyState()
-    private let composer = Composer()
-
-    private var session: AgentSession?
-    /// The text block Claude Code is streaming into, until the complete block arrives.
-    private var liveText: NSTextField?
-    private var liveTextBuffer = ""
-    /// Streamed text is drawn at most this often, so a fast stream doesn't
-    /// re-render the whole block for every few characters.
-    private var liveTextRenderPending = false
-    private static let liveTextInterval = 0.05
-    private var toolRows: [String: ToolRowView] = [:]
-    /// This panel's attached images, kept until a new chat or the window closes.
-    private let attachmentDirectory = AgentAttachment.directory.appendingPathComponent(UUID().uuidString)
-    private let quickLook = QuickLookItems()
-
-    /// Images left behind by a Mini that quit without cleaning up.
-    private static let removeStaleAttachments: Void = {
-        try? FileManager.default.removeItem(at: AgentAttachment.directory)
-    }()
+    private let chatArea = NSView()
+    private let tabBar = AgentTabBar()
+    private var chats: [AgentChatView] = []
+    private var activeIndex = 0
+    private var active: AgentChatView { chats[activeIndex] }
+    private var historyPopover: NSPopover?
 
     override init(frame: NSRect) {
-        Self.removeStaleAttachments
         super.init(frame: frame)
         build()
-        showIdle()
+        restoreTabs()
         NotificationCenter.default.addObserver(
             self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(tabLimitChanged(_:)), name: .agentTabsDidChange, object: nil
         )
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Ends the agent process and deletes the chat's images. Called when the
-    /// window closes.
+    /// Ends every tab's agent and saves the chats. Called when the window closes.
     func shutDown() {
-        endSession()
-        composer.attachments = []
-        try? FileManager.default.removeItem(at: attachmentDirectory)
-    }
-
-    private func endSession() {
-        session?.stop()
-        session = nil
+        saveTabs()
+        chats.forEach { $0.shutDown() }
+        AgentHistoryStore.shared.flush()
     }
 
     var hasKeyboardFocus: Bool {
@@ -86,56 +66,23 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
             agentPicker.addItem(withTitle: kind.displayName)
             agentPicker.lastItem?.representedObject = kind.rawValue
         }
-        agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: .current) ?? 0)
         agentPicker.isBordered = false
         agentPicker.font = .systemFont(ofSize: 13, weight: .semibold)
-        agentPicker.toolTip = "Agent for new chats"
+        agentPicker.toolTip = "Agent for this chat"
         agentPicker.target = self
         agentPicker.action = #selector(agentChanged(_:))
 
-        newChatButton.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Chat")?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
-        newChatButton.toolTip = "New Chat"
-        newChatButton.bezelStyle = .accessoryBarAction
-        newChatButton.isBordered = false
-        newChatButton.contentTintColor = .secondaryLabelColor
-        newChatButton.target = self
-        newChatButton.action = #selector(newChat(_:))
+        tabBar.onSelect = { [weak self] index in self?.select(index, focus: true) }
+        tabBar.onClose = { [weak self] index in self?.closeTab(index) }
+        tabBar.onNewTab = { [weak self] in self?.newTab() }
+        tabBar.onNewChat = { [weak self] in self?.newChat() }
+        tabBar.onHistory = { [weak self] button in self?.showHistory(from: button) }
 
-        separator.boxType = .separator
-        separator.alphaValue = 0
-
-        scrollView.documentView = transcript
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
-        scrollView.automaticallyAdjustsContentInsets = false
-        // Shows the header rule only once the transcript scrolls under it.
-        scrollView.contentView.postsBoundsChangedNotifications = true
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(transcriptScrolled(_:)), name: NSView.boundsDidChangeNotification, object: scrollView.contentView
-        )
-
-        emptyState.onSuggestion = { [weak self] text in self?.send(text) }
-
-        composer.textView.delegate = self
-        composer.sendButton.target = self
-        composer.sendButton.action = #selector(sendOrStop(_:))
-        composer.attachButton.target = self
-        composer.attachButton.action = #selector(chooseImages(_:))
-        composer.onImages = { [weak self] images in self?.attach(images) }
-        composer.onOpenImage = { [weak self] index in
-            guard let self else { return }
-            self.preview(self.composer.attachments.map(\.url), at: index)
-        }
-
-        for view in [background, agentPicker, status, newChatButton, scrollView, separator, emptyState, composer] as [NSView] {
+        for view in [background, agentPicker, status, chatArea] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        transcript.translatesAutoresizingMaskIntoConstraints = false
 
-        let clip = scrollView.contentView
         NSLayoutConstraint.activate([
             background.topAnchor.constraint(equalTo: topAnchor),
             background.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -146,317 +93,205 @@ final class AgentPanelView: NSView, NSTextViewDelegate {
             agentPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             status.leadingAnchor.constraint(equalTo: agentPicker.trailingAnchor, constant: 4),
             status.centerYAnchor.constraint(equalTo: agentPicker.centerYAnchor),
-            status.trailingAnchor.constraint(lessThanOrEqualTo: newChatButton.leadingAnchor, constant: -6),
-            newChatButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            newChatButton.centerYAnchor.constraint(equalTo: agentPicker.centerYAnchor),
+            status.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
 
-            separator.topAnchor.constraint(equalTo: agentPicker.bottomAnchor, constant: 8),
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
-
-            scrollView.topAnchor.constraint(equalTo: separator.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
-
-            transcript.topAnchor.constraint(equalTo: clip.topAnchor),
-            transcript.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
-            transcript.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            transcript.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
-
-            emptyState.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor, constant: -10),
-            emptyState.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            emptyState.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
-
-            composer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            composer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            composer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            chatArea.topAnchor.constraint(equalTo: agentPicker.bottomAnchor, constant: 8),
+            chatArea.leadingAnchor.constraint(equalTo: leadingAnchor),
+            chatArea.trailingAnchor.constraint(equalTo: trailingAnchor),
+            chatArea.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
-    @objc private func transcriptScrolled(_ notification: Notification) {
-        let scrolled = scrollView.contentView.bounds.minY > 1
-        if (separator.alphaValue > 0) != scrolled { separator.alphaValue = scrolled ? 1 : 0 }
+    // MARK: Tabs
+
+    /// Last time's tabs, up to the limit. A chat since deleted opens empty.
+    private func restoreTabs() {
+        let store = AgentHistoryStore.shared
+        for id in store.openTabs.prefix(Settings.agentTabs) {
+            add(AgentChatView(conversation: id.isEmpty ? nil : store.conversation(id)))
+        }
+        if chats.isEmpty { add(AgentChatView()) }
+        select(min(max(store.selectedTab, 0), chats.count - 1), focus: false)
     }
 
-    // MARK: Actions
+    private func add(_ chat: AgentChatView, at index: Int? = nil) {
+        chat.context = { [weak self] in
+            guard let self else { return "" }
+            return self.delegate?.agentPanelContext(self) ?? ""
+        }
+        chat.onChange = { [weak self, weak chat] in
+            guard let self, let chat, self.chats.contains(chat) else { return }
+            self.refresh()
+            self.saveTabs()
+        }
+        chat.isHidden = true
+        chat.translatesAutoresizingMaskIntoConstraints = false
+        chatArea.addSubview(chat)
+        NSLayoutConstraint.activate([
+            chat.topAnchor.constraint(equalTo: chatArea.topAnchor),
+            chat.bottomAnchor.constraint(equalTo: chatArea.bottomAnchor),
+            chat.leadingAnchor.constraint(equalTo: chatArea.leadingAnchor),
+            chat.trailingAnchor.constraint(equalTo: chatArea.trailingAnchor),
+        ])
+        chats.insert(chat, at: index ?? chats.count)
+    }
 
+    /// Shows the tab at `index`, with the tab bar moved into it.
+    private func select(_ index: Int, focus: Bool) {
+        activeIndex = index
+        for (i, chat) in chats.enumerated() { chat.isHidden = i != index }
+        let chat = active
+        if tabBar.superview !== chat.tabBarHost {
+            tabBar.removeFromSuperview()
+            tabBar.translatesAutoresizingMaskIntoConstraints = false
+            chat.tabBarHost.addSubview(tabBar)
+            NSLayoutConstraint.activate([
+                tabBar.topAnchor.constraint(equalTo: chat.tabBarHost.topAnchor),
+                tabBar.bottomAnchor.constraint(equalTo: chat.tabBarHost.bottomAnchor),
+                tabBar.leadingAnchor.constraint(equalTo: chat.tabBarHost.leadingAnchor),
+                tabBar.trailingAnchor.constraint(equalTo: chat.tabBarHost.trailingAnchor),
+            ])
+        }
+        refresh()
+        saveTabs()
+        if focus { window?.makeFirstResponder(chat.input) }
+    }
+
+    private func newTab() {
+        guard chats.count < Settings.agentTabs else { return NSSound.beep() }
+        add(AgentChatView())
+        select(chats.count - 1, focus: true)
+    }
+
+    /// Starts over in the selected tab. The chat it had stays in history.
+    private func newChat() {
+        if active.isEmpty {
+            window?.makeFirstResponder(input)
+        } else {
+            replace(activeIndex, with: AgentChatView())
+        }
+    }
+
+    private func replace(_ index: Int, with chat: AgentChatView) {
+        let old = chats.remove(at: index)
+        old.shutDown()
+        old.removeFromSuperview()
+        add(chat, at: index)
+        select(index, focus: true)
+    }
+
+    /// Closing the last tab leaves a new chat.
+    private func closeTab(_ index: Int) {
+        guard chats.indices.contains(index) else { return }
+        if chats.count == 1 { return newChat() }
+        let chat = chats.remove(at: index)
+        chat.shutDown()
+        chat.removeFromSuperview()
+        let selected = index < activeIndex ? activeIndex - 1 : min(activeIndex, chats.count - 1)
+        select(selected, focus: hasKeyboardFocus || index == activeIndex)
+    }
+
+    private func saveTabs() {
+        AgentHistoryStore.shared.setOpenTabs(chats.map { $0.isEmpty ? "" : $0.id }, selected: activeIndex)
+    }
+
+    /// The header and tab bar show the selected chat.
+    private func refresh() {
+        let chat = active
+        agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: chat.kind) ?? 0)
+        status.show(chat.statusText, busy: chat.statusBusy)
+        tabBar.update(
+            tabs: chats.map { (title: $0.title, busy: $0.isBusy) },
+            selected: activeIndex,
+            canAddTab: chats.count < Settings.agentTabs
+        )
+    }
+
+    @objc private func tabLimitChanged(_ notification: Notification) {
+        refresh()
+    }
+
+    // MARK: History
+
+    private func showHistory(from button: NSView) {
+        if let historyPopover, historyPopover.isShown { return historyPopover.close() }
+        let controller = AgentHistoryController(items: historyItems(), current: active.id)
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = controller
+        controller.onOpen = { [weak self, weak popover] id in
+            popover?.close()
+            self?.open(id)
+        }
+        controller.onDelete = { [weak self, weak controller] id in
+            guard let self else { return }
+            self.delete(id)
+            controller?.reload(self.historyItems())
+        }
+        historyPopover = popover
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+    }
+
+    private func historyItems() -> [AgentHistoryController.Item] {
+        AgentHistoryStore.shared.conversations.map { conversation in
+            .init(conversation: conversation, tab: chats.firstIndex { $0.id == conversation.id })
+        }
+    }
+
+    /// Switches to the chat if a tab has it, or opens it in the selected tab.
+    private func open(_ id: String) {
+        if let index = chats.firstIndex(where: { $0.id == id }) {
+            return select(index, focus: true)
+        }
+        guard let conversation = AgentHistoryStore.shared.conversation(id) else { return }
+        let chat = AgentChatView(conversation: conversation)
+        replace(activeIndex, with: chat)
+        chat.scrollToBottom()
+    }
+
+    /// A tab showing the chat gets a new one instead.
+    private func delete(_ id: String) {
+        if let index = chats.firstIndex(where: { $0.id == id }) {
+            let old = chats.remove(at: index)
+            old.shutDown()
+            old.removeFromSuperview()
+            add(AgentChatView(), at: index)
+            select(activeIndex, focus: false)
+        }
+        AgentHistoryStore.shared.delete(id)
+    }
+
+    // MARK: Agent
+
+    /// Picking another agent starts a new chat with it, unless the selected
+    /// tab has no messages yet.
     @objc private func agentChanged(_ sender: NSPopUpButton) {
         guard let raw = sender.selectedItem?.representedObject as? String, let kind = AgentKind(rawValue: raw),
-            kind != AgentKind.current
+            kind != active.kind || kind != AgentKind.current
         else { return }
+        let startOver = !active.isEmpty && kind != active.kind
         AgentKind.current = kind
-        startNewChat()
+        if startOver { newChat() } else { refresh() }
     }
 
-    /// Settings changed the default agent. A running chat keeps its agent; the
-    /// next new chat uses the one now shown in the picker.
+    /// Settings changed the agent for new chats, which an empty tab shows.
     @objc private func currentAgentChanged(_ notification: Notification) {
-        agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: .current) ?? 0)
-        if session == nil { showIdle() }
+        refresh()
     }
 
-    @objc private func newChat(_ sender: Any?) {
-        startNewChat()
-    }
-
-    private func startNewChat() {
-        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().dataSource === quickLook {
-            QLPreviewPanel.shared().orderOut(nil)
-        }
-        shutDown()
-        transcript.clear()
-        liveText = nil
-        toolRows.removeAll()
-        showIdle()
-        window?.makeFirstResponder(input)
-    }
+    // MARK: Sending
 
     #if DEBUG
-    func stopForTesting() { sendOrStop(nil) }
+    func stopForTesting() { active.stopForTesting() }
 
-    /// Pastes the clipboard into the composer twice, as Cmd+V would, then
-    /// sends `text` with it after a few seconds.
-    func pasteAndSendForTesting(_ text: String) {
-        composer.textView.paste(nil)
-        composer.textView.paste(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            MainActor.assumeIsolated {
-                self?.composer.text = text
-                self?.submit()
-            }
-        }
-    }
+    func pasteAndSendForTesting(_ text: String) { active.pasteAndSendForTesting(text) }
     #endif
 
-    @objc private func sendOrStop(_ sender: Any?) {
-        if session?.isBusy == true {
-            session?.interrupt()
-            status.show("Stopping…", busy: true)
-        } else {
-            submit()
-        }
-    }
-
-    /// Enter sends. Option+Enter or Shift+Enter adds a line. Escape stops a
-    /// running turn.
-    func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        switch selector {
-        case #selector(NSResponder.insertNewline(_:)):
-            let flags = NSApp.currentEvent?.modifierFlags ?? []
-            if flags.contains(.option) || flags.contains(.shift) {
-                textView.insertNewlineIgnoringFieldEditor(nil)
-            } else {
-                submit()
-            }
-            return true
-        case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
-            textView.insertNewlineIgnoringFieldEditor(nil)
-            return true
-        case #selector(NSResponder.cancelOperation(_:)):
-            guard session?.isBusy == true else { return false }
-            sendOrStop(nil)
-            return true
-        default:
-            return false
-        }
-    }
-
-    func textDidChange(_ notification: Notification) {
-        composer.textChanged()
-    }
-
-    /// The composer keeps its own undo, which a sent message clears.
-    func undoManager(for view: NSTextView) -> UndoManager? {
-        composer.undoManager
-    }
-
-    private func submit() {
-        let text = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let images = composer.attachments
-        guard !text.isEmpty || !images.isEmpty, session?.isBusy != true else { return }
-        composer.text = ""
-        composer.attachments = []
-        send(text, images: images)
-    }
-
-    func send(_ text: String, images: [AgentAttachment] = []) {
-        let session = self.session ?? makeSession()
-        emptyState.isHidden = true
-        transcript.add(UserMessageView(text: text, images: images.map(\.image)) { [weak self] index in
-            self?.preview(images.map(\.url), at: index)
-        })
-        do {
-            try session.send(text, images: images, context: delegate?.agentPanelContext(self) ?? "")
-            if session.isRunning { status.show("Working…", busy: true) }
-            setBusy(true)
-        } catch {
-            addError((error as? ControlError)?.message ?? error.localizedDescription)
-            endSession()
-            showIdle()
-        }
-        scrollToBottom()
-    }
-
-    // MARK: Images
-
-    /// Adds pasted, dropped or chosen images to the message, up to the limit.
-    /// Beeps for any that don't fit or can't be read.
-    private func attach(_ images: [NSImage]) {
-        let room = max(0, AgentAttachment.maxCount - composer.attachments.count)
-        let added = images.prefix(room).compactMap { AgentAttachment(image: $0, in: attachmentDirectory) }
-        if added.count < images.count { NSSound.beep() }
-        composer.attachments += added
-    }
-
-    @objc private func chooseImages(_ sender: Any?) {
-        guard let window else { return }
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = true
-        panel.message = "Choose images to send to the agent."
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard let self else { return }
-            if response == .OK { self.attach(panel.urls.compactMap(NSImage.init(contentsOf:))) }
-            window.makeFirstResponder(self.input)
-        }
-    }
-
-    /// Shows the images in Quick Look, starting at `index`. The panel asks the
-    /// responder chain for a controller, so the focus moves into this panel
-    /// if it is elsewhere.
-    private func preview(_ urls: [URL], at index: Int) {
-        quickLook.urls = urls
-        quickLook.index = index
-        if !hasKeyboardFocus { window?.makeFirstResponder(input) }
-        guard let panel = QLPreviewPanel.shared() else { return }
-        if panel.isVisible {
-            panel.updateController()
-            panel.reloadData()
-            panel.currentPreviewItemIndex = index
-        } else {
-            panel.makeKeyAndOrderFront(nil)
-        }
-    }
-
-    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
-
-    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        panel.dataSource = quickLook
-        panel.reloadData()
-        panel.currentPreviewItemIndex = quickLook.index
-    }
-
-    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        panel.dataSource = nil
-    }
-
-    private func makeSession() -> AgentSession {
-        let session = AgentSession(kind: .current)
-        session.onEvent = { [weak self] event in self?.handle(event) }
-        self.session = session
-        status.show("Starting…", busy: true)
-        return session
-    }
-
-    // MARK: Agent events
-
-    private func handle(_ event: AgentEvent) {
-        let follow = transcript.isNearBottom(of: scrollView)
-        switch event {
-        case .ready(let model):
-            status.show(model.map { "Working · \($0)" } ?? "Working…", busy: true)
-        case .textStarted:
-            liveTextBuffer = ""
-            let label = AgentMarkdown.label("")
-            liveText = label
-            transcript.add(label)
-        case .textDelta(let delta):
-            liveTextBuffer += delta
-            scheduleLiveTextRender()
-            return
-        case .text(let text):
-            if let liveText {
-                liveText.attributedStringValue = AgentMarkdown.render(text)
-                self.liveText = nil
-            } else {
-                transcript.add(AgentMarkdown.label(text))
-            }
-        case .toolUse(let id, let name, let input):
-            let row = ToolRowView(name: name, input: input)
-            toolRows[id] = row
-            transcript.add(row)
-        case .toolResult(let id, let isError, let summary):
-            toolRows.removeValue(forKey: id)?.finish(isError: isError, summary: summary)
-        case .retrying:
-            status.show("Retrying…", busy: true)
-        case .error(let message):
-            addError(message)
-        case .turnFinished(let error, let stopped):
-            if let error { addError(error) }
-            if stopped { addNote("Stopped") }
-            liveText = nil
-            showIdle()
-        case .exited(let message):
-            if let message { addError(message + "\nThe next message starts a new conversation.") }
-            session = nil
-            liveText = nil
-            toolRows.removeAll()
-            showIdle()
-        }
-        if follow { scrollToBottom() }
-    }
-
-    private func scheduleLiveTextRender() {
-        guard !liveTextRenderPending else { return }
-        liveTextRenderPending = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.liveTextInterval) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.liveTextRenderPending = false
-                guard let liveText = self.liveText else { return }
-                let follow = self.transcript.isNearBottom(of: self.scrollView)
-                liveText.attributedStringValue = AgentMarkdown.render(self.liveTextBuffer)
-                if follow { self.scrollToBottom() }
-            }
-        }
-    }
-
-    private func showIdle() {
-        setBusy(false)
-        let kind = session?.kind ?? .current
-        if session == nil {
-            status.show("", busy: false)
-        } else {
-            status.show("Ready", busy: false)
-        }
-        composer.placeholder = "Ask \(kind.displayName) about this page…"
-        emptyState.agentName = kind.displayName
-        emptyState.isHidden = !transcript.isEmpty
-    }
-
-    private func setBusy(_ busy: Bool) {
-        composer.isBusy = busy
-    }
-
-    private func addNote(_ message: String) {
-        transcript.add(NoteView(text: message))
-    }
-
-    private func addError(_ message: String) {
-        transcript.add(ErrorMessageView(text: message))
-    }
-
-    /// Keeps the newest message in view. Agent events call this only when the
-    /// user hasn't scrolled up to read something.
-    private func scrollToBottom() {
-        layoutSubtreeIfNeeded()
-        let clip = scrollView.contentView
-        let y = max(0, transcript.frame.height - clip.bounds.height)
-        clip.scroll(to: NSPoint(x: 0, y: y))
-        scrollView.reflectScrolledClipView(clip)
+    func send(_ text: String) {
+        active.send(text)
     }
 }
+
 
 // MARK: Header
 
@@ -523,7 +358,7 @@ private final class StatusPill: NSView {
 // MARK: Empty state
 
 /// What a new chat shows: what the agent can do, and a few things to ask.
-private final class AgentEmptyState: NSView {
+final class AgentEmptyState: NSView {
     var onSuggestion: ((String) -> Void)?
     var agentName = "" {
         didSet { title.stringValue = "Ask \(agentName)" }
@@ -678,7 +513,7 @@ private final class SuggestionButton: NSView {
 /// to a few lines, with the attach button and the send/stop button in its
 /// bottom corners. Attached images show above the text. Images pasted or
 /// dropped on it go to `onImages`.
-private final class Composer: NSView {
+final class Composer: NSView {
     let textView = PlaceholderTextView()
     let sendButton = NSButton()
     let attachButton = NSButton()
@@ -878,7 +713,7 @@ private final class Composer: NSView {
 }
 
 /// The images Quick Look shows for the panel.
-private final class QuickLookItems: NSObject, QLPreviewPanelDataSource {
+final class QuickLookItems: NSObject, QLPreviewPanelDataSource {
     var urls: [URL] = []
     var index = 0
 

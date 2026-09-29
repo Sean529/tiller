@@ -5,7 +5,7 @@ import Foundation
 /// which speaks JSON-RPC over stdio. All are limited to Mini's MCP tools plus
 /// the built-in tools turned on in Settings, except that Codex always keeps a
 /// shell, confined to a read-only sandbox unless writing is on.
-enum AgentKind: String, CaseIterable {
+enum AgentKind: String, CaseIterable, Codable {
     case qodercli
     case claude
     case codex
@@ -32,20 +32,21 @@ enum AgentKind: String, CaseIterable {
     }
 
     /// Print mode with stream-json both ways, only the built-in tools in
-    /// `tools`, only the `mini` MCP server, and all of those allowed without asking.
-    func arguments(mcpConfig: String, systemPrompt: String, tools: [AgentTool]) -> [String] {
+    /// `tools`, only the `mini` MCP server, and all of those allowed without
+    /// asking. `resume` continues that saved session.
+    func arguments(mcpConfig: String, systemPrompt: String, tools: [AgentTool], resume: String?) -> [String] {
         let toolNames = tools.flatMap(\.toolNames)
         let allowed = (["mcp__mini"] + toolNames).joined(separator: ",")
-        let common = [
+        var common = [
             "-p",
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--tools", toolNames.joined(separator: ","),
             "--mcp-config", mcpConfig,
             "--strict-mcp-config",
-            "--no-session-persistence",
             "--append-system-prompt", systemPrompt,
         ]
+        if let resume { common += ["--resume", resume] }
         switch self {
         case .claude:
             return common + [
@@ -64,7 +65,8 @@ enum AgentKind: String, CaseIterable {
                 "--permission-mode", toolNames.isEmpty ? "dont_ask" : "bypass_permissions",
             ]
         case .codex:
-            // The MCP server, sandbox and prompt go in thread/start instead.
+            // The MCP server, sandbox and prompt go in thread/start or
+            // thread/resume instead.
             return ["app-server"]
         }
     }
@@ -72,6 +74,10 @@ enum AgentKind: String, CaseIterable {
 
 enum AgentEvent {
     case ready(model: String?)
+    /// The id the CLI saves the conversation under, for resuming it later.
+    case sessionStarted(id: String)
+    /// The agent named the conversation (Codex only).
+    case renamed(String)
     /// A streamed text block started (Claude Code only).
     case textStarted
     case textDelta(String)
@@ -88,12 +94,17 @@ enum AgentEvent {
 }
 
 /// One running agent CLI. The process stays alive across turns and keeps the
-/// conversation; stopping it ends the conversation.
+/// conversation. The CLI also saves it, so after the process stops a new
+/// session can pick it up again with its `sessionID`.
 @MainActor
 final class AgentSession {
     let kind: AgentKind
     var onEvent: ((AgentEvent) -> Void)?
 
+    /// The saved conversation this session continues, then the one it is in.
+    private(set) var sessionID: String?
+    /// The folder the agent runs in: the one given, or Settings' at start.
+    private(set) var directory: URL?
     private(set) var isBusy = false
     private var process: Process?
     private var stdin: FileHandle?
@@ -113,9 +124,16 @@ final class AgentSession {
     /// The input of a message sent before the thread started.
     private var queuedInput: [[String: Any]]?
     private var reportedToolFailure = false
+    /// thread/resume attempts refused because the last process on the thread
+    /// hasn't exited yet.
+    private var resumeRetries = 0
 
-    init(kind: AgentKind) {
+    /// `sessionID` resumes that saved conversation in `directory`, the folder
+    /// it was started in, since the CLIs keep sessions by folder.
+    init(kind: AgentKind, resuming sessionID: String? = nil, in directory: URL? = nil) {
         self.kind = kind
+        self.sessionID = sessionID
+        self.directory = directory
     }
 
     var isRunning: Bool { process?.isRunning ?? false }
@@ -133,9 +151,11 @@ final class AgentSession {
         process.arguments = kind.arguments(
             mcpConfig: try AgentEnvironment.writeMCPConfig(),
             systemPrompt: AgentEnvironment.systemPrompt,
-            tools: Settings.agentTools
+            tools: Settings.agentTools,
+            resume: sessionID
         )
-        let directory = try AgentEnvironment.workingDirectory()
+        let directory = try self.directory ?? AgentEnvironment.workingDirectory()
+        self.directory = directory
         process.currentDirectoryURL = directory
         process.environment = try AgentEnvironment.environment(for: kind)
 
@@ -208,7 +228,7 @@ final class AgentSession {
             MainActor.assumeIsolated {
                 guard let self, self.isBusy else { return }
                 self.stop()
-                self.onEvent?(.exited(message: "\(self.kind.displayName) didn't stop in time, so Mini ended it. The next message starts a new conversation."))
+                self.onEvent?(.exited(message: "\(self.kind.displayName) didn't stop in time, so Mini ended it."))
             }
         }
     }
@@ -238,6 +258,7 @@ final class AgentSession {
         turnID = nil
         queuedInput = nil
         reportedToolFailure = false
+        resumeRetries = 0
     }
 
     private func write(_ object: [String: Any]) throws {
@@ -270,7 +291,9 @@ final class AgentSession {
         switch message["type"] as? String {
         case "system":
             switch message["subtype"] as? String {
-            case "init": onEvent?(.ready(model: message["model"] as? String))
+            case "init":
+                if let id = message["session_id"] as? String, !id.isEmpty { started(id) }
+                onEvent?(.ready(model: message["model"] as? String))
             case "api_retry": onEvent?(.retrying)
             default: break
             }
@@ -321,6 +344,11 @@ final class AgentSession {
         }
     }
 
+    private func started(_ id: String) {
+        sessionID = id
+        onEvent?(.sessionStarted(id: id))
+    }
+
     /// An interrupted turn reports no error: Claude Code calls it
     /// error_during_execution, and Codex's may fail on the way out.
     private func finishTurn(error: String?) {
@@ -339,13 +367,25 @@ final class AgentSession {
         try write(["id": nextRequestID, "method": method, "params": params])
     }
 
-    /// The handshake, then a thread. Turns sent before the thread starts wait
-    /// in `queuedInput`.
+    /// The handshake, then a new or resumed thread. Turns sent before the
+    /// thread starts wait in `queuedInput`.
     private func startCodexThread(cwd: URL) throws {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         try request("initialize", ["clientInfo": ["name": "mini", "title": "Mini", "version": version]])
         try write(["method": "initialized"])
-        try request("thread/start", AgentEnvironment.codexThreadParams(cwd: cwd))
+        try requestCodexThread(cwd: cwd)
+    }
+
+    private func requestCodexThread(cwd: URL) throws {
+        var params = AgentEnvironment.codexThreadParams(cwd: cwd)
+        if let sessionID {
+            // Mini shows its own copy of the transcript.
+            params["threadId"] = sessionID
+            params["excludeTurns"] = true
+            try request("thread/resume", params)
+        } else {
+            try request("thread/start", params)
+        }
     }
 
     private func startCodexTurn(_ input: [[String: Any]]) throws {
@@ -381,14 +421,31 @@ final class AgentSession {
 
     private func handleCodexResponse(_ method: String, result: [String: Any], error: String?) {
         switch method {
-        case "initialize", "thread/start":
-            if let error {
-                stop()
-                onEvent?(.exited(message: "Codex couldn't start a conversation: \(error)"))
+        case "initialize", "thread/start", "thread/resume":
+            // A thread takes one process at a time, and the one last on it
+            // may still be exiting.
+            if method == "thread/resume", let error, error.contains("active writer"), resumeRetries < 10,
+                let directory {
+                resumeRetries += 1
+                let generation = generation
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self, self.generation == generation else { return }
+                        try? self.requestCodexThread(cwd: directory)
+                    }
+                }
                 return
             }
-            guard method == "thread/start", let thread = result["thread"] as? [String: Any] else { return }
+            if let error {
+                stop()
+                let verb = method == "thread/resume" ? "continue the" : "start a"
+                onEvent?(.exited(message: "Codex couldn't \(verb) conversation: \(error)"))
+                return
+            }
+            guard method != "initialize", let thread = result["thread"] as? [String: Any] else { return }
             threadID = thread["id"] as? String
+            if let threadID { started(threadID) }
+            if let name = thread["name"] as? String, !name.isEmpty { onEvent?(.renamed(name)) }
             onEvent?(.ready(model: result["model"] as? String ?? thread["model"] as? String))
             if let input = queuedInput {
                 queuedInput = nil
@@ -420,6 +477,8 @@ final class AgentSession {
         case "item/started", "item/completed":
             guard let item = params["item"] as? [String: Any] else { return }
             handleCodexItem(item, completed: method == "item/completed")
+        case "thread/name/updated":
+            if let name = params["threadName"] as? String, !name.isEmpty { onEvent?(.renamed(name)) }
         case "item/agentMessage/delta":
             if let delta = params["delta"] as? String { onEvent?(.textDelta(delta)) }
         case "error":
@@ -626,7 +685,6 @@ enum AgentEnvironment {
     /// working folder.
     static func codexThreadParams(cwd: URL) -> [String: Any] {
         [
-            "ephemeral": true,
             "cwd": cwd.path,
             "sandbox": Settings.agentToolEnabled(.write) ? "workspace-write" : "read-only",
             "approvalPolicy": "never",

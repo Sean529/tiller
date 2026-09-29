@@ -397,6 +397,17 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
         )
 
+        let tabsPopUp = NSPopUpButton()
+        for count in Settings.agentTabsRange {
+            tabsPopUp.addItem(withTitle: "\(count)")
+            tabsPopUp.lastItem?.tag = count
+        }
+        tabsPopUp.selectItem(withTag: Settings.agentTabs)
+        tabsPopUp.target = self
+        tabsPopUp.action = #selector(tabsChanged(_:))
+        addRow("Chat tabs:", tabsPopUp)
+        addNote(Self.note("At most this many chats open at once. The rest stay in history."))
+
         shortcutRecorder.shortcut = Settings.agentShortcut
         shortcutRecorder.onRecord = { [weak self] shortcut in self?.shortcutRecorded(shortcut) }
         shortcutRecorder.widthAnchor.constraint(equalToConstant: 140).isActive = true
@@ -569,6 +580,10 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     @objc private func agentChanged(_ sender: NSPopUpButton) {
         guard let kind = (sender.selectedItem?.representedObject as? String).flatMap(AgentKind.init) else { return }
         AgentKind.current = kind
+    }
+
+    @objc private func tabsChanged(_ sender: NSPopUpButton) {
+        Settings.agentTabs = sender.selectedTag()
     }
 
     private func shortcutRecorded(_ shortcut: Shortcut?) {

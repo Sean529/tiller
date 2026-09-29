@@ -15,9 +15,6 @@ struct AgentAttachment {
     /// PNGs larger than this are sent as JPEG, to stay under the APIs' image size limits.
     private static let maxPNGBytes = 3_500_000
 
-    /// Where each panel keeps its chat's images, in a folder of its own.
-    static let directory = URL(fileURLWithPath: DataDirectory.path + "/agent-attachments")
-
     init?(image: NSImage, in directory: URL) {
         guard let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
             let scaled = Self.scaled(source),

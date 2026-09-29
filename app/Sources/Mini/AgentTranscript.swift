@@ -271,9 +271,9 @@ final class ToolRowView: NSView, TranscriptRow {
     private let label = NSTextField(wrappingLabelWithString: "")
     private let heading: NSAttributedString
 
-    init(name: String, input: [String: Any]) {
+    /// `detail` is what `detail(_:)` made of the call's input.
+    init(name: String, detail: String) {
         let tool = name.hasPrefix("mcp__mini__") ? String(name.dropFirst("mcp__mini__".count)) : name
-        let detail = Self.detail(input)
         let text = NSMutableAttributedString(string: tool, attributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
             .foregroundColor: NSColor.labelColor,
@@ -320,14 +320,19 @@ final class ToolRowView: NSView, TranscriptRow {
         label.preferredMaxLayoutWidth = width - 39
     }
 
-    func finish(isError: Bool, summary: String) {
+    /// A nil `isError` means the call never finished: the agent stopped first.
+    func finish(isError: Bool?, summary: String) {
         spinner.stopAnimation(nil)
         icon.isHidden = false
-        let symbol = isError ? "xmark.circle.fill" : "checkmark.circle.fill"
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: isError ? "Failed" : "Done")?
+        let (symbol, description, color): (String, String, NSColor) = switch isError {
+        case true?: ("xmark.circle.fill", "Failed", .systemRed)
+        case false?: ("checkmark.circle.fill", "Done", .systemGreen)
+        case nil: ("minus.circle.fill", "Didn't finish", .tertiaryLabelColor)
+        }
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
             .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
-        icon.contentTintColor = isError ? .systemRed : .systemGreen
-        guard isError, !summary.isEmpty else { return }
+        icon.contentTintColor = color
+        guard isError == true, !summary.isEmpty else { return }
         let text = NSMutableAttributedString(attributedString: heading)
         text.append(NSAttributedString(string: "\n" + summary, attributes: [
             .font: NSFont.systemFont(ofSize: 11),
@@ -345,7 +350,7 @@ final class ToolRowView: NSView, TranscriptRow {
     }
 
     /// The arguments worth showing: where it acts, and what it types or runs.
-    private static func detail(_ input: [String: Any]) -> String {
+    static func detail(_ input: [String: Any]) -> String {
         var parts: [String] = []
         if let url = input["url"] { parts.append("\(url)") }
         if let ref = input["ref"] { parts.append("ref \(ref)") } else if let selector = input["selector"] { parts.append("\(selector)") }

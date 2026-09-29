@@ -1,0 +1,218 @@
+import Foundation
+
+/// A saved agent chat. The CLI keeps the conversation itself under
+/// `sessionID`; Mini keeps what the panel showed, to show it again.
+struct AgentConversation: Codable, Equatable {
+    let id: String
+    var kind: AgentKind
+    /// The first message's first line until the agent names the chat.
+    var title: String
+    var sessionID: String?
+    /// The folder the agent ran in. The CLIs keep sessions by folder, so
+    /// resuming runs there again.
+    var directory: String?
+    var created: Date
+    var updated: Date
+
+    /// The first line of the first message, shortened.
+    static func title(from text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first { !$0.allSatisfy(\.isWhitespace) } ?? ""
+        let words = line.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if words.isEmpty { return "Images" }
+        return words.count > 60 ? String(words.prefix(60)) + "…" : words
+    }
+}
+
+/// One row of a saved transcript.
+enum AgentRecord: Codable, Equatable {
+    /// `images` are file names in the chat's folder.
+    case user(text: String, images: [String])
+    case text(String)
+    /// `isError` is nil for a call that never finished.
+    case tool(name: String, detail: String, isError: Bool?, summary: String)
+    case note(String)
+    case error(String)
+}
+
+/// Agent chats, kept in `agent-chats` in the data folder: `index.json` lists
+/// them and the panel's open tabs, and each chat has a folder with its
+/// transcript and attached images.
+@MainActor
+final class AgentHistoryStore {
+    static let shared = AgentHistoryStore()
+
+    private struct Index: Codable {
+        var conversations: [AgentConversation] = []
+        /// A conversation id per open tab, or "" for a new, empty chat.
+        var tabs: [String] = []
+        var selectedTab = 0
+    }
+
+    private let directory = URL(fileURLWithPath: DataDirectory.path + "/agent-chats")
+    private var indexURL: URL { directory.appendingPathComponent("index.json") }
+    private var index: Index
+    private var indexChanged = false
+    /// Transcripts waiting to be written, by conversation id.
+    private var pendingRecords: [String: [AgentRecord]] = [:]
+    private var writeScheduled = false
+
+    private init() {
+        let data = try? Data(contentsOf: directory.appendingPathComponent("index.json"))
+        index = data.flatMap { try? JSONDecoder().decode(Index.self, from: $0) } ?? Index()
+        removeUnsavedFolders()
+    }
+
+    /// Newest first.
+    var conversations: [AgentConversation] {
+        index.conversations.sorted { $0.updated > $1.updated }
+    }
+
+    func conversation(_ id: String) -> AgentConversation? {
+        index.conversations.first { $0.id == id }
+    }
+
+    /// Adds or replaces `conversation`.
+    func save(_ conversation: AgentConversation) {
+        if let i = index.conversations.firstIndex(where: { $0.id == conversation.id }) {
+            guard index.conversations[i] != conversation else { return }
+            index.conversations[i] = conversation
+        } else {
+            index.conversations.append(conversation)
+        }
+        indexChanged = true
+        scheduleWrite()
+    }
+
+    func delete(_ id: String) {
+        index.conversations.removeAll { $0.id == id }
+        pendingRecords[id] = nil
+        indexChanged = true
+        scheduleWrite()
+        try? FileManager.default.removeItem(at: folder(for: id))
+    }
+
+    /// Where a chat keeps its transcript and images. Created when first written.
+    func folder(for id: String) -> URL {
+        directory.appendingPathComponent(id, isDirectory: true)
+    }
+
+    func records(for id: String) -> [AgentRecord] {
+        if let pending = pendingRecords[id] { return pending }
+        let data = try? Data(contentsOf: folder(for: id).appendingPathComponent("transcript.json"))
+        return data.flatMap { try? JSONDecoder().decode([AgentRecord].self, from: $0) } ?? []
+    }
+
+    func setRecords(_ records: [AgentRecord], for id: String) {
+        pendingRecords[id] = records
+        scheduleWrite()
+    }
+
+    /// Deletes the folder of a chat that was never saved, such as one that
+    /// only has images attached.
+    func discardUnsaved(_ id: String) {
+        guard conversation(id) == nil else { return }
+        try? FileManager.default.removeItem(at: folder(for: id))
+    }
+
+    // MARK: Open tabs
+
+    var openTabs: [String] { index.tabs }
+    var selectedTab: Int { index.selectedTab }
+
+    func setOpenTabs(_ tabs: [String], selected: Int) {
+        guard tabs != index.tabs || selected != index.selectedTab else { return }
+        index.tabs = tabs
+        index.selectedTab = selected
+        indexChanged = true
+        scheduleWrite()
+    }
+
+    // MARK: Writing
+
+    /// Writes pending changes now rather than after the short delay.
+    func flush() {
+        writeScheduled = false
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            for (id, records) in pendingRecords where conversation(id) != nil {
+                let folder = folder(for: id)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try Self.write(JSONEncoder().encode(records), to: folder.appendingPathComponent("transcript.json"))
+            }
+            pendingRecords.removeAll()
+            if indexChanged {
+                indexChanged = false
+                try Self.write(JSONEncoder().encode(index), to: indexURL)
+            }
+        } catch {
+            NSLog("Mini: could not save agent chats: %@", error.localizedDescription)
+        }
+    }
+
+    private static func write(_ data: Data, to url: URL) throws {
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    /// Streaming adds rows quickly, so writes wait a moment.
+    private func scheduleWrite() {
+        guard !writeScheduled else { return }
+        writeScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            MainActor.assumeIsolated {
+                guard AgentHistoryStore.shared.writeScheduled else { return }
+                AgentHistoryStore.shared.flush()
+            }
+        }
+    }
+
+    /// Folders of chats that were never saved, left by the last run, and the
+    /// images folder older versions of Mini used.
+    private func removeUnsavedFolders() {
+        let manager = FileManager.default
+        try? manager.removeItem(atPath: DataDirectory.path + "/agent-attachments")
+        let saved = Set(index.conversations.map(\.id))
+        for name in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? [] where name != "index.json" && !saved.contains(name) {
+            try? manager.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+}
+
+/// The title Claude Code or Qoder CLI gave a session, from the session file
+/// it writes under its projects folder. Nil if there is none yet.
+enum AgentSessionTitle {
+    nonisolated static func read(kind: AgentKind, sessionID: String, directory: String) -> String? {
+        let home: String
+        switch kind {
+        case .claude:
+            home = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] ?? NSHomeDirectory() + "/.claude"
+        case .qodercli:
+            home = NSHomeDirectory() + "/.qoder"
+        case .codex:
+            return nil
+        }
+        // Both name a project's folder after its path, with every character
+        // other than a letter or digit made a dash.
+        let resolved = URL(fileURLWithPath: directory).resolvingSymlinksInPath().path
+        let project = String(resolved.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" })
+        let path = "\(home)/projects/\(project)/\(sessionID).jsonl"
+        guard let file = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? file.close() }
+        // Titles are appended as they change, so the end has the latest.
+        let size = (try? file.seekToEnd()) ?? 0
+        try? file.seek(toOffset: size > 262_144 ? size - 262_144 : 0)
+        guard let data = try? file.readToEnd() else { return nil }
+        for line in data.split(separator: 0x0A).reversed() {
+            guard line.count < 4096,
+                let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
+            else { continue }
+            let title: String? = switch object["type"] as? String {
+            case "custom-title": object["customTitle"] as? String
+            case "ai-title": object["aiTitle"] as? String
+            default: nil
+            }
+            if let title, !title.isEmpty { return title }
+        }
+        return nil
+    }
+}

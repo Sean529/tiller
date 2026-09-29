@@ -153,6 +153,21 @@ enum Settings {
         agentFolder.isEmpty ? nil : NSString(string: agentFolder).expandingTildeInPath
     }
 
+    static let defaultAgentTabs = 3
+    static let agentTabsRange = 1...9
+
+    /// How many chats the agent panel keeps open in tabs at once.
+    static var agentTabs: Int {
+        get {
+            let value = defaults.integer(forKey: "agentTabs")
+            return value == 0 ? defaultAgentTabs : min(max(value, agentTabsRange.lowerBound), agentTabsRange.upperBound)
+        }
+        set {
+            defaults.set(newValue, forKey: "agentTabs")
+            NotificationCenter.default.post(name: .agentTabsDidChange, object: nil)
+        }
+    }
+
     static let defaultAgentShortcut = Shortcut(key: "s", modifiers: [.command, .shift])
 
     /// Shows and hides the agent panel. Stored as text like `shift+cmd+s`;
@@ -199,4 +214,6 @@ enum AgentTool: String, CaseIterable {
 extension Notification.Name {
     /// Posted when `AgentKind.current` changes, from the panel or from Settings.
     static let agentKindDidChange = Notification.Name("MiniAgentKindDidChange")
+    /// Posted when `Settings.agentTabs` changes.
+    static let agentTabsDidChange = Notification.Name("MiniAgentTabsDidChange")
 }
