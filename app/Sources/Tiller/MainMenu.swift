@@ -17,6 +17,8 @@ enum MainMenu {
         // Reaches the AppDelegate at the end of the responder chain.
         appMenu.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
         appMenu.addItem(withTitle: "Install Command Line Tool…", action: #selector(AppDelegate.installCommandLineTool(_:)), keyEquivalent: "")
+        // Goes to the key window's BrowserWindowController, like File's items.
+        appMenu.addItem(withTitle: "Import from Chrome…", action: #selector(BrowserWindowController.importFromChrome(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Tiller", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit Tiller", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -27,8 +29,6 @@ enum MainMenu {
         let file = NSMenu(title: "File")
         file.addItem(withTitle: "New Tab", action: #selector(BrowserWindowController.newTab(_:)), keyEquivalent: "t")
         file.addItem(withTitle: "Open Location…", action: #selector(BrowserWindowController.openLocation(_:)), keyEquivalent: "l")
-        file.addItem(.separator())
-        file.addItem(withTitle: "Import from Chrome…", action: #selector(BrowserWindowController.importFromChrome(_:)), keyEquivalent: "")
         file.addItem(.separator())
         file.addItem(withTitle: "Close Tab", action: #selector(BrowserWindowController.closeTab(_:)), keyEquivalent: "w")
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "W")

@@ -65,7 +65,7 @@ Storage: `passwords.json` in the data folder, readable only by you. Sites and us
 
 ## Import from Chrome
 
-File > Import from Chrome… brings over data from one Chrome profile. Pick the profile and any of:
+Tiller > Import from Chrome… brings over data from one Chrome profile. Pick the profile and any of:
 
 | Data | What happens |
 |---|---|
@@ -91,7 +91,7 @@ Settings > Extensions lists the profile's extensions, with each one's status:
 
 - **Add Folder…** adds a folder with `manifest.json` in it. It is loaded from where it is, so edits to it apply at the next launch, and its id is the one Chrome's Load unpacked gives the same folder.
 - **Add CRX File…** unpacks a Chrome extension package into the profile. Its key goes into the manifest, so it keeps its Web Store id and adding a newer package updates it.
-- File > Import from Chrome… brings over Chrome's (see [Import from Chrome](#import-from-chrome)).
+- Tiller > Import from Chrome… brings over Chrome's (see [Import from Chrome](#import-from-chrome)).
 - **On** turns an extension on or off, **Toolbar** pins its button to the toolbar, **Options** opens its options page in a new tab, and **Remove** takes it out. Removing a folder leaves the folder alone; removing a package deletes Tiller's copy.
 - Status is Running, Off, Starts or Stops at next launch, or an error: a manifest Tiller can't read, or one Chromium refused at launch, whose reason shows when you hover over it.
 

@@ -191,7 +191,7 @@ enum ChromeImporter {
     }
 }
 
-/// File > Import from Chrome…, shown as a sheet on the browser window.
+/// Tiller > Import from Chrome…, shown as a sheet on the browser window.
 @MainActor
 final class ChromeImportController: NSWindowController {
     private let profilePopUp = NSPopUpButton()

@@ -277,7 +277,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
 // MARK: Passwords
 
 /// Saved passwords: site and username, with buttons to copy a password or
-/// remove logins. Passwords come in through File > Import from Chrome.
+/// remove logins. Passwords come in through Tiller > Import from Chrome.
 final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private let table = NSTableView()
     private let copyButton = NSButton(title: "Copy Password", target: nil, action: nil)
@@ -353,7 +353,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         removeAllButton.isEnabled = !entries.isEmpty
         SettingsPane.show(
             entries.isEmpty
-                ? "No saved passwords. Bring them over with File > Import from Chrome…"
+                ? "No saved passwords. Bring them over with Tiller > Import from Chrome…"
                 : "\(entries.count) saved. On a page with a saved login, the key in the address bar fills it.",
             in: note
         )
@@ -517,7 +517,7 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
         removeButton.isEnabled = !table.selectedRowIndexes.isEmpty
         let text: String
         if store.entries.isEmpty {
-            text = "No extensions. Add an unpacked folder or a CRX file, or bring Chrome's over with File > Import from Chrome…"
+            text = "No extensions. Add an unpacked folder or a CRX file, or bring Chrome's over with Tiller > Import from Chrome…"
         } else if store.needsRestart {
             text = "Changes apply the next time Tiller opens."
         } else {
