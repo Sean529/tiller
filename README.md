@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="app/Resources/Tiller-1024.png" width="128" height="128" alt="Tiller icon">
+</p>
+
 # Tiller
 
 A small macOS browser built on Chromium, with a native Swift/AppKit interface and a built-in agent panel that can drive the browser.
