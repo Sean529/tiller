@@ -42,8 +42,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     private var tabs: [Tab] = []
     private var selectedTab: Tab?
+    /// Set while every tab closes for a quit or the window closing, so the
+    /// session saved just before keeps them all. A page that cancels its
+    /// beforeunload leaves tabs open, and the next thing done with the tabs
+    /// clears it.
+    private var closingAll = false
 
-    init(url: String) {
+    /// Opens the `restored` tabs, then `url` in a selected tab after them. With
+    /// no `url`, selects the restored tab at `selected`. One of the two must
+    /// give at least one tab.
+    init(restoring restored: [SessionStore.SavedTab], selected: Int, opening url: String?) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -86,21 +94,30 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         configureControls()
         tabStrip.delegate = self
         NotificationCenter.default.addObserver(self, selector: #selector(passwordsChanged(_:)), name: .passwordsDidChange, object: nil)
-        openTab(url: url, select: true)
+        for saved in restored {
+            openTab(url: saved.isBlank ? "about:blank" : saved.url, select: false, restoring: saved)
+        }
+        if let url {
+            openTab(url: url, select: true)
+        } else {
+            select(tabs[min(max(selected, 0), tabs.count - 1)])
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     // MARK: Tabs
 
-    /// Opens `url` in a new tab placed after `after`, or at the end.
+    /// Opens `url` in a new tab at `index`, or at the end. A `restoring` tab
+    /// shows its saved title and isn't saved to history again.
     @discardableResult
-    private func openTab(url: String, select: Bool, after: Tab? = nil) -> Tab {
+    private func openTab(url: String, select: Bool, at index: Int? = nil, restoring saved: SessionStore.SavedTab? = nil) -> Tab {
+        closingAll = false
         let tab = Tab()
         tab.delegate = self
+        if let saved { tab.recordedVisit = (saved.url, saved.title) }
         let panelHadFocus = agentPanel.hasKeyboardFocus
-        let index = after.flatMap { after in tabs.firstIndex { $0 === after } }.map { $0 + 1 } ?? tabs.endIndex
-        tabs.insert(tab, at: index)
+        tabs.insert(tab, at: min(index ?? tabs.endIndex, tabs.endIndex))
 
         window?.layoutIfNeeded()
         tab.hostView.frame = contentView.bounds
@@ -108,15 +125,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tab.hostView.isHidden = true
         // Under the find bar, which shares this view.
         contentView.addSubview(tab.hostView, positioned: .below, relativeTo: nil)
-        tab.start(url: url)
+        tab.start(url: url, title: saved?.title ?? "")
 
-        if select { self.select(tab) } else { tabStrip.update(tabs: tabs, selected: selectedTab) }
+        if select {
+            self.select(tab)
+        } else {
+            tabStrip.update(tabs: tabs, selected: selectedTab)
+            saveSession()
+        }
         // An agent opening a tab shouldn't take the keyboard from its panel.
         if panelHadFocus { window?.makeFirstResponder(agentPanel.input) }
         return tab
     }
 
-    private func select(_ tab: Tab) {
+    /// `resumeSaving` is false only when a closing tab hands the selection on.
+    private func select(_ tab: Tab, resumeSaving: Bool = true) {
+        if resumeSaving { closingAll = false }
         if tab !== selectedTab { hideFindBar(focusPage: false) }
         selectedTab?.hostView.isHidden = true
         selectedTab = tab
@@ -124,11 +148,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tabStrip.update(tabs: tabs, selected: tab)
         showState(of: tab)
         addressBar.setProgress(tab.progress, loading: tab.isLoading, animated: false)
+        saveSession()
         if tab.isBlank {
             openLocation(nil)
         } else {
             tab.focus()
         }
+    }
+
+    /// Asks a tab to close on the user's or an agent's behalf.
+    private func requestClose(_ tab: Tab) {
+        closingAll = false
+        tab.close()
     }
 
     /// Takes the tab out of the window once CEF has agreed to close it.
@@ -139,18 +170,39 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tab.hostView.removeFromSuperview()
         tabs.remove(at: index)
 
+        // The window closes and Mini quits with it. The session saved before
+        // still has this tab, so the next launch reopens it.
         guard !tabs.isEmpty else {
             selectedTab = nil
             tabStrip.update(tabs: [], selected: nil)
             window?.close()
             return
         }
+        if !closingAll && !tab.isBlank {
+            SessionStore.shared.pushClosedTab(.init(url: tab.url, title: tab.title), at: index)
+        }
         if tab === selectedTab {
             selectedTab = nil
-            select(tabs[min(index, tabs.count - 1)])
+            select(tabs[min(index, tabs.count - 1)], resumeSaving: false)
         } else {
             tabStrip.update(tabs: tabs, selected: selectedTab)
+            saveSession()
         }
+    }
+
+    /// Records the tabs for the next launch. Does nothing while they all close.
+    private func saveSession() {
+        guard !closingAll else { return }
+        let selected = selectedTab.flatMap { selected in tabs.firstIndex { $0 === selected } } ?? 0
+        SessionStore.shared.setOpenTabs(tabs.map { .init(url: $0.url, title: $0.title) }, selected: selected)
+    }
+
+    /// Saves the session as it stands and stops saving while every tab closes,
+    /// so the next launch gets them all back.
+    func freezeSession() {
+        saveSession()
+        closingAll = true
+        SessionStore.shared.flush()
     }
 
     private func showState(of tab: Tab) {
@@ -201,6 +253,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func tabDidChange(_ tab: Tab) {
         recordHistory(tab)
+        saveSession()
         tabStrip.refresh(tab)
         if tab === selectedTab {
             showState(of: tab)
@@ -218,7 +271,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func tab(_ tab: Tab, openInNewTab url: String, background: Bool) {
-        openTab(url: url, select: !background, after: tab)
+        openTab(url: url, select: !background, at: tabs.firstIndex { $0 === tab }.map { $0 + 1 })
     }
 
     func tabReadyToClose(_ tab: Tab) {
@@ -245,13 +298,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func tabStrip(_ strip: TabStripView, close tab: Tab) {
-        tab.close()
+        requestClose(tab)
     }
 
     func tabStrip(_ strip: TabStripView, move tab: Tab, to index: Int) {
         guard let from = tabs.firstIndex(where: { $0 === tab }), tabs.indices.contains(index) else { return }
+        closingAll = false
         tabs.insert(tabs.remove(at: from), at: index)
         tabStrip.update(tabs: tabs, selected: selectedTab)
+        saveSession()
     }
 
     // MARK: Actions (also reached from the menu through the responder chain)
@@ -261,7 +316,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     @objc func closeTab(_ sender: Any?) {
-        selectedTab?.close()
+        if let selectedTab { requestClose(selectedTab) }
+    }
+
+    /// Cmd+Shift+T: opens the last closed tab where it was.
+    @objc func reopenClosedTab(_ sender: Any?) {
+        guard let closed = SessionStore.shared.popClosedTab() else { return }
+        openTab(url: closed.tab.url, select: true, at: closed.index, restoring: closed.tab)
     }
 
     @objc func selectNextTab(_ sender: Any?) { selectTab(offset: 1) }
@@ -410,6 +471,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case #selector(goBack(_:)): selectedTab?.canGoBack ?? false
         case #selector(goForward(_:)): selectedTab?.canGoForward ?? false
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)): tabs.count > 1
+        case #selector(reopenClosedTab(_:)): SessionStore.shared.hasClosedTabs
         case #selector(fillPassword(_:)): selectedTab.map { !savedLogins(for: $0).isEmpty } ?? false
         case #selector(findNext(_:)), #selector(findPrevious(_:)): !findBar.text.isEmpty
         case #selector(actualSize(_:)): selectedTab.map { abs($0.zoomFactor - 1) > 0.001 } ?? false
@@ -424,6 +486,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// close. The window closes when its last tab is gone.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if tabs.isEmpty { return true }
+        freezeSession()
         tabs.forEach { $0.close() }
         return false
     }
@@ -441,6 +504,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func windowWillClose(_ notification: Notification) {
         agentPanel.shutDown()
+        SessionStore.shared.flush()
         onClose?()
     }
 
@@ -542,7 +606,7 @@ extension BrowserWindowController {
             return info(tab)
         case "tabs.close":
             let tab = try tab(for: params)
-            tab.close()
+            requestClose(tab)
             return ["closing": Int(tab.browserID)]
         default:
             throw ControlError("unknown method \(method)")
@@ -594,13 +658,14 @@ extension BrowserWindowController {
         guard let window else { return }
         let alert = NSAlert()
         alert.messageText = "Clear all history?"
-        alert.informativeText = "Removes every page from Mini's history, including pages imported from Chrome. Cookies and saved passwords stay."
+        alert.informativeText = "Removes every page from Mini's history, including pages imported from Chrome, and forgets recently closed tabs. Cookies and saved passwords stay."
         alert.addButton(withTitle: "Clear History")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { response in
             guard response == .alertFirstButtonReturn else { return }
             HistoryStore.shared.clear()
             MainActor.assumeIsolated {
+                SessionStore.shared.clearClosedTabs()
                 // So each open tab saves its favicon again.
                 self.tabs.forEach { $0.recordedIcon = nil }
             }

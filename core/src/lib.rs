@@ -75,6 +75,13 @@ pub extern "C" fn mini_core_run() {
     shutdown();
 }
 
+/// Sets a function run on the main thread when the app is asked to quit (Cmd+Q,
+/// the Dock, logging out), before any tab starts closing. Null clears it.
+#[unsafe(no_mangle)]
+pub extern "C" fn mini_core_set_quit_handler(handler: Option<unsafe extern "C" fn()>) {
+    app_mac::set_quit_handler(handler);
+}
+
 /// Creates a browser filling `parent_view` (an `NSView *`). Returns the browser
 /// id, or -1 on failure. Callbacks run on the main thread.
 ///

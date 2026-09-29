@@ -1,4 +1,5 @@
 import AppKit
+import CMiniCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -19,8 +20,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
 
-        let url = UserDefaults.standard.string(forKey: "url") ?? Settings.homepageURL
-        let controller = BrowserWindowController(url: url)
+        mini_core_set_quit_handler {
+            MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.quitRequested() }
+        }
+
+        // Last time's tabs, unless they were all blank. `-url` opens after them.
+        let session = SessionStore.shared
+        let restore = Settings.launchTabs == .restore && session.openTabs.contains { !$0.isBlank }
+        let restored = restore ? session.openTabs : []
+        let url = UserDefaults.standard.string(forKey: "url") ?? (restored.isEmpty ? Settings.homepageURL : nil)
+        let controller = BrowserWindowController(restoring: restored, selected: session.selectedIndex, opening: url)
         controller.onClose = { [weak self] in self?.windowController = nil }
         controller.showWindow(nil)
         windowController = controller
@@ -51,6 +60,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         #endif
+    }
+
+    /// Cmd+Q, the Dock or logging out, before the tabs start closing.
+    fileprivate func quitRequested() {
+        windowController?.freezeSession()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {

@@ -48,9 +48,10 @@ final class Tab {
     }
 
     /// Creates the browser inside `hostView`, which must already be in a window
-    /// and sized.
-    func start(url: String) {
+    /// and sized. `title` shows until the page reports its own.
+    func start(url: String, title: String = "") {
         self.url = url
+        self.title = title
         let size = hostView.bounds.size
         let callbacks = MiniBrowserCallbacks(
             ctx: Unmanaged.passUnretained(self).toOpaque(),

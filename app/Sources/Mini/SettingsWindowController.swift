@@ -119,6 +119,7 @@ class SettingsPane: NSViewController {
 
 final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     private let homepageField = NSTextField()
+    private var launchPopUp: NSPopUpButton?
     private var newTabPopUp: NSPopUpButton?
     private var searchPopUp: NSPopUpButton?
     private let templateField = NSTextField()
@@ -133,7 +134,14 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         homepageField.placeholderString = Settings.defaultHomepage
         homepageField.delegate = self
         addRow("Homepage:", Self.fixWidth(homepageField))
-        addNote(Self.note("Opens at launch, and in new tabs if set below."))
+        addNote(Self.note("Opens at launch and in new tabs, as chosen below."))
+
+        let launchPopUp = Self.popUp(
+            LaunchTabs.allCases, title: \.displayName, selected: Settings.launchTabs,
+            target: self, action: #selector(launchTabsChanged(_:))
+        )
+        self.launchPopUp = launchPopUp
+        addRow("At launch, open:", launchPopUp)
 
         let newTabPopUp = Self.popUp(
             NewTabPage.allCases, title: \.displayName, selected: Settings.newTabPage,
@@ -162,6 +170,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         super.viewWillAppear()
         homepageField.stringValue = Settings.homepage
         templateField.stringValue = Settings.searchTemplate
+        launchPopUp?.selectItem(at: LaunchTabs.allCases.firstIndex(of: Settings.launchTabs) ?? 0)
         newTabPopUp?.selectItem(at: NewTabPage.allCases.firstIndex(of: Settings.newTabPage) ?? 0)
         searchPopUp?.selectItem(at: SearchEngine.allCases.firstIndex(of: Settings.searchEngine) ?? 0)
         showTemplateState()
@@ -175,6 +184,11 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
             Settings.searchTemplate = field.stringValue
             showTemplateState()
         }
+    }
+
+    @objc private func launchTabsChanged(_ sender: NSPopUpButton) {
+        guard let tabs = (sender.selectedItem?.representedObject as? String).flatMap(LaunchTabs.init) else { return }
+        Settings.launchTabs = tabs
     }
 
     @objc private func newTabPageChanged(_ sender: NSPopUpButton) {

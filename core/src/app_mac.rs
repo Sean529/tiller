@@ -11,6 +11,16 @@ use objc2::{
 use objc2_app_kit::{NSApp, NSApplication, NSEvent};
 use std::cell::Cell;
 
+thread_local! {
+    /// Run by `terminate:` before any browser starts closing.
+    static QUIT_HANDLER: Cell<Option<unsafe extern "C" fn()>> = const { Cell::new(None) };
+}
+
+/// Sets the function run when the app is asked to quit. `None` clears it.
+pub fn set_quit_handler(handler: Option<unsafe extern "C" fn()>) {
+    QUIT_HANDLER.set(handler);
+}
+
 #[derive(Default)]
 pub struct MiniApplicationIvars {
     handling_send_event: Cell<Bool>,
@@ -40,6 +50,9 @@ define_class!(
         /// browser. The last `on_before_close` quits the message loop.
         #[unsafe(method(terminate:))]
         unsafe fn terminate(&self, _sender: Option<&AnyObject>) {
+            if let Some(handler) = QUIT_HANDLER.get() {
+                unsafe { handler() };
+            }
             crate::browser::close_all();
         }
     }

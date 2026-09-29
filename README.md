@@ -29,7 +29,7 @@ cargo run -p export-cef-dir -- --force $HOME/.local/share/cef
 ```sh
 scripts/bundle.sh            # release; pass `debug` for a debug build
 open build/Mini.app
-open build/Mini.app --args -url https://example.com   # start on another page, ignoring the homepage
+open build/Mini.app --args -url https://example.com   # also open this page, selected, after any restored tabs
 ```
 
 ## Settings
@@ -38,7 +38,8 @@ Mini > Settings… (Cmd+,) has two panes. Changes are saved as you make them.
 
 | Pane | Setting | Default | Takes effect |
 |---|---|---|---|
-| General | Homepage | `https://www.google.com/` | next launch, and new tabs if chosen below |
+| General | Homepage | `https://www.google.com/` | next launch if chosen below or there are no tabs to restore, and new tabs if chosen below |
+| General | At launch, open: Tabs from Last Time or Homepage | Tabs from Last Time | next launch |
 | General | New tabs open with: Blank Page or Homepage | Blank Page | next new tab |
 | General | Search engine: Google, Bing, DuckDuckGo or Custom | Google | next search |
 | General | Custom search URL, with `%s` for the query | empty | next search; Google is used while it isn't a valid http(s) URL with `%s` |
@@ -60,6 +61,7 @@ Mini passes two switches to Chromium:
 | Cmd+T | New tab |
 | Cmd+W | Close tab (the window closes with its last tab, and the app quits) |
 | Cmd+Shift+W | Close window |
+| Cmd+Shift+T | Reopen the last closed tab where it was |
 | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
 | Middle click on a tab | Close it |
@@ -68,6 +70,12 @@ Mini passes two switches to Chromium:
 Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
 
 Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view.
+
+Mini saves its open tabs as they change and opens them again at the next launch, however it quit: Cmd+Q, closing the window, closing the last tab, or a crash. Each tab reloads its last URL; back/forward history, scroll position and form contents aren't kept. A session of only blank tabs opens the homepage instead. Tabs are still saved when Settings says to open the homepage, so switching back restores the last run's tabs.
+
+The last 25 closed tabs are kept for Cmd+Shift+T, across restarts too. Tabs that close because the window closed or Mini quit aren't among them, since they come back at launch. Clear History… forgets them.
+
+Both are stored in `session.json` in the data folder, readable only by you.
 
 Popups and `target=_blank` links open as new tabs. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.
 
@@ -112,7 +120,7 @@ A blank tab shows your most visited sites as tiles, one per site, each opening t
 Mini keeps its own history in `history.sqlite` in its data folder. Chromium's History file can't be used: CEF has no API for it and holds it locked. A page is saved once it finishes loading, and again when its URL or title changes after that.
 
 - Typing in the address bar lists matching pages. Up and Down move through the list, Return opens the highlighted page, Escape closes the list. When the best match's address starts with what you typed, it is highlighted from the start, so Return goes there instead of searching.
-- The History menu lists the 15 most recent pages. History > Clear History… empties it, along with the start page's saved favicons.
+- The History menu lists the 15 most recent pages. History > Clear History… empties it, along with the start page's saved favicons and the recently closed tabs.
 
 ## Saved passwords
 
@@ -126,7 +134,7 @@ Storage: `passwords.json` in the data folder, readable only by you. Sites and us
 
 ## Data folder
 
-Mini keeps its profile, history, passwords and control socket in `~/Library/Application Support/Mini`. Set `MINI_DATA_DIR` to use another folder, for example to run a second Mini alongside the first. Unix socket paths are limited to 104 bytes, so for a long folder path also set `MINI_SOCKET` to a shorter socket path; the app and `mini_mcp` both read it.
+Mini keeps its profile, history, passwords, open tabs and control socket in `~/Library/Application Support/Mini`. Set `MINI_DATA_DIR` to use another folder, for example to run a second Mini alongside the first. Unix socket paths are limited to 104 bytes, so for a long folder path also set `MINI_SOCKET` to a shorter socket path; the app and `mini_mcp` both read it.
 
 Debug builds take three more launch arguments for testing the import: `-chromeDataDir <folder>` reads a Chrome data folder other than the real one, `-chromeSafeStoragePassword <password>` uses that password instead of the keychain's, and `-importChrome YES` imports everything from the last-used profile at launch and logs the result.
 

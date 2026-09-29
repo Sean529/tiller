@@ -32,6 +32,7 @@ enum MainMenu {
         file.addItem(.separator())
         file.addItem(withTitle: "Close Tab", action: #selector(BrowserWindowController.closeTab(_:)), keyEquivalent: "w")
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "W")
+        file.addItem(withTitle: "Reopen Closed Tab", action: #selector(BrowserWindowController.reopenClosedTab(_:)), keyEquivalent: "T")
         add(file, titled: "File", to: main)
 
         let edit = NSMenu(title: editTitle)

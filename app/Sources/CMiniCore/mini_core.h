@@ -36,6 +36,10 @@ int mini_core_start(void);
 // Runs the message loop until the last browser closes, then shuts CEF down.
 void mini_core_run(void);
 
+// Called on the main thread when the app is asked to quit (Cmd+Q, the Dock,
+// logging out), before any tab starts closing. NULL clears it.
+void mini_core_set_quit_handler(void (*handler)(void));
+
 // Creates a browser filling `parent_view` (an NSView *). Returns its id or -1.
 int mini_browser_create(void *parent_view, int width, int height, const char *url,
                         MiniBrowserCallbacks callbacks);

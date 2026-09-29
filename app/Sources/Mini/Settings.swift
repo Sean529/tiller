@@ -40,6 +40,19 @@ enum NewTabPage: String, CaseIterable {
     }
 }
 
+/// What opens when Mini starts.
+enum LaunchTabs: String, CaseIterable {
+    case restore
+    case homepage
+
+    var displayName: String {
+        switch self {
+        case .restore: "Tabs from Last Time"
+        case .homepage: "Homepage"
+        }
+    }
+}
+
 /// Every setting the Settings window shows, stored in the app's user defaults.
 /// Launch arguments (`-homepage https://…`) override them like any default.
 enum Settings {
@@ -56,6 +69,11 @@ enum Settings {
     /// The homepage as a URL to load.
     static var homepageURL: String {
         homepage.isEmpty ? defaultHomepage : AddressInput.url(for: homepage)
+    }
+
+    static var launchTabs: LaunchTabs {
+        get { defaults.string(forKey: "launchTabs").flatMap(LaunchTabs.init) ?? .restore }
+        set { defaults.set(newValue.rawValue, forKey: "launchTabs") }
     }
 
     static var newTabPage: NewTabPage {
