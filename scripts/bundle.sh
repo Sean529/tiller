@@ -30,7 +30,7 @@ SWIFT_OUT="$(swift build --package-path "$ROOT/app" -c "$CONFIG" --show-bin-path
 # SwiftPM doesn't track the Rust static library, so a Rust-only change would
 # not relink. Removing the executable forces the link step.
 rm -f "$SWIFT_OUT/Tiller"
-swift build --package-path "$ROOT/app" -c "$CONFIG" -Xlinker -L"$RUST_OUT"
+swift build --package-path "$ROOT/app" -c "$CONFIG" -Xlinker -L"$RUST_OUT" -Xlinker -dead_strip
 
 echo "==> assembling $APP"
 rm -rf "$APP"
@@ -71,6 +71,8 @@ PLIST
 }
 
 cp "$SWIFT_OUT/Tiller" "$APP/Contents/MacOS/Tiller"
+# Debug builds keep their symbols for the debugger.
+[ "$CONFIG" = "release" ] && strip -x "$APP/Contents/MacOS/Tiller"
 cp "$RUST_OUT/tiller_mcp" "$APP/Contents/MacOS/tiller_mcp"
 # Not in MacOS/, where `tiller` and `Tiller` would be the same file on a
 # case-insensitive disk.
@@ -80,6 +82,13 @@ write_plist "$APP/Contents" "Tiller" "$BUNDLE_ID" 0
 
 # ditto keeps the framework's symlinks and permissions intact.
 ditto "$CEF_PATH/$FRAMEWORK" "$APP/Contents/Frameworks/$FRAMEWORK"
+
+# Keep only the English and Chinese Chromium locales, and drop SwiftShader,
+# the software renderer used only when the GPU is unavailable.
+find "$APP/Contents/Frameworks/$FRAMEWORK/Resources" -maxdepth 1 -name '*.lproj' \
+    ! -name 'en.lproj' ! -name 'en_*.lproj' ! -name 'zh_CN*.lproj' ! -name 'zh_TW*.lproj' \
+    -exec rm -rf {} +
+rm -f "$APP/Contents/Frameworks/$FRAMEWORK/Libraries/"{libvk_swiftshader.dylib,libvulkan.dylib,vk_swiftshader_icd.json}
 
 for suffix in "${HELPERS[@]}"; do
     name="Tiller $suffix"

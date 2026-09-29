@@ -22,7 +22,7 @@ git checkout cef-v154.2.0+154.0.28
 cargo run -p export-cef-dir -- --force $HOME/.local/share/cef
 ```
 
-`bundle.sh` reads CEF from `$CEF_PATH`, defaulting to `~/.local/share/cef`. Keep that download in step with the `cef` version pinned in `Cargo.toml`.
+`bundle.sh` reads CEF from `$CEF_PATH`, defaulting to `~/.local/share/cef`. Keep that download in step with the `cef` version pinned in `Cargo.toml`. To keep the app small, `bundle.sh` copies only the English and Chinese Chromium locales and leaves out SwiftShader, so pages get no software rendering fallback when the GPU is unavailable.
 
 ## Build and run
 
