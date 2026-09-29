@@ -53,6 +53,19 @@ enum LaunchTabs: String, CaseIterable {
     }
 }
 
+/// Where the browser's tabs go.
+enum TabLayout: String, CaseIterable {
+    case horizontal
+    case vertical
+
+    var displayName: String {
+        switch self {
+        case .horizontal: "Along the Top"
+        case .vertical: "In a Sidebar"
+        }
+    }
+}
+
 /// Every setting the Settings window shows, stored in the current profile's
 /// user defaults. Launch arguments (`-homepage https://…`) override them like
 /// any default.
@@ -80,6 +93,20 @@ enum Settings {
     static var newTabPage: NewTabPage {
         get { defaults.string(forKey: "newTabPage").flatMap(NewTabPage.init) ?? .blank }
         set { defaults.set(newValue.rawValue, forKey: "newTabPage") }
+    }
+
+    static var tabLayout: TabLayout {
+        get { defaults.string(forKey: "tabLayout").flatMap(TabLayout.init) ?? .horizontal }
+        set {
+            defaults.set(newValue.rawValue, forKey: "tabLayout")
+            NotificationCenter.default.post(name: .tabLayoutDidChange, object: nil)
+        }
+    }
+
+    /// Whether the tab sidebar shows only icons.
+    static var sidebarCollapsed: Bool {
+        get { defaults.bool(forKey: "sidebarCollapsed") }
+        set { defaults.set(newValue, forKey: "sidebarCollapsed") }
     }
 
     static var searchEngine: SearchEngine {
@@ -217,4 +244,6 @@ extension Notification.Name {
     static let agentKindDidChange = Notification.Name("TillerAgentKindDidChange")
     /// Posted when `Settings.agentTabs` changes.
     static let agentTabsDidChange = Notification.Name("TillerAgentTabsDidChange")
+    /// Posted when `Settings.tabLayout` changes.
+    static let tabLayoutDidChange = Notification.Name("TillerTabLayoutDidChange")
 }

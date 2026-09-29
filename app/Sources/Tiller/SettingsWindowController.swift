@@ -131,6 +131,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     private let homepageField = NSTextField()
     private var launchPopUp: NSPopUpButton?
     private var newTabPopUp: NSPopUpButton?
+    private var tabLayoutPopUp: NSPopUpButton?
     private var searchPopUp: NSPopUpButton?
     private let templateField = NSTextField()
     private let templateNote = SettingsPane.note()
@@ -160,6 +161,13 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         self.newTabPopUp = newTabPopUp
         addRow("New tabs open with:", newTabPopUp)
 
+        let tabLayoutPopUp = Self.popUp(
+            TabLayout.allCases, title: \.displayName, selected: Settings.tabLayout,
+            target: self, action: #selector(tabLayoutChanged(_:))
+        )
+        self.tabLayoutPopUp = tabLayoutPopUp
+        addRow("Show tabs:", tabLayoutPopUp)
+
         let searchPopUp = Self.popUp(
             SearchEngine.allCases, title: \.displayName, selected: Settings.searchEngine,
             target: self, action: #selector(searchEngineChanged(_:))
@@ -182,6 +190,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         templateField.stringValue = Settings.searchTemplate
         launchPopUp?.selectItem(at: LaunchTabs.allCases.firstIndex(of: Settings.launchTabs) ?? 0)
         newTabPopUp?.selectItem(at: NewTabPage.allCases.firstIndex(of: Settings.newTabPage) ?? 0)
+        tabLayoutPopUp?.selectItem(at: TabLayout.allCases.firstIndex(of: Settings.tabLayout) ?? 0)
         searchPopUp?.selectItem(at: SearchEngine.allCases.firstIndex(of: Settings.searchEngine) ?? 0)
         showTemplateState()
     }
@@ -204,6 +213,11 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     @objc private func newTabPageChanged(_ sender: NSPopUpButton) {
         guard let page = (sender.selectedItem?.representedObject as? String).flatMap(NewTabPage.init) else { return }
         Settings.newTabPage = page
+    }
+
+    @objc private func tabLayoutChanged(_ sender: NSPopUpButton) {
+        guard let layout = (sender.selectedItem?.representedObject as? String).flatMap(TabLayout.init) else { return }
+        Settings.tabLayout = layout
     }
 
     @objc private func searchEngineChanged(_ sender: NSPopUpButton) {

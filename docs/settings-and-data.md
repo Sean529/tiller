@@ -11,6 +11,7 @@ Tiller > Settings… (Cmd+,) has four panes: General, Passwords, Agent and Profi
 | General | Homepage | `https://www.google.com/` | next launch if chosen below or there are no tabs to restore, and new tabs if chosen below |
 | General | At launch, open: Tabs from Last Time or Homepage | Tabs from Last Time | next launch |
 | General | New tabs open with: Blank Page or Homepage | Blank Page | next new tab |
+| General | Show tabs: Along the Top or In a Sidebar | Along the Top | right away |
 | General | Search engine: Google, Bing, DuckDuckGo or Custom | Google | next search |
 | General | Custom search URL, with `%s` for the query | empty | next search; Google is used while it isn't a valid http(s) URL with `%s` |
 | Agent | New chats use: Qoder CLI, Claude Code or Codex | Qoder CLI | next new chat; same as the picker in the panel |

@@ -1,30 +1,32 @@
 import AppKit
 
-/// The row under the tabs: a Liquid Glass capsule holding the address field,
-/// the reload/stop button and, on pages with a saved login, a key button that
-/// fills it. Used as a titlebar accessory. While a page loads, the capsule
-/// fills with a faint tint from the left, as in Safari.
+/// A Liquid Glass capsule holding a lock for secure pages, the address field
+/// and, at the end, the zoom and a key button that fills a saved login. It
+/// is a titlebar accessory under the tabs, or a toolbar item when the tabs
+/// are in the sidebar. While a page loads, the capsule fills with a faint
+/// tint from the left, as in Safari.
 final class AddressBarView: NSView {
     let field = AddressField()
-    let reloadButton = NSButton()
     let keyButton = NSButton()
     /// The page's zoom, when it isn't 100%. Clicking it resets.
     let zoomButton = NSButton()
-    private var fieldToReload: NSLayoutConstraint!
-    private var fieldToZoom: NSLayoutConstraint!
+    /// Room left at each end of the capsule.
+    var inset: CGFloat = 12 {
+        didSet {
+            capsuleLeading.constant = inset
+            capsuleTrailing.constant = -inset
+        }
+    }
 
+    private let statusIcon = NSImageView()
     private let glass = NSGlassEffectView()
     private let progressFill = NSView()
+    private var capsuleLeading: NSLayoutConstraint!
+    private var capsuleTrailing: NSLayoutConstraint!
     /// Whether the tint is tracking a load, as opposed to finishing or hidden.
     private var showsLoad = false
-    private var isLoading = false
     /// The capsule, for placing the suggestion list under it.
     var capsule: NSView { glass }
-
-    private static let reloadImage = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Reload")?
-        .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
-    private static let stopImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Stop")?
-        .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -34,18 +36,15 @@ final class AddressBarView: NSView {
         field.drawsBackground = false
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 13)
-        field.alignment = .center
         field.lineBreakMode = .byTruncatingTail
         field.usesSingleLineMode = true
         field.cell?.isScrollable = true
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         // Only Return navigates. Leaving the field must not load what it shows.
         field.cell?.sendsActionOnEndEditing = false
 
-        reloadButton.bezelStyle = .accessoryBarAction
-        reloadButton.isBordered = false
-        reloadButton.imagePosition = .imageOnly
-        reloadButton.contentTintColor = .secondaryLabelColor
-        applyLoading(false)
+        statusIcon.contentTintColor = .secondaryLabelColor
+        statusIcon.imageScaling = .scaleNone
 
         keyButton.bezelStyle = .accessoryBarAction
         keyButton.isBordered = false
@@ -63,6 +62,11 @@ final class AddressBarView: NSView {
         zoomButton.toolTip = "Actual Size"
         zoomButton.isHidden = true
 
+        // Hidden buttons give their room to the field.
+        let buttons = NSStackView(views: [zoomButton, keyButton])
+        buttons.spacing = 2
+        buttons.setContentHuggingPriority(.required, for: .horizontal)
+
         let content = NSView()
         content.wantsLayer = true
         content.layer?.cornerRadius = 15
@@ -71,7 +75,7 @@ final class AddressBarView: NSView {
         progressFill.wantsLayer = true
         progressFill.alphaValue = 0
         content.addSubview(progressFill)
-        for view in [field, reloadButton, keyButton, zoomButton] as [NSView] {
+        for view in [statusIcon, field, buttons] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -80,56 +84,35 @@ final class AddressBarView: NSView {
         glass.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glass)
 
-        let preferredWidth = glass.widthAnchor.constraint(equalToConstant: 720)
-        preferredWidth.priority = .defaultLow
+        capsuleLeading = glass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset)
+        capsuleTrailing = glass.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset)
         NSLayoutConstraint.activate([
-            glass.centerXAnchor.constraint(equalTo: centerXAnchor),
+            capsuleLeading,
+            capsuleTrailing,
             glass.centerYAnchor.constraint(equalTo: centerYAnchor),
             glass.heightAnchor.constraint(equalToConstant: 30),
-            glass.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
-            glass.widthAnchor.constraint(lessThanOrEqualToConstant: 720),
-            preferredWidth,
 
-            field.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 34),
+            statusIcon.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            statusIcon.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            statusIcon.widthAnchor.constraint(equalToConstant: 16),
+            field.leadingAnchor.constraint(equalTo: statusIcon.trailingAnchor, constant: 6),
             field.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            zoomButton.trailingAnchor.constraint(equalTo: reloadButton.leadingAnchor, constant: -2),
-            zoomButton.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            reloadButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
-            reloadButton.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            reloadButton.widthAnchor.constraint(equalToConstant: 20),
-            keyButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
-            keyButton.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            field.trailingAnchor.constraint(equalTo: buttons.leadingAnchor, constant: -4),
+            buttons.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
+            buttons.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             keyButton.widthAnchor.constraint(equalToConstant: 20),
         ])
-        fieldToReload = field.trailingAnchor.constraint(equalTo: reloadButton.leadingAnchor, constant: -6)
-        fieldToZoom = field.trailingAnchor.constraint(equalTo: zoomButton.leadingAnchor, constant: -4)
-        fieldToReload.isActive = true
+        showStatus(of: "")
     }
 
     /// Shows the zoom badge for `factor`, or hides it at 100%.
     func showZoom(_ factor: Double) {
         let percent = Int((factor * 100).rounded())
-        let hidden = percent == 100
-        if !hidden { zoomButton.title = "\(percent)%" }
-        guard zoomButton.isHidden != hidden else { return }
-        zoomButton.isHidden = hidden
-        // Off before on, so the two never hold at once.
-        (hidden ? fieldToZoom : fieldToReload).isActive = false
-        (hidden ? fieldToReload : fieldToZoom).isActive = true
+        if percent != 100 { zoomButton.title = "\(percent)%" }
+        zoomButton.isHidden = percent == 100
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    func setLoading(_ loading: Bool) {
-        guard loading != isLoading else { return }
-        applyLoading(loading)
-    }
-
-    private func applyLoading(_ loading: Bool) {
-        isLoading = loading
-        reloadButton.image = loading ? Self.stopImage : Self.reloadImage
-        reloadButton.toolTip = loading ? "Stop" : "Reload"
-    }
 
     /// Moves the load tint to `progress` (0 to 1). When `loading` turns false
     /// the tint runs to the end and fades out. Without `animated`, as when
@@ -175,23 +158,40 @@ final class AddressBarView: NSView {
     /// Shows `url` unless the user is typing. Blank pages show the placeholder.
     func show(_ url: String) {
         field.url = url
+        showStatus(of: url)
+    }
+
+    /// A lock for https, a warning for http, and a magnifying glass where
+    /// there is no page yet.
+    private func showStatus(of url: String) {
+        let (symbol, description) = if url.hasPrefix("https://") {
+            ("lock.fill", "Secure")
+        } else if url.hasPrefix("http://") {
+            ("exclamationmark.triangle", "Not Secure")
+        } else if url.isEmpty || url == "about:blank" {
+            ("magnifyingglass", "Search")
+        } else {
+            ("globe", "Page")
+        }
+        statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        statusIcon.toolTip = url.hasPrefix("http") ? description : nil
     }
 }
 
-/// The address field. At rest it shows just the site, centered; while being
-/// edited it shows the whole URL, selected, so typing replaces it.
+/// The address field. At rest it shows the whole URL with everything but the
+/// site dimmed; a click selects it all, so typing replaces it.
 final class AddressField: NSTextField {
     var url = "" {
-        didSet { if !isEditing { showSite() } }
+        didSet { if !isEditing { showURL() } }
     }
 
     var isEditing: Bool { currentEditor() != nil }
 
     override func becomeFirstResponder() -> Bool {
-        alignment = .natural
         stringValue = url == "about:blank" ? "" : url
         guard super.becomeFirstResponder() else {
-            showSite()
+            showURL()
             return false
         }
         // A click places the caret after this returns; select everything
@@ -209,7 +209,7 @@ final class AddressField: NSTextField {
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, !self.isEditing else { return }
-                self.showSite()
+                self.showURL()
             }
         }
     }
@@ -220,15 +220,26 @@ final class AddressField: NSTextField {
         currentEditor()?.selectAll(nil)
     }
 
-    private func showSite() {
-        alignment = .center
-        stringValue = Self.site(of: url)
-        toolTip = url.isEmpty || url == "about:blank" ? nil : url
+    private func showURL() {
+        let shown = url == "about:blank" ? "" : url
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let text = NSMutableAttributedString(string: shown, attributes: [
+            .font: font ?? .systemFont(ofSize: 13),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: paragraph,
+        ])
+        text.addAttribute(.foregroundColor, value: NSColor.labelColor, range: Self.siteRange(in: shown))
+        attributedStringValue = text
+        toolTip = shown.isEmpty ? nil : shown
     }
 
-    /// The host without "www." for web pages; other URLs as they are.
-    static func site(of url: String) -> String {
-        url == "about:blank" ? "" : HistoryStore.host(of: url) ?? url
+    /// The host and port of a URL with `://`, else all of it.
+    static func siteRange(in url: String) -> NSRange {
+        let whole = NSRange(url.startIndex..., in: url)
+        guard let scheme = url.range(of: "://") else { return whole }
+        let end = url[scheme.upperBound...].firstIndex { "/?#".contains($0) } ?? url.endIndex
+        return NSRange(scheme.upperBound..<end, in: url)
     }
 }
 

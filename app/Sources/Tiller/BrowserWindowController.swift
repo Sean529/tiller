@@ -1,16 +1,25 @@
 import AppKit
 
-/// One window holding a row of tabs. The toolbar has back, forward, the tabs,
-/// a new-tab button, the profile's name when there are several, and the agent
-/// panel toggle. The address bar sits in a row
-/// under it. The agent panel sits to the right of the page.
+/// One window holding the tabs. With tabs along the top, the toolbar has
+/// back, forward, reload, the tabs, a new-tab button, the profile's name when
+/// there are several, and the agent panel toggle, and the address bar sits in
+/// a row under it. With tabs in a sidebar, the address bar takes the tabs'
+/// place in the toolbar, and the page is a card between the sidebar on the
+/// left and the agent panel on the right.
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
     NSMenuItemValidation, NSSplitViewDelegate, TabDelegate, TabStripDelegate, AgentPanelDelegate
 {
     var onClose: (() -> Void)?
 
-    private let splitView = NSSplitView()
+    private let splitView = ChromeSplitView()
+    private var tabLayout = Settings.tabLayout
+    /// Holds the tabs while they are vertical. Hidden otherwise.
+    private let sidebar = TabSidebarView()
+    /// The sidebar's width while it isn't collapsed.
+    private var sidebarWidth = TabSidebarView.defaultWidth
+    private lazy var sidebarMinWidth = sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 0)
+    private lazy var sidebarMaxWidth = sidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 0)
     /// Holds every tab's view. Only the selected one is visible.
     private let contentView = NSView()
     private let agentPanel = AgentPanelView(frame: NSRect(x: 0, y: 0, width: 360, height: 600))
@@ -23,6 +32,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let addressBar = AddressBarView(frame: NSRect(x: 0, y: 0, width: 800, height: 40))
     private let backButton = NSButton()
     private let forwardButton = NSButton()
+    private let reloadButton = NSButton()
     private let newTabButton = NSButton()
     /// Names the profile and opens the Profiles menu. Hidden with one profile.
     private let profileButton = NSButton()
@@ -49,6 +59,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// The tab strip's width, kept to what the toolbar has room for. A larger
     /// preference makes the toolbar move the whole strip into its overflow menu.
     private lazy var tabStripWidth = tabStrip.widthAnchor.constraint(equalToConstant: 600)
+    private lazy var tabStripHeight = tabStrip.heightAnchor.constraint(equalToConstant: 28)
+    /// The address bar's size in the toolbar, fitted like the tab strip's.
+    private lazy var addressWidth = addressBar.widthAnchor.constraint(equalToConstant: 600)
+    private lazy var addressHeight = addressBar.heightAnchor.constraint(equalToConstant: 30)
+    /// Holds the address bar while the tabs are along the top.
+    private var addressAccessory: NSTitlebarAccessoryViewController?
 
     private var tabs: [Tab] = []
     private var selectedTab: Tab?
@@ -77,37 +93,42 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         window.delegate = self
         splitView.isVertical = true
         splitView.dividerStyle = .thin
+        splitView.addArrangedSubview(sidebar)
         splitView.addArrangedSubview(contentView)
         splitView.addArrangedSubview(agentPanel)
-        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
-        // Above the page, so the panel keeps its width when the window resizes,
-        // and under the priority of a divider drag (490), which must win.
-        splitView.setHoldingPriority(.init(260), forSubviewAt: 1)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+        // Above the page, so the sidebar and the panel keep their widths when
+        // the window resizes, and under the priority of a divider drag (490),
+        // which must win.
+        splitView.setHoldingPriority(.init(270), forSubviewAt: 0)
+        splitView.setHoldingPriority(.init(260), forSubviewAt: 2)
         splitView.delegate = self
+        sidebarMinWidth.isActive = true
+        sidebarMaxWidth.isActive = true
+        sidebar.isHidden = tabLayout != .vertical
+        sidebar.isCollapsed = Settings.sidebarCollapsed
+        let savedWidth = Settings.defaults.double(forKey: Self.sidebarWidthKey)
+        if savedWidth > 0 { sidebarWidth = savedWidth }
+        contentView.wantsLayer = true
+        contentView.layer?.cornerCurve = .continuous
         agentPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         contentView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
         agentPanel.delegate = self
         agentPanel.isHidden = !agentPanelShown
         agentPanel.wantsLayer = true
-        splitView.autosaveName = "TillerAgentSplit"
+        // Not the name used while there were two panes, whose saved widths
+        // don't fit three.
+        splitView.autosaveName = "TillerSplit"
         window.contentView = splitView
         window.toolbarStyle = .unified
-        let toolbar = NSToolbar(identifier: "TillerToolbar")
-        toolbar.delegate = self
-        toolbar.displayMode = .iconOnly
-        toolbar.allowsUserCustomization = false
-        window.toolbar = toolbar
-
-        let accessory = NSTitlebarAccessoryViewController()
-        accessory.view = addressBar
-        accessory.layoutAttribute = .bottom
-        window.addTitlebarAccessoryViewController(accessory)
 
         if !window.setFrameUsingName("TillerBrowserWindow") { window.center() }
 
         configureControls()
         tabStrip.delegate = self
+        applyTabLayout()
         NotificationCenter.default.addObserver(self, selector: #selector(passwordsChanged(_:)), name: .passwordsDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(tabLayoutChanged(_:)), name: .tabLayoutDidChange, object: nil)
         for saved in restored {
             openTab(url: saved.isBlank ? "about:blank" : saved.url, select: false, restoring: saved)
         }
@@ -221,7 +242,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     private func showState(of tab: Tab) {
         addressBar.show(tab.url)
-        addressBar.setLoading(tab.isLoading)
+        showLoading(tab.isLoading)
         backButton.isEnabled = tab.canGoBack
         forwardButton.isEnabled = tab.canGoForward
         window?.title = tab.displayTitle
@@ -321,6 +342,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tabs.insert(tabs.remove(at: from), at: index)
         tabStrip.update(tabs: tabs, selected: selectedTab)
         saveSession()
+    }
+
+    func tabStripNewTab(_ strip: TabStripView) {
+        newTab(nil)
     }
 
     // MARK: Actions (also reached from the menu through the responder chain)
@@ -434,6 +459,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         agentButton.state = agentPanelShown ? .on : .off
         agentToggleCount += 1
         let count = agentToggleCount
+        roundPage()
         if agentPanelShown {
             agentPanel.isHidden = false
             splitView.adjustSubviews()
@@ -484,6 +510,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     private static let agentVisibleKey = "agentPanelVisible"
+    private static let sidebarWidthKey = "sidebarWidth"
 
     #if DEBUG
     /// For testing without typing: `open Tiller.app --args -agentPrompt "..."`.
@@ -560,12 +587,109 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         fitTabStrip()
     }
 
-    /// Room left after the window buttons, back, forward, new tab, the profile
-    /// button and the agent button.
+    /// Room left after the window buttons, back, forward, reload, new tab, the
+    /// profile button and the agent button. The address bar gets the same in
+    /// the tabs' place, plus the new-tab button's.
     private func fitTabStrip() {
         guard let width = window?.frame.width else { return }
         let profileWidth = profileName == nil ? 0 : profileButton.fittingSize.width + 12
-        tabStripWidth.constant = max(200, width - 330 - profileWidth)
+        tabStripWidth.constant = max(200, width - 370 - profileWidth)
+        addressWidth.constant = max(200, width - 330 - profileWidth)
+    }
+
+    // MARK: Tab layout
+
+    @objc private func tabLayoutChanged(_ notification: Notification) {
+        guard Settings.tabLayout != tabLayout else { return }
+        tabLayout = Settings.tabLayout
+        applyTabLayout()
+        if let selectedTab { tabStrip.update(tabs: tabs, selected: selectedTab) }
+    }
+
+    /// Puts the tabs and the address bar where `tabLayout` has them.
+    private func applyTabLayout() {
+        guard let window else { return }
+        let vertical = tabLayout == .vertical
+        suggestions.hide()
+        if let addressAccessory, let index = window.titlebarAccessoryViewControllers.firstIndex(of: addressAccessory) {
+            window.removeTitlebarAccessoryViewController(at: index)
+        }
+        addressAccessory = nil
+        // Sizes that only hold in the toolbar.
+        tabStripWidth.isActive = !vertical
+        tabStripHeight.isActive = !vertical
+        addressWidth.isActive = vertical
+        addressHeight.isActive = vertical
+        addressBar.inset = vertical ? 0 : 12
+        tabStrip.orientation = vertical ? .vertical : .horizontal
+
+        // A toolbar per layout, since the items differ.
+        let toolbar = NSToolbar(identifier: vertical ? "TillerToolbarSidebar" : "TillerToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        window.toolbar = toolbar
+        if vertical {
+            sidebar.show(tabStrip)
+        } else {
+            addressBar.frame.size.height = 40
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.view = addressBar
+            accessory.layoutAttribute = .bottom
+            window.addTitlebarAccessoryViewController(accessory)
+            addressAccessory = accessory
+        }
+        window.titlebarSeparatorStyle = vertical ? .none : .automatic
+        splitView.hidesDividers = vertical
+        sidebar.isHidden = !vertical
+        roundPage()
+        fitSidebar()
+        fitTabStrip()
+    }
+
+    /// With tabs in the sidebar the page is a card, rounded where it meets
+    /// the sidebar and the agent panel.
+    private func roundPage() {
+        let vertical = tabLayout == .vertical
+        contentView.layer?.cornerRadius = vertical ? 10 : 0
+        contentView.layer?.masksToBounds = vertical
+        contentView.layer?.maskedCorners = agentPanelShown
+            ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMaxYCorner]
+    }
+
+    /// Gives the sidebar its collapsed width, or the one it had before.
+    private func fitSidebar() {
+        let collapsed = sidebar.isCollapsed
+        let range = TabSidebarView.widthRange
+        let width = collapsed
+            ? TabSidebarView.collapsedWidth : min(max(sidebarWidth, range.lowerBound), range.upperBound)
+        // Apart first, so the two never cross on the way.
+        sidebarMinWidth.constant = 0
+        sidebarMaxWidth.constant = collapsed ? width : range.upperBound
+        sidebarMinWidth.constant = collapsed ? width : range.lowerBound
+        guard !sidebar.isHidden else { return splitView.adjustSubviews() }
+        splitView.layoutSubtreeIfNeeded()
+        splitView.setPosition(width, ofDividerAt: 0)
+    }
+
+    @objc private func toggleSidebarCollapsed(_ sender: Any?) {
+        sidebar.isCollapsed.toggle()
+        Settings.sidebarCollapsed = sidebar.isCollapsed
+        fitSidebar()
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard !sidebar.isHidden, !sidebar.isCollapsed, sidebar.frame.width != sidebarWidth,
+            TabSidebarView.widthRange.contains(sidebar.frame.width)
+        else { return }
+        sidebarWidth = sidebar.frame.width
+        Settings.defaults.set(Double(sidebarWidth), forKey: Self.sidebarWidthKey)
+    }
+
+    private func showLoading(_ loading: Bool) {
+        reloadButton.image = NSImage(
+            systemSymbolName: loading ? "xmark" : "arrow.clockwise", accessibilityDescription: loading ? "Stop" : "Reload")
+        reloadButton.toolTip = loading ? "Stop" : "Reload"
     }
 
     /// Shows the profile's name in the toolbar and window title, or hides it
@@ -595,7 +719,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private enum Item {
         static let back = NSToolbarItem.Identifier("back")
         static let forward = NSToolbarItem.Identifier("forward")
+        static let reload = NSToolbarItem.Identifier("reload")
         static let tabs = NSToolbarItem.Identifier("tabs")
+        static let address = NSToolbarItem.Identifier("address")
         static let newTab = NSToolbarItem.Identifier("newTab")
         static let agent = NSToolbarItem.Identifier("agent")
         static let profile = NSToolbarItem.Identifier("profile")
@@ -605,6 +731,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         for (button, name, tip, action) in [
             (backButton, "chevron.left", "Back", #selector(goBack(_:))),
             (forwardButton, "chevron.right", "Forward", #selector(goForward(_:))),
+            (reloadButton, "arrow.clockwise", "Reload", #selector(reloadOrStop(_:))),
             (newTabButton, "plus", "New Tab", #selector(newTab(_:))),
             (agentButton, "sparkles", "Agent", #selector(toggleAgentPanel(_:))),
         ] {
@@ -627,8 +754,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
         addressBar.field.target = self
         addressBar.field.action = #selector(addressEntered(_:))
-        addressBar.reloadButton.target = self
-        addressBar.reloadButton.action = #selector(reloadOrStop(_:))
+        sidebar.collapseButton.target = self
+        sidebar.collapseButton.action = #selector(toggleSidebarCollapsed(_:))
         addressBar.keyButton.target = self
         addressBar.keyButton.action = #selector(fillPassword(_:))
         addressBar.zoomButton.target = self
@@ -637,7 +764,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Item.back, Item.forward, Item.tabs, Item.newTab, .flexibleSpace, Item.profile, Item.agent]
+        tabLayout == .vertical
+            ? [Item.back, Item.forward, Item.reload, Item.address, .flexibleSpace, Item.profile, Item.agent]
+            : [Item.back, Item.forward, Item.reload, Item.tabs, Item.newTab, .flexibleSpace, Item.profile, Item.agent]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -653,6 +782,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         switch id {
         case Item.back: item.view = backButton; item.label = "Back"
         case Item.forward: item.view = forwardButton; item.label = "Forward"
+        case Item.reload: item.view = reloadButton; item.label = "Reload"
         case Item.newTab: item.view = newTabButton; item.label = "New Tab"
         case Item.agent: item.view = agentButton; item.label = "Agent"
         case Item.profile:
@@ -663,8 +793,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case Item.tabs:
             item.view = tabStrip
             item.label = "Tabs"
-            tabStrip.heightAnchor.constraint(equalToConstant: 28).isActive = true
-            tabStripWidth.isActive = true
+            fitTabStrip()
+        case Item.address:
+            item.view = addressBar
+            item.label = "Address"
             fitTabStrip()
         default: return nil
         }
@@ -741,6 +873,11 @@ extension BrowserWindowController {
         _ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect, forDrawnRect drawnRect: NSRect,
         ofDividerAt dividerIndex: Int
     ) -> NSRect {
+        if dividerIndex == 0 {
+            // The sidebar's divider, grabbed from the sidebar's side.
+            guard !sidebar.isHidden, !sidebar.isCollapsed else { return .zero }
+            return NSRect(x: drawnRect.minX - 6, y: drawnRect.minY, width: drawnRect.width + 6, height: drawnRect.height)
+        }
         guard !agentPanel.isHidden else { return .zero }
         return NSRect(x: drawnRect.minX, y: drawnRect.minY, width: drawnRect.width + 6, height: drawnRect.height)
     }

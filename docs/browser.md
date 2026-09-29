@@ -13,11 +13,13 @@ How Tiller's browser features behave. Settings and storage are covered in [Setti
 | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
 | Middle click on a tab | Close it |
-| Drag a tab | Move it along the row |
+| Drag a tab | Move it along the row or the sidebar |
 
 Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
 
 Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view.
+
+Settings > General > Show tabs moves the tabs into a sidebar on the left. The address bar then takes their place in the toolbar, and the page sits as a card between the sidebar and the agent panel. A New Tab row follows the last tab, and the list scrolls when it is longer than the window. Drag the sidebar's edge to resize it, between 80 and 400 points. The button at its top collapses it to icons and expands it again. The width and the collapsed state are kept per profile.
 
 Tiller saves its open tabs as they change and opens them again at the next launch, whether it quit through Cmd+Q, a closed window, a closed last tab or a crash. Each tab reloads its last URL; back/forward history, scroll position and form contents aren't kept. A session of only blank tabs opens the homepage instead. Tabs are still saved when Settings says to open the homepage, so switching back restores the last run's tabs.
 
@@ -40,7 +42,7 @@ Find shortcuts go to the menu before the page, like the other non-Edit shortcuts
 
 ## Address bar and start page
 
-The address bar shows just the site, such as `en.wikipedia.org`. Clicking it or pressing Cmd+L shows the full URL, selected, and Escape puts it back after you've typed over it. While a page loads, the bar fills with a faint tint from the left.
+The address bar shows the full URL with everything but the site dimmed, after a lock for https pages or a warning sign for http ones. Clicking it or pressing Cmd+L selects the URL, and Escape puts it back after you've typed over it. Reload, which turns into Stop while a page loads, is in the toolbar next to Back and Forward. While a page loads, the bar fills with a faint tint from the left.
 
 A blank tab shows your most visited sites as tiles, one per site, each opening that site's most visited page. Favicons for the tiles are kept in `history.sqlite` alongside history. With no history yet, it shows a hint to use the address bar.
 
@@ -53,7 +55,7 @@ Tiller keeps its own history in `history.sqlite` in its data folder. Chromium's 
 
 ## Saved passwords
 
-Passwords come from the Chrome import; Tiller doesn't offer to save new ones. On a page with a saved login, a key button appears at the left of the address bar. Click it, or choose Edit > Fill Saved Password, to fill the username and password. With several logins for the site, a menu asks which. Logins match the page's exact origin (scheme, host and port).
+Passwords come from the Chrome import; Tiller doesn't offer to save new ones. On a page with a saved login, a key button appears at the right of the address bar. Click it, or choose Edit > Fill Saved Password, to fill the username and password. With several logins for the site, a menu asks which. Logins match the page's exact origin (scheme, host and port).
 
 Tiller never fills on its own. The agent's tools can read anything on the page, so a password you fill can be read by the agent until the page navigates away.
 
