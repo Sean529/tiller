@@ -1,18 +1,26 @@
 # Tiller
 
-A small macOS browser: Chromium (via the Rust `cef` crate) inside a native Swift/AppKit shell, with an agent side panel that drives the browser through an MCP server.
+A small macOS browser built on Chromium, with a native Swift/AppKit interface and a built-in agent panel that can drive the browser.
 
-## Layout
+## Features
 
-| Path | What it is |
-|---|---|
-| `core/` | Rust static library linked into the app. Loads CEF, owns the browsers and sets imported cookies. C header in `app/Sources/CTillerCore/tiller_core.h`. |
-| `helper/` | Rust binary for CEF subprocesses, copied into the five `Tiller Helper*.app` bundles. |
-| `mcp/` | Rust crate with the browser tools: the stdio MCP server `tiller_mcp` that the agent CLI launches, and the `tiller` command-line tool. |
-| `app/` | SwiftPM package with the AppKit app. Menu is built in code, so no Xcode or `ibtool` needed. |
-| `scripts/bundle.sh` | Builds everything and assembles an ad-hoc signed `build/Tiller.app`. |
+- **Chromium engine, native shell.** Pages render with Chromium through CEF; the window, tabs and menus are AppKit.
+- **Tabs and session restore.** Open tabs and recently closed tabs survive restarts and crashes.
+- **Import from Chrome.** Cookies, saved passwords, history, search engine and homepage.
+- **Profiles.** Each profile has its own site data, history, passwords, settings and chats, and runs as its own app instance.
+- **Agent panel.** Chat with Qoder CLI, Claude Code or Codex in a side panel that controls the browser.
+- **Browser tools.** A stdio MCP server and the `tiller` command-line tool expose the same tools to external agents and scripts.
 
-## One-time setup
+## Requirements
+
+- macOS with the Swift toolchain (Xcode Command Line Tools)
+- Rust, installed through [rustup](https://rustup.rs)
+- [Ninja](https://ninja-build.org)
+- CEF 154, matching the `cef` version pinned in `Cargo.toml`
+
+## Setup
+
+Install the toolchain and download CEF once:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -22,252 +30,50 @@ git checkout cef-v154.2.0+154.0.28
 cargo run -p export-cef-dir -- --force $HOME/.local/share/cef
 ```
 
-`bundle.sh` reads CEF from `$CEF_PATH`, defaulting to `~/.local/share/cef`. Keep that download in step with the `cef` version pinned in `Cargo.toml`. To keep the app small, `bundle.sh` copies only the English and Chinese Chromium locales and leaves out SwiftShader, so pages get no software rendering fallback when the GPU is unavailable.
+The build reads CEF from `$CEF_PATH`, which defaults to `~/.local/share/cef`. Update the download whenever the pinned `cef` version changes.
 
 ## Build and run
 
 ```sh
-scripts/bundle.sh            # release; pass `debug` for a debug build
+scripts/bundle.sh                                       # release build; pass `debug` for a debug build
 open build/Tiller.app
-open build/Tiller.app --args -url https://example.com   # also open this page, selected, after any restored tabs
+open build/Tiller.app --args -url https://example.com   # open a page at launch
 ```
 
-## Settings
+The script builds the Rust crates and the Swift app, then assembles an ad-hoc signed `build/Tiller.app`. To keep the bundle small, it includes only the English and Chinese Chromium locales and omits SwiftShader, so there is no software rendering fallback when the GPU is unavailable.
 
-Tiller > Settings… (Cmd+,) has four panes: General, Passwords, Agent and Profiles (see [Profiles](#profiles)). Changes are saved as you make them, and apply to the current profile only.
+## Driving the browser
 
-| Pane | Setting | Default | Takes effect |
-|---|---|---|---|
-| General | Homepage | `https://www.google.com/` | next launch if chosen below or there are no tabs to restore, and new tabs if chosen below |
-| General | At launch, open: Tabs from Last Time or Homepage | Tabs from Last Time | next launch |
-| General | New tabs open with: Blank Page or Homepage | Blank Page | next new tab |
-| General | Search engine: Google, Bing, DuckDuckGo or Custom | Google | next search |
-| General | Custom search URL, with `%s` for the query | empty | next search; Google is used while it isn't a valid http(s) URL with `%s` |
-| Agent | New chats use: Qoder CLI, Claude Code or Codex | Qoder CLI | next new chat; same as the picker in the panel |
-| Agent | Chat tabs: how many chats the panel keeps open at once, 1 to 9 | 3 | right away; tabs already open stay |
-| Agent | Show and hide shortcut: click, then press a combination with Cmd or Ctrl. Delete clears it; one already in a menu is refused | Cmd+Shift+S | right away |
-| Agent | Path for each CLI | empty, meaning look it up | next new chat |
-| Agent | Extra instructions, added after Tiller's system prompt | empty | next new chat |
-
-Settings live in the profile's own user defaults, `dev.sorrycc.tiller.profile.<id>`. Window position and size stay in `dev.sorrycc.tiller`, shared by every profile. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.
-
-Tiller passes two switches to Chromium:
-
-- `--use-mock-keychain`, so it never asks for the login keychain password. The cost is that cookies are encrypted with a fixed key instead of one kept in the keychain.
-- `--disable-backgrounding-occluded-windows`, so a window covered by other apps still counts as visible. Otherwise Chromium drops the agent's mouse and key input while you work elsewhere. The cost is that a covered Tiller window keeps drawing.
-
-## Tabs
-
-| Shortcut | Action |
-|---|---|
-| Cmd+T | New tab |
-| Cmd+W | Close tab (the window closes with its last tab, and the app quits) |
-| Cmd+Shift+W | Close window |
-| Cmd+Shift+T | Reopen the last closed tab where it was |
-| Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
-| Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
-| Middle click on a tab | Close it |
-| Drag a tab | Move it along the row |
-
-Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
-
-Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view.
-
-Tiller saves its open tabs as they change and opens them again at the next launch, however it quit: Cmd+Q, closing the window, closing the last tab, or a crash. Each tab reloads its last URL; back/forward history, scroll position and form contents aren't kept. A session of only blank tabs opens the homepage instead. Tabs are still saved when Settings says to open the homepage, so switching back restores the last run's tabs.
-
-The last 25 closed tabs are kept for Cmd+Shift+T, across restarts too. Tabs that close because the window closed or Tiller quit aren't among them, since they come back at launch. Clear History… forgets them.
-
-Both are stored in `session.json` in the data folder, readable only by you.
-
-Popups and `target=_blank` links open as new tabs. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.
-
-## Import from Chrome
-
-File > Import from Chrome… brings over data from one Chrome profile. Pick the profile and any of:
-
-| Data | What happens |
-|---|---|
-| Cookies | Set through Chromium's cookie manager, replacing Tiller's cookie with the same name, domain and path. Partitioned cookies (third-party embeds) are skipped because CEF can't set them, as are expired ones. |
-| Saved passwords | Stored in Tiller's password store (below). A saved login with the same site and username is replaced. Sites marked "never save" and non-web logins are skipped. |
-| History | Merged into Tiller's history. A page Tiller already has keeps its title and takes the higher visit count and later visit. |
-| Search engine and homepage | Google, Bing and DuckDuckGo map to Tiller's engines; any other engine becomes a custom search URL. Chrome's startup page becomes Tiller's homepage, or failing that its Home button page. |
-
-Re-running the import is safe: nothing is duplicated.
-
-Chrome encrypts cookies and passwords with a key in its "Chrome Safe Storage" keychain item, so macOS asks for your login password before Tiller can read it. The import reads copies of Chrome's databases, which works while Chrome is running, but cookies Chrome changed in the last 30 seconds or so may not be on disk yet.
-
-macOS may block Tiller from reading Chrome's folder at all. The sheet then says so and has a button that opens Privacy & Security > Full Disk Access, where you can allow Tiller.
-
-Some sites tie a session to the browser it started in, so they may still ask you to sign in again.
-
-## Find and zoom
-
-| Shortcut | Action |
-|---|---|
-| Cmd+F | Find in page. The bar at the top right shows the match count; Return and Shift+Return step through matches, Escape closes it |
-| Cmd+G / Cmd+Shift+G | Next / previous match |
-| Cmd+= (or Cmd+Plus) / Cmd+- | Zoom in / out |
-| Cmd+0 | Actual size |
-
-Find shortcuts go to the menu before the page, like the other non-Edit shortcuts. Zoom follows Chromium's steps and is kept per site, and the address bar shows it when it isn't 100%. Click the percentage to go back to actual size. Switching tabs closes the find bar.
-
-## Address bar and start page
-
-The address bar shows just the site, such as `en.wikipedia.org`. Clicking it or pressing Cmd+L shows the full URL, selected, and Escape puts it back after you've typed over it. While a page loads, the bar fills with a faint tint from the left.
-
-A blank tab shows your most visited sites as tiles, one per site, each opening that site's most visited page. Favicons for the tiles are kept in `history.sqlite` alongside history. With no history yet, it shows a hint to use the address bar.
-
-## History
-
-Tiller keeps its own history in `history.sqlite` in its data folder. Chromium's History file can't be used: CEF has no API for it and holds it locked. A page is saved once it finishes loading, and again when its URL or title changes after that.
-
-- Typing in the address bar lists matching pages. Up and Down move through the list, Return opens the highlighted page, Escape closes the list. When the best match's address starts with what you typed, it is highlighted from the start, so Return goes there instead of searching.
-- The History menu lists the 15 most recent pages. History > Clear History… empties it, along with the start page's saved favicons and the recently closed tabs.
-
-## Saved passwords
-
-Passwords come from the Chrome import; Tiller doesn't offer to save new ones. On a page with a saved login, a key button appears at the left of the address bar. Click it, or choose Edit > Fill Saved Password, to fill the username and password. With several logins for the site, a menu asks which. Logins match the page's exact origin (scheme, host and port).
-
-Tiller never fills on its own. The agent's tools can read anything on the page, so a password you fill can be read by the agent until the page navigates away.
-
-Settings > Passwords lists the saved logins, with buttons to copy a password or remove logins.
-
-Storage: `passwords.json` in the data folder, readable only by you. Sites and usernames are stored in the clear, as Chrome stores them, so Tiller knows which pages have a login without unlocking anything. Each password is sealed with AES-GCM under a key kept in the login keychain as "Tiller Saved Passwords", one per profile: account `key` for the default profile and `key.<id>` for the others. Tiller is ad-hoc signed, so after a rebuild macOS may ask before the new binary can read that key.
-
-## Profiles
-
-A profile has its own cookies and site data, history, open tabs, saved passwords, settings and agent chats. Each open profile runs as a separate Tiller, with its own Dock icon.
-
-- The Profiles menu lists them, with a check on the current one. Choosing another brings its Tiller forward, or starts one. New Profile… asks for a name and opens it.
-- Settings > Profiles lists them too, with buttons to open, add, rename and delete. The current profile and profiles that are open can't be deleted. Deleting moves the profile's folder to the Trash and removes its settings and password key.
-- With more than one profile, each Tiller shows its profile's name at the right of the toolbar, where clicking it opens the Profiles menu, in the Dock badge and in the window title.
-- Opening Tiller from the Dock or Finder opens the profile used last, meaning the one whose Tiller was last active. `open Tiller.app --args -profile <name or id>` opens a given one.
-- A profile can only be open once. Launching it again brings the running Tiller forward.
-- Names must differ, since `tiller --profile` picks a profile by name.
-
-## Data folder
-
-Tiller keeps its data in `~/Library/Application Support/Tiller`. Set `TILLER_DATA_DIR` to use another folder. Profiles opened from a Tiller started that way use the same folder.
-
-| Path | What it is |
-|---|---|
-| `profiles.json` | Every profile's id, name and creation date, and the id of the one used last |
-| `Profiles/<id>/` | One profile: Chromium's data, `history.sqlite`, `passwords.json`, `session.json`, `agent-chats/`, the agent's working folder and the control socket |
-
-Unix socket paths are limited to 104 bytes, so for a long folder path set `TILLER_SOCKET` to a shorter socket path. The app and `tiller_mcp` both read it. It applies to one Tiller only: profiles opened from that Tiller don't get it, since two processes can't share a socket.
-
-Before profiles, Tiller kept everything straight in the data folder. At its first launch with profiles, it moves all of it into `Profiles/default/` and moves the settings into that profile's user defaults (`ProfileMigration.swift`). If an older Tiller is running, it asks you to quit it and exits. As with the rename below, saved chats are pointed at the new folder, but Claude Code and Qoder CLI keep sessions by folder path, so chats from before can't be continued.
-
-Tiller was called Mini. At its first launch it brings over what Mini kept (`RenameMigration.swift`):
-
-- It moves `~/Library/Application Support/Mini` to `Tiller`, unless `TILLER_DATA_DIR` is set or the `Tiller` folder already exists. If Mini is running, Tiller asks you to quit it and exits. Saved chats that ran in the old folder are pointed at the new one, but Claude Code and Qoder CLI keep sessions by folder path, so those chats can't be continued.
-- It copies the `dev.sorrycc.mini` user defaults while `dev.sorrycc.tiller` has none.
-- It removes the `~/.local/bin/mini` link to a `Mini.app`. Install `tiller` again from the Tiller menu.
-- The first time it needs the password key, it copies "Mini Saved Passwords" in the keychain to "Tiller Saved Passwords", and macOS asks first.
-
-Mini's defaults and keychain item are left in place. Full Disk Access and permission to control Finder belong to the bundle id, so grant them to Tiller again.
-
-Debug builds take three more launch arguments for testing the import: `-chromeDataDir <folder>` reads a Chrome data folder other than the real one, `-chromeSafeStoragePassword <password>` uses that password instead of the keychain's, and `-importChrome YES` imports everything from the last-used profile at launch and logs the result.
-
-## Browser tools (MCP)
-
-`build/Tiller.app/Contents/MacOS/tiller_mcp` is a stdio MCP server. It talks to the running app over a Unix socket at `control.sock` in the profile's folder (only your user can open it). Tiller gives its agents that path in `TILLER_SOCKET`. Started any other way, it picks the profile named by `TILLER_PROFILE` (an id or a name), or else the one used last. `TILLER_SOCKET` overrides both.
-
-| Tool | What it does |
-|---|---|
-| `list_tabs` | Id, URL, title, loading state and selection of every tab |
-| `new_tab` | Opens a URL or search in a new tab and waits for it to load |
-| `select_tab` | Brings a tab to the front |
-| `close_tab` | Closes a tab (the page may still ask to confirm) |
-| `navigate` | Loads a URL or search and waits for the load |
-| `read_page` | Page text plus numbered links, buttons and fields |
-| `click` | Real mouse click on an element's center by `ref` or CSS `selector` |
-| `type` | Types into a field, replacing its text unless `append` is set, optionally presses Enter |
-| `screenshot` | JPEG of the visible part of the tab |
-| `eval_js` | Runs an expression in the page and returns the value as JSON |
-
-Tools act on the selected tab unless given `tab_id`. `click`, `type` and `screenshot` select their tab first, because background tabs don't draw and Chromium drops their input.
-
-`read_page` marks each element it lists with a `data-tiller-ref` attribute, which pages can see. Refs are renumbered on every call.
-
-How it's wired: tab operations (`tabs.*`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
-
-To try it without an agent:
+Agents in the panel use Tiller's browser tools automatically. External agents and scripts can use the MCP server at `build/Tiller.app/Contents/MacOS/tiller_mcp`, or the `tiller` command-line tool, installed from Tiller > Install Command Line Tool…:
 
 ```sh
-open build/Tiller.app
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_page","arguments":{}}}' \
-  | build/Tiller.app/Contents/MacOS/tiller_mcp
-```
-
-## Command-line tool
-
-`tiller` runs the same browser tools from a shell, so scripts and agents outside Tiller, such as Claude Code with its Bash tool, can drive the browser. It ships at `build/Tiller.app/Contents/Helpers/tiller`, not next to `Tiller` in `Contents/MacOS`, where the two names would be one file on a case-insensitive disk. Tiller > Install Command Line Tool… links it as `~/.local/bin/tiller` and says if that folder isn't on your PATH. Install again after moving the app.
-
-```sh
-tiller tabs                        # * marks the selected tab
-tiller new example.com             # opens a tab and waits for the load
-tiller read                        # text, then [ref] lines for links, buttons and fields
+tiller new example.com      # open a tab and wait for the load
+tiller read                 # page text with numbered links, buttons and fields
 tiller click 3
 tiller type 5 "hello" --submit
-tiller type --selector '#q' hi     # CSS selector instead of a ref
-tiller screenshot -o page.jpg      # prints the path; a temp file without -o
-tiller eval 'document.title'
-tiller close 2
-tiller --profile work tabs         # another profile's Tiller
 ```
 
-| Command | Tool |
+See [Browser tools](docs/tools.md) for every tool, command and option.
+
+## Project layout
+
+| Path | Description |
 |---|---|
-| `tabs` | `list_tabs` |
-| `new [url]` | `new_tab` |
-| `select <tab>` | `select_tab` |
-| `close <tab>` | `close_tab` |
-| `go <url>` | `navigate` |
-| `read [--max-chars N]` | `read_page` |
-| `click <ref>` | `click` |
-| `type [ref] <text> [--append] [--submit]` | `type`, into the focused element when no ref or selector is given |
-| `screenshot [-o file]` | `screenshot` |
-| `eval <expression>` | `eval_js` |
+| `core/` | Rust static library linked into the app. Loads CEF and owns the browsers. |
+| `helper/` | Rust binary for the CEF subprocesses. |
+| `mcp/` | Rust crate with the browser tools, the `tiller_mcp` MCP server and the `tiller` command-line tool. |
+| `app/` | SwiftPM package with the AppKit app. No Xcode project is required. |
+| `scripts/bundle.sh` | Builds everything and assembles `build/Tiller.app`. |
 
-`--profile <name>` controls that profile's Tiller instead of the one used last, and takes an id too. `--tab <id>` acts on another tab than the selected one, and `--json` prints the raw result instead of text. Options can come before or after the command. Refs are stored in the page, so a `read` in one call and a `click` in the next agree. Errors go to stderr with exit code 1, or 2 for bad arguments. Like `tiller_mcp`, it needs Tiller running and honors `TILLER_SOCKET` and `TILLER_PROFILE`.
+## Documentation
 
-The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and `mcp/src/bin/tiller.rs` as the CLI.
+| Guide | Covers |
+|---|---|
+| [Using the browser](docs/browser.md) | Tabs, find and zoom, address bar, history, saved passwords, Chrome import, profiles |
+| [Agent panel](docs/agent.md) | Chats, image attachments, agent permissions, Codex isolation |
+| [Browser tools](docs/tools.md) | MCP server, command-line tool, debug launch arguments |
+| [Settings and data](docs/settings-and-data.md) | Settings, Chromium switches, data folder, environment variables, migrations |
 
-## Agent panel
+## License
 
-Click the sparkles button at the right of the toolbar, or press Cmd+Shift+S, to open the agent panel. The same keys hide it, and Settings can change them. Pick Qoder CLI (the default), Claude Code or Codex from the menu at its top, or in Settings. A new chat offers a few prompts to start from. Enter sends, Option+Enter or Shift+Enter adds a line, Escape or the button in the field stops a running turn.
-
-Chats open in tabs, three by default (Settings > Agent > Chat tabs). A row above the message field has a numbered button per tab on the left: click one to switch, right-click it to close it. Each tab has its own agent process, so one can keep working while you use another; a dot on the number shows it is busy. All tabs drive the same browser, so two agents running at once can get in each other's way. On the right of the row, the plus button opens a new tab while there is room, the pencil button starts a new chat in the selected tab, and the clock button lists past chats, newest first. Picking a chat that is open switches to its tab; picking another one opens it in the selected tab. Right-click a chat in the list to delete it. Switching agents with a chat in the tab also starts a new chat.
-
-A chat is saved with its first message. Its title is the first line of that message until the agent names it: Codex sends a name, and Claude Code and Qoder CLI may write one to their session file, which Tiller reads after each turn. The open tabs come back at the next launch, and a chat from the list or from last time continues where it left off: the next message restarts the agent on its saved session (`--resume <id>`, or Codex's `thread/resume`) in the folder it first ran in. Tools and instructions come from the current Settings. Since the CLIs save these sessions, they also appear in each CLI's own resume list. If the session can't be resumed, the panel says so and the next message starts a new conversation without the earlier context. Chats are kept in `~/Library/Application Support/Tiller/agent-chats`: `index.json` lists them and the open tabs, and each chat has a folder with its transcript and images.
-
-A message can carry up to five images. Paste one with Cmd+V (a screenshot, an image copied from a page, or image files copied in Finder), drop images on the field, or pick them with the paperclip button. They show as thumbnails above the text, each with a button to remove it, and clicking a thumbnail, there or in the transcript, opens it in Quick Look. Tiller scales each image down to 2000 pixels on its long edge and saves it as PNG, or as JPEG if the PNG is over 3.5 MB, in the chat's folder. Claude Code and Qoder CLI get the image in the message, and Codex gets the file's path. The images stay with the chat and are deleted with it; images attached but never sent are deleted when the tab closes.
-
-Tiller runs Qoder CLI and Claude Code in print mode with stream-json on stdin and stdout, and Codex as `codex app-server`, which speaks JSON-RPC on stdin and stdout. The process stays alive between messages so the conversation carries over, and the CLI also saves the conversation so it can be resumed later. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code and Codex, with its markdown headings, lists, quotes, code and links rendered. Each tool call gets a row with a spinner that turns into a check, or a cross with the error. The transcript follows new output unless you've scrolled up to read.
-
-By default the agent gets Tiller's browser tools and, apart from Codex's shell, nothing else:
-
-| | Qoder CLI | Claude Code | Codex (in `thread/start`) |
-|---|---|---|---|
-| Built-in tools off | `--tools ""` and `--disallowed-tools ListAgents,SendMessage` | `--tools ""` | web search, apps, goals, sub-agents, image generation and memories off; the shell can't be removed, so it runs in a `read-only` sandbox |
-| Only Tiller's MCP server | `--mcp-config <file> --strict-mcp-config` | same | `mcp_servers.tiller` in `config`, with Tiller's own `CODEX_HOME` so your `config.toml` servers don't load |
-| Tiller's tools allowed without asking | `--allowed-tools mcp__tiller --permission-mode dont_ask` | `--allowedTools mcp__tiller --permission-mode dontAsk` | `default_tools_approval_mode = "approve"` on the server, `approvalPolicy: "never"` for everything else |
-
-The MCP config is written to `~/Library/Application Support/Tiller/agent-mcp.json` and points at the `tiller_mcp` inside the running app. The agent runs in the empty directory `~/Library/Application Support/Tiller/agent`, or in the folder set in Settings > Agent > Work in. A real project folder loads that project's instructions and settings too.
-
-Settings > Agent > Also allow turns on built-in tools, all off by default. They run without asking, and pages the agent reads can try to steer it, so turn on only what you need. Changes apply from the next new chat.
-
-| | Qoder CLI and Claude Code | Codex |
-|---|---|---|
-| Read files | `Read`, `Grep`, `Glob` | nothing changes; its shell can always read |
-| Write and edit files | `Write`, `Edit` | `workspace-write` sandbox: the shell and patches can write in the folder (and temp folders), not elsewhere |
-| Run commands | `Bash`, not sandboxed: it can do anything your user can | nothing changes; the shell is always there |
-
-The names go in `--tools` and the allow list. Qoder CLI's `dont_ask` refuses built-in tools even when allowed, so with any on Tiller uses `--permission-mode bypass_permissions`; `--tools` still limits which tools exist. The system prompt tells the agent which tools it has and not to act on instructions from pages with them. Your user settings still load, so your hooks, model choice and user-level instructions (such as `~/.claude/CLAUDE.md`) apply.
-
-Codex is set apart more. It runs with `CODEX_HOME` set to `~/Library/Application Support/Tiller/codex`, so your `~/.codex/config.toml`, its MCP servers, plugins, hooks and `AGENTS.md` don't load, and Codex uses its default model. That folder's `auth.json` is a link to `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), so Codex uses your login and a token refresh updates the file you already have. If you aren't logged in, the panel asks you to run `codex login`. Skills in `~/.agents/skills` and system hooks in `/etc/codex` still load. Threads are saved in Tiller's `CODEX_HOME`, and Tiller declines any approval or question Codex sends, since the panel can't ask you. Current Codex models call tools from a script they write, and the panel still shows each of Tiller's tools as its own row. The sandboxed shell can read files on your disk, and its commands show as `shell` rows and its patches as `edit` rows.
-
-Tiller looks for the CLI in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.bun/bin`, `~/.volta/bin`, `~/.npm-global/bin`, then asks a login shell. Shell functions and aliases are skipped, so wrappers defined in `.zshrc` don't run. To use another binary, set its path in Settings > Agent, which shows the one found automatically when the field is empty.
-
-Debug builds take three launch arguments for testing without typing: `-agentPrompt "..."` opens the panel and sends that message, `-agentStopAfter <seconds>` presses Stop after that many seconds, and `-agentPasteImage YES` pastes the clipboard into the field twice before sending the prompt three seconds later.
+[MIT](LICENSE)

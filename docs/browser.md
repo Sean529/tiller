@@ -1,0 +1,92 @@
+# Using the browser
+
+How Tiller's browser features behave. Settings and storage are covered in [Settings and data](settings-and-data.md).
+
+## Tabs
+
+| Shortcut | Action |
+|---|---|
+| Cmd+T | New tab |
+| Cmd+W | Close tab (the window closes with its last tab, and the app quits) |
+| Cmd+Shift+W | Close window |
+| Cmd+Shift+T | Reopen the last closed tab where it was |
+| Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
+| Middle click on a tab | Close it |
+| Drag a tab | Move it along the row |
+
+Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
+
+Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view.
+
+Tiller saves its open tabs as they change and opens them again at the next launch, whether it quit through Cmd+Q, a closed window, a closed last tab or a crash. Each tab reloads its last URL; back/forward history, scroll position and form contents aren't kept. A session of only blank tabs opens the homepage instead. Tabs are still saved when Settings says to open the homepage, so switching back restores the last run's tabs.
+
+The last 25 closed tabs are kept for Cmd+Shift+T, across restarts too. Tabs that close because the window closed or Tiller quit aren't among them, since they come back at launch. Clear History… forgets them.
+
+Both are stored in `session.json` in the [profile's folder](settings-and-data.md#data-folder), readable only by you.
+
+Popups and `target=_blank` links open as new tabs. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.
+
+## Find and zoom
+
+| Shortcut | Action |
+|---|---|
+| Cmd+F | Find in page. The bar at the top right shows the match count; Return and Shift+Return step through matches, Escape closes it |
+| Cmd+G / Cmd+Shift+G | Next / previous match |
+| Cmd+= (or Cmd+Plus) / Cmd+- | Zoom in / out |
+| Cmd+0 | Actual size |
+
+Find shortcuts go to the menu before the page, like the other non-Edit shortcuts. Zoom follows Chromium's steps and is kept per site, and the address bar shows it when it isn't 100%. Click the percentage to go back to actual size. Switching tabs closes the find bar.
+
+## Address bar and start page
+
+The address bar shows just the site, such as `en.wikipedia.org`. Clicking it or pressing Cmd+L shows the full URL, selected, and Escape puts it back after you've typed over it. While a page loads, the bar fills with a faint tint from the left.
+
+A blank tab shows your most visited sites as tiles, one per site, each opening that site's most visited page. Favicons for the tiles are kept in `history.sqlite` alongside history. With no history yet, it shows a hint to use the address bar.
+
+## History
+
+Tiller keeps its own history in `history.sqlite` in its data folder. Chromium's History file can't be used: CEF has no API for it and holds it locked. A page is saved once it finishes loading, and again when its URL or title changes after that.
+
+- Typing in the address bar lists matching pages. Up and Down move through the list, Return opens the highlighted page, Escape closes the list. When the best match's address starts with what you typed, it is highlighted from the start, so Return goes there instead of searching.
+- The History menu lists the 15 most recent pages. History > Clear History… empties it, along with the start page's saved favicons and the recently closed tabs.
+
+## Saved passwords
+
+Passwords come from the Chrome import; Tiller doesn't offer to save new ones. On a page with a saved login, a key button appears at the left of the address bar. Click it, or choose Edit > Fill Saved Password, to fill the username and password. With several logins for the site, a menu asks which. Logins match the page's exact origin (scheme, host and port).
+
+Tiller never fills on its own. The agent's tools can read anything on the page, so a password you fill can be read by the agent until the page navigates away.
+
+Settings > Passwords lists the saved logins, with buttons to copy a password or remove logins.
+
+Storage: `passwords.json` in the data folder, readable only by you. Sites and usernames are stored in the clear, as Chrome stores them, so Tiller knows which pages have a login without unlocking anything. Each password is sealed with AES-GCM under a key kept in the login keychain as "Tiller Saved Passwords", one per profile: account `key` for the default profile and `key.<id>` for the others. Tiller is ad-hoc signed, so after a rebuild macOS may ask before the new binary can read that key.
+
+## Import from Chrome
+
+File > Import from Chrome… brings over data from one Chrome profile. Pick the profile and any of:
+
+| Data | What happens |
+|---|---|
+| Cookies | Set through Chromium's cookie manager, replacing Tiller's cookie with the same name, domain and path. Partitioned cookies (third-party embeds) are skipped because CEF can't set them, as are expired ones. |
+| Saved passwords | Stored in Tiller's [password store](#saved-passwords). A saved login with the same site and username is replaced. Sites marked "never save" and non-web logins are skipped. |
+| History | Merged into Tiller's history. A page Tiller already has keeps its title and takes the higher visit count and later visit. |
+| Search engine and homepage | Google, Bing and DuckDuckGo map to Tiller's engines; any other engine becomes a custom search URL. Chrome's startup page becomes Tiller's homepage, or failing that its Home button page. |
+
+Re-running the import is safe: nothing is duplicated.
+
+Chrome encrypts cookies and passwords with a key in its "Chrome Safe Storage" keychain item, so macOS asks for your login password before Tiller can read it. The import reads copies of Chrome's databases, which works while Chrome is running, but cookies Chrome changed in the last 30 seconds or so may not be on disk yet.
+
+macOS may block Tiller from reading Chrome's folder at all. The sheet then says so and has a button that opens Privacy & Security > Full Disk Access, where you can allow Tiller.
+
+Some sites tie a session to the browser it started in, so they may still ask you to sign in again.
+
+## Profiles
+
+A profile has its own cookies and site data, history, open tabs, saved passwords, settings and agent chats. Each open profile runs as a separate Tiller, with its own Dock icon.
+
+- The Profiles menu lists them, with a check on the current one. Choosing another brings its Tiller forward, or starts one. New Profile… asks for a name and opens it.
+- Settings > Profiles lists them too, with buttons to open, add, rename and delete. The current profile and profiles that are open can't be deleted. Deleting moves the profile's folder to the Trash and removes its settings and password key.
+- With more than one profile, each Tiller shows its profile's name at the right of the toolbar, where clicking it opens the Profiles menu, in the Dock badge and in the window title.
+- Opening Tiller from the Dock or Finder opens the profile used last, meaning the one whose Tiller was last active. `open Tiller.app --args -profile <name or id>` opens a given one.
+- A profile can only be open once. Launching it again brings the running Tiller forward.
+- Names must differ, since [`tiller --profile`](tools.md#command-line-tool) picks a profile by name.
