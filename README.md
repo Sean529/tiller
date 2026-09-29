@@ -63,8 +63,11 @@ Mini passes two switches to Chromium:
 | Cmd+Shift+] / Cmd+Shift+[, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
 | Middle click on a tab | Close it |
+| Drag a tab | Move it along the row |
 
 Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
+
+Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view.
 
 Popups and `target=_blank` links open as new tabs. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.
 
@@ -87,12 +90,29 @@ macOS may block Mini from reading Chrome's folder at all. The sheet then says so
 
 Some sites tie a session to the browser it started in, so they may still ask you to sign in again.
 
+## Find and zoom
+
+| Shortcut | Action |
+|---|---|
+| Cmd+F | Find in page. The bar at the top right shows the match count; Return and Shift+Return step through matches, Escape closes it |
+| Cmd+G / Cmd+Shift+G | Next / previous match |
+| Cmd+= (or Cmd+Plus) / Cmd+- | Zoom in / out |
+| Cmd+0 | Actual size |
+
+Find shortcuts go to the menu before the page, like the other non-Edit shortcuts. Zoom follows Chromium's steps and is kept per site, and the address bar shows it when it isn't 100%. Click the percentage to go back to actual size. Switching tabs closes the find bar.
+
+## Address bar and start page
+
+The address bar shows just the site, such as `en.wikipedia.org`. Clicking it or pressing Cmd+L shows the full URL, selected, and Escape puts it back after you've typed over it. While a page loads, the bar fills with a faint tint from the left.
+
+A blank tab shows your most visited sites as tiles, one per site, each opening that site's most visited page. Favicons for the tiles are kept in `history.sqlite` alongside history. With no history yet, it shows a hint to use the address bar.
+
 ## History
 
 Mini keeps its own history in `history.sqlite` in its data folder. Chromium's History file can't be used: CEF has no API for it and holds it locked. A page is saved once it finishes loading, and again when its URL or title changes after that.
 
 - Typing in the address bar lists matching pages. Up and Down move through the list, Return opens the highlighted page, Escape closes the list. When the best match's address starts with what you typed, it is highlighted from the start, so Return goes there instead of searching.
-- The History menu lists the 15 most recent pages. History > Clear History… empties it.
+- The History menu lists the 15 most recent pages. History > Clear History… empties it, along with the start page's saved favicons.
 
 ## Saved passwords
 
@@ -176,9 +196,9 @@ The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and 
 
 ## Agent panel
 
-Click the sparkles button at the right of the toolbar, or press Cmd+Shift+A, to open the agent panel. Pick Qoder CLI (the default) or Claude Code from the menu at its top, or in Settings. Enter sends, Option+Enter adds a line, the button next to the field stops a running turn, and the pencil button starts a new chat. Switching agents also starts a new chat.
+Click the sparkles button at the right of the toolbar, or press Cmd+Shift+A, to open the agent panel. Pick Qoder CLI (the default) or Claude Code from the menu at its top, or in Settings. A new chat offers a few prompts to start from. Enter sends, Option+Enter or Shift+Enter adds a line, Escape or the button in the field stops a running turn, and the pencil button starts a new chat. Switching agents also starts a new chat.
 
-Mini runs the CLI in print mode with stream-json on stdin and stdout, and keeps the process alive between messages so the conversation carries over. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code, and one line per tool call that turns into ✓ or ✗ when it finishes.
+Mini runs the CLI in print mode with stream-json on stdin and stdout, and keeps the process alive between messages so the conversation carries over. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code, with its markdown headings, lists, quotes, code and links rendered. Each tool call gets a row with a spinner that turns into a check, or a cross with the error. The transcript follows new output unless you've scrolled up to read.
 
 The agent gets Mini's browser tools and nothing else:
 

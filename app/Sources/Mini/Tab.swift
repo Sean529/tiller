@@ -9,6 +9,11 @@ protocol TabDelegate: AnyObject {
     /// beforeunload passed. The delegate removes the tab, which finishes the close.
     func tabReadyToClose(_ tab: Tab)
     func tab(_ tab: Tab, performKeyEquivalent event: NSEvent) -> Bool
+    /// Load progress moved. Kept apart from `tabDidChange`, which is heavier
+    /// and fires far less often.
+    func tabProgressChanged(_ tab: Tab)
+    /// A find in the page counted `count` matches and selected the `active`th.
+    func tab(_ tab: Tab, foundMatches count: Int, active: Int, final: Bool)
 }
 
 /// One CEF browser and the view that hosts it.
@@ -24,9 +29,15 @@ final class Tab {
     private(set) var canGoBack = false
     private(set) var canGoForward = false
     private(set) var favicon: NSImage?
+    /// The favicon as the PNG CEF sent, for saving with history.
+    private(set) var faviconPNG: Data?
+    /// How much of the current load has finished, from 0 to 1.
+    private(set) var progress: Double = 1
 
     /// The URL and title last written to history, so each change is saved once.
     var recordedVisit: (url: String, title: String)?
+    /// The favicon last saved for the start page.
+    var recordedIcon: Data?
 
     var isBlank: Bool { url.isEmpty || url == "about:blank" }
 
@@ -71,6 +82,14 @@ final class Tab {
             key_equivalent: { ctx, event in
                 guard let ctx, let event else { return false }
                 return Tab.from(ctx).keyEquivalent(UInt(bitPattern: event))
+            },
+            loading_progress: { ctx, progress in
+                guard let ctx else { return }
+                Tab.from(ctx).progressChanged(progress)
+            },
+            find_result: { ctx, count, active, final in
+                guard let ctx else { return }
+                Tab.from(ctx).findResult(count: Int(count), active: Int(active), final: final)
             }
         )
         let view = Unmanaged.passUnretained(hostView).toOpaque()
@@ -88,6 +107,20 @@ final class Tab {
     func goForward() { mini_browser_go_forward(browserID) }
     func reload() { mini_browser_reload(browserID) }
     func stop() { mini_browser_stop(browserID) }
+
+    /// Zooms out (`step` < 0), back to 100% (0) or in (> 0).
+    func zoom(_ step: Int32) { mini_browser_zoom(browserID, step) }
+
+    /// The zoom as a factor, 1 for 100%.
+    var zoomFactor: Double { browserID < 0 ? 1 : mini_browser_zoom_factor(browserID) }
+
+    /// Highlights `text` in the page. With `next`, moves to the next or
+    /// previous match of the text already searched for.
+    func find(_ text: String, forward: Bool = true, next: Bool = false) {
+        mini_browser_find(browserID, text, forward, next)
+    }
+
+    func stopFinding() { mini_browser_stop_finding(browserID) }
 
     /// Runs `code` in the main frame. Does nothing once the tab has closed.
     func executeJavaScript(_ code: String) { mini_browser_execute_js(browserID, code) }
@@ -133,6 +166,8 @@ final class Tab {
 
     nonisolated private func loadingStateChanged(loading: Bool, back: Bool, forward: Bool) {
         MainActor.assumeIsolated {
+            // A new load starts from nothing rather than the last one's end.
+            if loading && !isLoading { progress = 0 }
             isLoading = loading
             canGoBack = back
             canGoForward = forward
@@ -140,8 +175,20 @@ final class Tab {
         }
     }
 
+    nonisolated private func progressChanged(_ progress: Double) {
+        MainActor.assumeIsolated {
+            self.progress = progress
+            delegate?.tabProgressChanged(self)
+        }
+    }
+
+    nonisolated private func findResult(count: Int, active: Int, final: Bool) {
+        MainActor.assumeIsolated { delegate?.tab(self, foundMatches: count, active: active, final: final) }
+    }
+
     nonisolated private func faviconChanged(_ png: Data) {
         MainActor.assumeIsolated {
+            faviconPNG = png.isEmpty ? nil : png
             favicon = png.isEmpty ? nil : NSImage(data: png)
             favicon?.size = NSSize(width: 16, height: 16)
             delegate?.tabDidChange(self)

@@ -20,6 +20,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let forwardButton = NSButton()
     private let newTabButton = NSButton()
     private lazy var suggestions = AddressSuggestions(addressBar: addressBar)
+    private lazy var findBar: FindBar = {
+        let bar = FindBar()
+        bar.onChange = { [weak self] text in self?.find(text) }
+        bar.onStep = { [weak self] forward in self?.findAgain(forward: forward) }
+        bar.onClose = { [weak self] in self?.hideFindBar(focusPage: true) }
+        return bar
+    }()
+    /// Shown over the selected tab while it is blank.
+    private lazy var startPage: StartPageView = {
+        let view = StartPageView()
+        view.onOpen = { [weak self] url in self?.openSuggestion(url) }
+        return view
+    }()
     /// The import sheet while it is up.
     private var chromeImport: ChromeImportController?
 
@@ -93,7 +106,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tab.hostView.frame = contentView.bounds
         tab.hostView.autoresizingMask = [.width, .height]
         tab.hostView.isHidden = true
-        contentView.addSubview(tab.hostView)
+        // Under the find bar, which shares this view.
+        contentView.addSubview(tab.hostView, positioned: .below, relativeTo: nil)
         tab.start(url: url)
 
         if select { self.select(tab) } else { tabStrip.update(tabs: tabs, selected: selectedTab) }
@@ -103,11 +117,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     private func select(_ tab: Tab) {
+        if tab !== selectedTab { hideFindBar(focusPage: false) }
         selectedTab?.hostView.isHidden = true
         selectedTab = tab
         tab.hostView.isHidden = false
         tabStrip.update(tabs: tabs, selected: tab)
         showState(of: tab)
+        addressBar.setProgress(tab.progress, loading: tab.isLoading, animated: false)
         if tab.isBlank {
             openLocation(nil)
         } else {
@@ -144,12 +160,33 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         forwardButton.isEnabled = tab.canGoForward
         window?.title = tab.displayTitle
         addressBar.keyButton.isHidden = savedLogins(for: tab).isEmpty
+        addressBar.showZoom(tab.zoomFactor)
+        updateStartPage(for: tab)
+    }
+
+    /// Puts the start page over `tab` while it is blank, and takes it away once
+    /// the tab goes somewhere.
+    private func updateStartPage(for tab: Tab) {
+        if tab.isBlank {
+            guard startPage.superview !== tab.hostView else { return }
+            startPage.frame = tab.hostView.bounds
+            startPage.autoresizingMask = [.width, .height]
+            tab.hostView.addSubview(startPage, positioned: .above, relativeTo: nil)
+            startPage.reload()
+        } else if startPage.superview === tab.hostView {
+            startPage.removeFromSuperview()
+        }
     }
 
     /// Saves the page to history once it has loaded, and again whenever its
     /// URL or title changes after that.
     private func recordHistory(_ tab: Tab) {
-        guard !tab.isLoading, tab.url.hasPrefix("http://") || tab.url.hasPrefix("https://") else { return }
+        guard tab.url.hasPrefix("http://") || tab.url.hasPrefix("https://") else { return }
+        if let icon = tab.faviconPNG, icon != tab.recordedIcon {
+            HistoryStore.shared.setIcon(icon, for: tab.url)
+            tab.recordedIcon = icon
+        }
+        guard !tab.isLoading else { return }
         if tab.recordedVisit?.url != tab.url {
             HistoryStore.shared.recordVisit(url: tab.url, title: tab.title)
         } else if tab.recordedVisit?.title != tab.title {
@@ -165,7 +202,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     func tabDidChange(_ tab: Tab) {
         recordHistory(tab)
         tabStrip.refresh(tab)
-        if tab === selectedTab { showState(of: tab) }
+        if tab === selectedTab {
+            showState(of: tab)
+            addressBar.setProgress(tab.progress, loading: tab.isLoading)
+        }
+    }
+
+    func tab(_ tab: Tab, foundMatches count: Int, active: Int, final: Bool) {
+        guard tab === selectedTab, findBar.superview != nil, !findBar.text.isEmpty else { return }
+        findBar.showCount((count, active))
+    }
+
+    func tabProgressChanged(_ tab: Tab) {
+        if tab === selectedTab { addressBar.setProgress(tab.progress, loading: tab.isLoading) }
     }
 
     func tab(_ tab: Tab, openInNewTab url: String, background: Bool) {
@@ -180,8 +229,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// the page keep their own undo, select all and so on.
     func tab(_ tab: Tab, performKeyEquivalent event: NSEvent) -> Bool {
         guard let menu = NSApp.mainMenu else { return false }
-        for item in menu.items where item.submenu?.title != MainMenu.editTitle {
-            if item.submenu?.performKeyEquivalent(with: event) == true { return true }
+        for item in menu.items {
+            // Of the Edit menu, only Find goes before the page.
+            let submenu = item.submenu?.title == MainMenu.editTitle
+                ? item.submenu?.item(withTitle: MainMenu.findTitle)?.submenu : item.submenu
+            if submenu?.performKeyEquivalent(with: event) == true { return true }
         }
         return false
     }
@@ -194,6 +246,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func tabStrip(_ strip: TabStripView, close tab: Tab) {
         tab.close()
+    }
+
+    func tabStrip(_ strip: TabStripView, move tab: Tab, to index: Int) {
+        guard let from = tabs.firstIndex(where: { $0 === tab }), tabs.indices.contains(index) else { return }
+        tabs.insert(tabs.remove(at: from), at: index)
+        tabStrip.update(tabs: tabs, selected: selectedTab)
     }
 
     // MARK: Actions (also reached from the menu through the responder chain)
@@ -231,6 +289,68 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     @objc func reloadPage(_ sender: Any?) { selectedTab?.reload() }
 
+    // MARK: Zoom
+
+    @objc func zoomIn(_ sender: Any?) { zoom(1) }
+    @objc func zoomOut(_ sender: Any?) { zoom(-1) }
+    @objc func actualSize(_ sender: Any?) { zoom(0) }
+
+    private func zoom(_ step: Int32) {
+        guard let tab = selectedTab else { return }
+        tab.zoom(step)
+        // Chromium applies the zoom on its next turn.
+        DispatchQueue.main.async { [weak self, weak tab] in
+            MainActor.assumeIsolated {
+                guard let self, let tab, tab === self.selectedTab else { return }
+                self.addressBar.showZoom(tab.zoomFactor)
+            }
+        }
+    }
+
+    // MARK: Find
+
+    @objc func showFindBar(_ sender: Any?) {
+        guard selectedTab != nil else { return }
+        if findBar.superview == nil {
+            findBar.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(findBar, positioned: .above, relativeTo: nil)
+            NSLayoutConstraint.activate([
+                findBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
+                findBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            ])
+            if !findBar.text.isEmpty { find(findBar.text) }
+        }
+        window?.makeFirstResponder(findBar.field)
+        findBar.field.currentEditor()?.selectAll(nil)
+    }
+
+    @objc func findNext(_ sender: Any?) { findAgain(forward: true) }
+    @objc func findPrevious(_ sender: Any?) { findAgain(forward: false) }
+
+    private func find(_ text: String) {
+        guard let tab = selectedTab else { return }
+        if text.isEmpty {
+            tab.stopFinding()
+            findBar.showCount(nil)
+        } else {
+            tab.find(text)
+        }
+    }
+
+    private func findAgain(forward: Bool) {
+        guard let tab = selectedTab, !findBar.text.isEmpty else { return showFindBar(nil) }
+        if findBar.superview == nil { showFindBar(nil) }
+        tab.find(findBar.text, forward: forward, next: true)
+    }
+
+    private func hideFindBar(focusPage: Bool) {
+        guard findBar.superview != nil else { return }
+        findBar.removeFromSuperview()
+        selectedTab?.stopFinding()
+        findBar.showCount(nil)
+        if focusPage { selectedTab?.focus() }
+    }
+
     @objc func toggleAgentPanel(_ sender: Any?) {
         agentPanel.isHidden.toggle()
         UserDefaults.standard.set(!agentPanel.isHidden, forKey: Self.agentVisibleKey)
@@ -260,15 +380,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     #endif
 
     @objc func openLocation(_ sender: Any?) {
-        window?.makeFirstResponder(addressBar.field)
+        // Already editing: keep what was typed and select it.
+        if !addressBar.field.isEditing { window?.makeFirstResponder(addressBar.field) }
         addressBar.field.currentEditor()?.selectAll(nil)
     }
 
     /// Loads a suggestion picked from the address bar's list.
     private func openSuggestion(_ url: String) {
         guard let tab = selectedTab else { return }
-        addressBar.field.stringValue = url
         tab.load(url)
+        addressBar.show(url)
         tab.focus()
     }
 
@@ -276,8 +397,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         let input = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty, let tab = selectedTab else { return }
         let url = AddressInput.url(for: input)
-        sender.stringValue = url
         tab.load(url)
+        addressBar.show(url)
         tab.focus()
     }
 
@@ -290,6 +411,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case #selector(goForward(_:)): selectedTab?.canGoForward ?? false
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)): tabs.count > 1
         case #selector(fillPassword(_:)): selectedTab.map { !savedLogins(for: $0).isEmpty } ?? false
+        case #selector(findNext(_:)), #selector(findPrevious(_:)): !findBar.text.isEmpty
+        case #selector(actualSize(_:)): selectedTab.map { abs($0.zoomFactor - 1) > 0.001 } ?? false
+        case #selector(zoomIn(_:)), #selector(zoomOut(_:)), #selector(showFindBar(_:)): selectedTab != nil
         default: true
         }
     }
@@ -354,6 +478,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         addressBar.reloadButton.action = #selector(reloadOrStop(_:))
         addressBar.keyButton.target = self
         addressBar.keyButton.action = #selector(fillPassword(_:))
+        addressBar.zoomButton.target = self
+        addressBar.zoomButton.action = #selector(actualSize(_:))
         suggestions.onOpen = { [weak self] url in self?.openSuggestion(url) }
     }
 
@@ -472,7 +598,12 @@ extension BrowserWindowController {
         alert.addButton(withTitle: "Clear History")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { response in
-            if response == .alertFirstButtonReturn { HistoryStore.shared.clear() }
+            guard response == .alertFirstButtonReturn else { return }
+            HistoryStore.shared.clear()
+            MainActor.assumeIsolated {
+                // So each open tab saves its favicon again.
+                self.tabs.forEach { $0.recordedIcon = nil }
+            }
         }
     }
 

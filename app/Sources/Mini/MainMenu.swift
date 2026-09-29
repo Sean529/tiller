@@ -4,6 +4,8 @@ import AppKit
 enum MainMenu {
     /// Shortcuts from this menu go to the page first. See `Tab`'s key handling.
     static let editTitle = "Edit"
+    /// Edit > Find, whose shortcuts go before the page's all the same.
+    static let findTitle = "Find"
 
     @MainActor
     static func build() -> NSMenu {
@@ -41,11 +43,22 @@ enum MainMenu {
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
+        let find = NSMenu(title: findTitle)
+        find.addItem(withTitle: "Find…", action: #selector(BrowserWindowController.showFindBar(_:)), keyEquivalent: "f")
+        find.addItem(withTitle: "Find Next", action: #selector(BrowserWindowController.findNext(_:)), keyEquivalent: "g")
+        find.addItem(withTitle: "Find Previous", action: #selector(BrowserWindowController.findPrevious(_:)), keyEquivalent: "G")
+        add(find, titled: findTitle, to: edit)
         edit.addItem(withTitle: "Fill Saved Password", action: #selector(BrowserWindowController.fillPassword(_:)), keyEquivalent: "")
         add(edit, titled: editTitle, to: main)
 
         let view = NSMenu(title: "View")
         view.addItem(withTitle: "Reload Page", action: #selector(BrowserWindowController.reloadPage(_:)), keyEquivalent: "r")
+        view.addItem(.separator())
+        view.addItem(withTitle: "Actual Size", action: #selector(BrowserWindowController.actualSize(_:)), keyEquivalent: "0")
+        view.addItem(withTitle: "Zoom In", action: #selector(BrowserWindowController.zoomIn(_:)), keyEquivalent: "=")
+        // Cmd+Plus (Shift+=) zooms in too, as in other browsers.
+        hidden(view, "Zoom In", #selector(BrowserWindowController.zoomIn(_:)), "+", [.command])
+        view.addItem(withTitle: "Zoom Out", action: #selector(BrowserWindowController.zoomOut(_:)), keyEquivalent: "-")
         view.addItem(.separator())
         view.addItem(withTitle: "Show Agent", action: #selector(BrowserWindowController.toggleAgentPanel(_:)), keyEquivalent: "A")
         add(view, titled: "View", to: main)

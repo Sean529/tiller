@@ -7,22 +7,31 @@ protocol AgentPanelDelegate: AnyObject {
 }
 
 /// The side panel: pick an agent, chat with it, and watch its browser tool calls.
-final class AgentPanelView: NSView {
+final class AgentPanelView: NSView, NSTextViewDelegate {
     weak var delegate: AgentPanelDelegate?
 
-    let input = NSTextField()
+    /// The message being written.
+    var input: NSView { composer.textView }
+
+    private let background = NSVisualEffectView()
     private let agentPicker = NSPopUpButton()
-    private let statusLabel = NSTextField(labelWithString: "")
+    private let status = StatusPill()
     private let newChatButton = NSButton()
-    private let sendButton = NSButton()
+    private let separator = NSBox()
     private let transcript = TranscriptView()
     private let scrollView = NSScrollView()
+    private let emptyState = AgentEmptyState()
+    private let composer = Composer()
 
     private var session: AgentSession?
     /// The text block Claude Code is streaming into, until the complete block arrives.
     private var liveText: NSTextField?
     private var liveTextBuffer = ""
-    private var toolRows: [String: ToolRow] = [:]
+    /// Streamed text is drawn at most this often, so a fast stream doesn't
+    /// re-render the whole block for every few characters.
+    private var liveTextRenderPending = false
+    private static let liveTextInterval = 0.05
+    private var toolRows: [String: ToolRowView] = [:]
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -52,52 +61,51 @@ final class AgentPanelView: NSView {
     // MARK: Layout
 
     private func build() {
+        background.material = .sidebar
+        background.blendingMode = .behindWindow
+        background.state = .followsWindowActiveState
+
         for kind in AgentKind.allCases {
             agentPicker.addItem(withTitle: kind.displayName)
             agentPicker.lastItem?.representedObject = kind.rawValue
         }
         agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: .current) ?? 0)
-        agentPicker.controlSize = .small
+        agentPicker.isBordered = false
+        agentPicker.font = .systemFont(ofSize: 13, weight: .semibold)
+        agentPicker.toolTip = "Agent for new chats"
         agentPicker.target = self
         agentPicker.action = #selector(agentChanged(_:))
 
-        statusLabel.font = .systemFont(ofSize: 11)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        newChatButton.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Chat")
+        newChatButton.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Chat")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
         newChatButton.toolTip = "New Chat"
         newChatButton.bezelStyle = .accessoryBarAction
         newChatButton.isBordered = false
+        newChatButton.contentTintColor = .secondaryLabelColor
         newChatButton.target = self
         newChatButton.action = #selector(newChat(_:))
 
+        separator.boxType = .separator
+        separator.alphaValue = 0
+
         scrollView.documentView = transcript
         scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.automaticallyAdjustsContentInsets = false
+        // Shows the header rule only once the transcript scrolls under it.
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(transcriptScrolled(_:)), name: NSView.boundsDidChangeNotification, object: scrollView.contentView
+        )
 
-        input.placeholderString = "Ask about this page…"
-        input.font = .systemFont(ofSize: 13)
-        input.usesSingleLineMode = false
-        input.cell?.wraps = true
-        input.cell?.isScrollable = false
-        input.maximumNumberOfLines = 6
-        input.lineBreakMode = .byWordWrapping
-        input.bezelStyle = .roundedBezel
-        input.target = self
-        input.action = #selector(submit(_:))
+        emptyState.onSuggestion = { [weak self] text in self?.send(text) }
 
-        sendButton.bezelStyle = .accessoryBarAction
-        sendButton.isBordered = false
-        sendButton.target = self
-        sendButton.action = #selector(sendOrStop(_:))
+        composer.textView.delegate = self
+        composer.sendButton.target = self
+        composer.sendButton.action = #selector(sendOrStop(_:))
 
-        let separator = NSBox()
-        separator.boxType = .separator
-
-        for view in [agentPicker, statusLabel, newChatButton, separator, scrollView, input, sendButton] as [NSView] {
+        for view in [background, agentPicker, status, newChatButton, scrollView, separator, emptyState, composer] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -105,12 +113,17 @@ final class AgentPanelView: NSView {
 
         let clip = scrollView.contentView
         NSLayoutConstraint.activate([
-            agentPicker.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            agentPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            statusLabel.leadingAnchor.constraint(equalTo: agentPicker.trailingAnchor, constant: 6),
-            statusLabel.centerYAnchor.constraint(equalTo: agentPicker.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: newChatButton.leadingAnchor, constant: -6),
-            newChatButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            background.topAnchor.constraint(equalTo: topAnchor),
+            background.bottomAnchor.constraint(equalTo: bottomAnchor),
+            background.leadingAnchor.constraint(equalTo: leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            agentPicker.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            agentPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            status.leadingAnchor.constraint(equalTo: agentPicker.trailingAnchor, constant: 4),
+            status.centerYAnchor.constraint(equalTo: agentPicker.centerYAnchor),
+            status.trailingAnchor.constraint(lessThanOrEqualTo: newChatButton.leadingAnchor, constant: -6),
+            newChatButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             newChatButton.centerYAnchor.constraint(equalTo: agentPicker.centerYAnchor),
 
             separator.topAnchor.constraint(equalTo: agentPicker.bottomAnchor, constant: 8),
@@ -120,21 +133,26 @@ final class AgentPanelView: NSView {
             scrollView.topAnchor.constraint(equalTo: separator.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: input.topAnchor, constant: -8),
+            scrollView.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
 
             transcript.topAnchor.constraint(equalTo: clip.topAnchor),
             transcript.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
             transcript.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
             transcript.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
 
-            input.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            input.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -6),
-            input.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            input.heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
-            sendButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            sendButton.bottomAnchor.constraint(equalTo: input.bottomAnchor, constant: -4),
-            sendButton.widthAnchor.constraint(equalToConstant: 22),
+            emptyState.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor, constant: -10),
+            emptyState.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            emptyState.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+
+            composer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            composer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            composer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
+    }
+
+    @objc private func transcriptScrolled(_ notification: Notification) {
+        let scrolled = scrollView.contentView.bounds.minY > 1
+        if (separator.alphaValue > 0) != scrolled { separator.alphaValue = scrolled ? 1 : 0 }
     }
 
     // MARK: Actions
@@ -174,27 +192,59 @@ final class AgentPanelView: NSView {
     @objc private func sendOrStop(_ sender: Any?) {
         if session?.isBusy == true {
             session?.interrupt()
-            statusLabel.stringValue = "Stopping…"
+            status.show("Stopping…", busy: true)
         } else {
-            submit(input)
+            submit()
         }
     }
 
-    /// Enter sends. Option+Enter inserts a newline (the field editor's default).
-    @objc private func submit(_ sender: NSTextField) {
-        let text = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Enter sends. Option+Enter or Shift+Enter adds a line. Escape stops a
+    /// running turn.
+    func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            let flags = NSApp.currentEvent?.modifierFlags ?? []
+            if flags.contains(.option) || flags.contains(.shift) {
+                textView.insertNewlineIgnoringFieldEditor(nil)
+            } else {
+                submit()
+            }
+            return true
+        case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+            textView.insertNewlineIgnoringFieldEditor(nil)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            guard session?.isBusy == true else { return false }
+            sendOrStop(nil)
+            return true
+        default:
+            return false
+        }
+    }
+
+    func textDidChange(_ notification: Notification) {
+        composer.textChanged()
+    }
+
+    /// The composer keeps its own undo, which a sent message clears.
+    func undoManager(for view: NSTextView) -> UndoManager? {
+        composer.undoManager
+    }
+
+    private func submit() {
+        let text = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, session?.isBusy != true else { return }
-        sender.stringValue = ""
+        composer.text = ""
         send(text)
     }
 
     func send(_ text: String) {
-
         let session = self.session ?? makeSession()
-        transcript.add(Self.bubble(text))
+        emptyState.isHidden = true
+        transcript.add(UserMessageView(text: text))
         do {
             try session.send(text, context: delegate?.agentPanelContext(self) ?? "")
-            statusLabel.stringValue = session.isRunning ? "Working…" : ""
+            if session.isRunning { status.show("Working…", busy: true) }
             setBusy(true)
         } catch {
             addError((error as? ControlError)?.message ?? error.localizedDescription)
@@ -208,42 +258,44 @@ final class AgentPanelView: NSView {
         let session = AgentSession(kind: .current)
         session.onEvent = { [weak self] event in self?.handle(event) }
         self.session = session
-        statusLabel.stringValue = "Starting \(session.kind.displayName)…"
+        status.show("Starting…", busy: true)
         return session
     }
 
     // MARK: Agent events
 
     private func handle(_ event: AgentEvent) {
+        let follow = transcript.isNearBottom(of: scrollView)
         switch event {
         case .ready(let model):
-            statusLabel.stringValue = model.map { "Working… · \($0)" } ?? "Working…"
+            status.show(model.map { "Working · \($0)" } ?? "Working…", busy: true)
         case .textStarted:
             liveTextBuffer = ""
-            let label = Self.textLabel("")
+            let label = AgentMarkdown.label("")
             liveText = label
             transcript.add(label)
         case .textDelta(let delta):
             liveTextBuffer += delta
-            liveText?.attributedStringValue = Self.markdown(liveTextBuffer)
+            scheduleLiveTextRender()
+            return
         case .text(let text):
             if let liveText {
-                liveText.attributedStringValue = Self.markdown(text)
+                liveText.attributedStringValue = AgentMarkdown.render(text)
                 self.liveText = nil
             } else {
-                transcript.add(Self.textLabel(text))
+                transcript.add(AgentMarkdown.label(text))
             }
         case .toolUse(let id, let name, let input):
-            let row = ToolRow(name: name, input: input)
+            let row = ToolRowView(name: name, input: input)
             toolRows[id] = row
-            transcript.add(row.label)
+            transcript.add(row)
         case .toolResult(let id, let isError, let summary):
             toolRows.removeValue(forKey: id)?.finish(isError: isError, summary: summary)
         case .retrying:
-            statusLabel.stringValue = "Retrying…"
+            status.show("Retrying…", busy: true)
         case .turnFinished(let error, let stopped):
             if let error { addError(error) }
-            if stopped { addNote("Stopped.") }
+            if stopped { addNote("Stopped") }
             liveText = nil
             showIdle()
         case .exited(let message):
@@ -253,39 +305,51 @@ final class AgentPanelView: NSView {
             toolRows.removeAll()
             showIdle()
         }
-        scrollToBottom()
+        if follow { scrollToBottom() }
+    }
+
+    private func scheduleLiveTextRender() {
+        guard !liveTextRenderPending else { return }
+        liveTextRenderPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.liveTextInterval) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.liveTextRenderPending = false
+                guard let liveText = self.liveText else { return }
+                let follow = self.transcript.isNearBottom(of: self.scrollView)
+                liveText.attributedStringValue = AgentMarkdown.render(self.liveTextBuffer)
+                if follow { self.scrollToBottom() }
+            }
+        }
     }
 
     private func showIdle() {
         setBusy(false)
         let kind = session?.kind ?? .current
-        statusLabel.stringValue = session == nil ? "" : "Ready"
-        input.placeholderString = "Ask \(kind.displayName) about this page…"
+        if session == nil {
+            status.show("", busy: false)
+        } else {
+            status.show("Ready", busy: false)
+        }
+        composer.placeholder = "Ask \(kind.displayName) about this page…"
+        emptyState.agentName = kind.displayName
+        emptyState.isHidden = !transcript.isEmpty
     }
 
     private func setBusy(_ busy: Bool) {
-        let name = busy ? "stop.circle.fill" : "arrow.up.circle.fill"
-        sendButton.image = NSImage(systemSymbolName: name, accessibilityDescription: busy ? "Stop" : "Send")?
-            .withSymbolConfiguration(.init(pointSize: 18, weight: .regular))
-        sendButton.toolTip = busy ? "Stop" : "Send"
-        sendButton.contentTintColor = busy ? .secondaryLabelColor : .controlAccentColor
+        composer.isBusy = busy
     }
 
     private func addNote(_ message: String) {
-        let label = NSTextField(wrappingLabelWithString: message)
-        label.textColor = .secondaryLabelColor
-        label.font = .systemFont(ofSize: 12)
-        transcript.add(label)
+        transcript.add(NoteView(text: message))
     }
 
     private func addError(_ message: String) {
-        let label = NSTextField(wrappingLabelWithString: message)
-        label.textColor = .systemRed
-        label.font = .systemFont(ofSize: 12)
-        label.isSelectable = true
-        transcript.add(label)
+        transcript.add(ErrorMessageView(text: message))
     }
 
+    /// Keeps the newest message in view. Agent events call this only when the
+    /// user hasn't scrolled up to read something.
     private func scrollToBottom() {
         layoutSubtreeIfNeeded()
         let clip = scrollView.contentView
@@ -293,151 +357,378 @@ final class AgentPanelView: NSView {
         clip.scroll(to: NSPoint(x: 0, y: y))
         scrollView.reflectScrolledClipView(clip)
     }
-
-    // MARK: Rows
-
-    static func textLabel(_ text: String) -> NSTextField {
-        let label = NSTextField(wrappingLabelWithString: "")
-        label.attributedStringValue = markdown(text)
-        label.isSelectable = true
-        return label
-    }
-
-    /// Inline markdown (bold, code, links). Block syntax stays as typed.
-    static func markdown(_ text: String) -> NSAttributedString {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        let parsed = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
-        let result = NSMutableAttributedString(parsed)
-        let whole = NSRange(location: 0, length: result.length)
-        result.addAttribute(.font, value: NSFont.systemFont(ofSize: 13), range: whole)
-        result.addAttribute(.foregroundColor, value: NSColor.labelColor, range: whole)
-        result.enumerateAttribute(.inlinePresentationIntent, in: whole) { value, range, _ in
-            guard let raw = value as? UInt else { return }
-            let intent = InlinePresentationIntent(rawValue: raw)
-            if intent.contains(.code) {
-                result.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), range: range)
-            } else if intent.contains(.stronglyEmphasized) {
-                result.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 13), range: range)
-            }
-        }
-        return result
-    }
-
-    static func bubble(_ text: String) -> NSView {
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 13)
-        label.isSelectable = true
-        return BubbleView(label: label)
-    }
 }
 
-/// One tool call: "◦ navigate example.com", then ✓ or ✗ with the first line of the result.
-@MainActor
-final class ToolRow {
-    let label = NSTextField(wrappingLabelWithString: "")
-    private let title: String
+// MARK: Header
 
-    init(name: String, input: [String: Any]) {
-        let tool = name.hasPrefix("mcp__mini__") ? String(name.dropFirst("mcp__mini__".count)) : name
-        let detail = Self.detail(input)
-        title = detail.isEmpty ? tool : "\(tool)  \(detail)"
-        label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        label.textColor = .secondaryLabelColor
-        label.stringValue = "◦ " + title
-    }
-
-    func finish(isError: Bool, summary: String) {
-        if isError {
-            label.stringValue = "✗ \(title)\n  \(summary)"
-            label.textColor = .systemRed
-        } else {
-            label.stringValue = "✓ " + title
-        }
-    }
-
-    /// The arguments worth showing: where it acts, and what it types or runs.
-    private static func detail(_ input: [String: Any]) -> String {
-        var parts: [String] = []
-        if let url = input["url"] { parts.append("\(url)") }
-        if let ref = input["ref"] { parts.append("ref \(ref)") } else if let selector = input["selector"] { parts.append("\(selector)") }
-        if let text = input["text"] { parts.append("\"\(text)\"") }
-        if let expression = input["expression"] { parts.append("\(expression)") }
-        if parts.isEmpty, let tab = input["tab_id"] { parts.append("tab \(tab)") }
-        let string = parts.joined(separator: " ").replacingOccurrences(of: "\n", with: " ")
-        return string.count > 80 ? String(string.prefix(80)) + "…" : string
-    }
-}
-
-/// A user message: text on a tinted rounded background.
-final class BubbleView: NSView {
-    init(label: NSTextField) {
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 10
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func updateLayer() {
-        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
-    }
-
-    override var wantsUpdateLayer: Bool { true }
-}
-
-/// The scrolling column of messages. Flipped so rows stack from the top.
-final class TranscriptView: NSView {
-    private let stack = NSStackView()
-    private static let inset: CGFloat = 12
-
-    override var isFlipped: Bool { true }
+/// Where the agent is at: a dot, pulsing while it works, and a short label.
+private final class StatusPill: NSView {
+    private let dot = NSView()
+    private let label = NSTextField(labelWithString: "")
+    private var busy = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 3
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for view in [dot, label] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor),
+            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 6),
+            dot.heightAnchor.constraint(equalToConstant: 6),
+            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor),
+            label.topAnchor.constraint(equalTo: topAnchor),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ text: String, busy: Bool) {
+        label.stringValue = text
+        isHidden = text.isEmpty
+        toolTip = text
+        guard busy != self.busy else { return }
+        self.busy = busy
+        needsDisplay = true
+        dot.layer?.removeAnimation(forKey: "pulse")
+        if busy {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1
+            pulse.toValue = 0.25
+            pulse.duration = 0.8
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            dot.layer?.add(pulse, forKey: "pulse")
+        }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        dot.layer?.backgroundColor = (busy ? NSColor.controlAccentColor : NSColor.systemGreen).cgColor
+    }
+}
+
+// MARK: Empty state
+
+/// What a new chat shows: what the agent can do, and a few things to ask.
+private final class AgentEmptyState: NSView {
+    var onSuggestion: ((String) -> Void)?
+    var agentName = "" {
+        didSet { title.stringValue = "Ask \(agentName)" }
+    }
+
+    private let title = NSTextField(labelWithString: "")
+
+    private static let suggestions: [(symbol: String, text: String)] = [
+        ("text.alignleft", "Summarize this page"),
+        ("list.bullet", "List the key points"),
+        ("magnifyingglass", "Find related pages"),
+    ]
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        let badge = SymbolBadge(symbol: "sparkles")
+
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.alignment = .center
+
+        let subtitle = NSTextField(wrappingLabelWithString: "It can read the page, click, type and open tabs for you.")
+        subtitle.font = .systemFont(ofSize: 12)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.alignment = .center
+        subtitle.preferredMaxLayoutWidth = 240
+
+        let buttons = NSStackView()
+        buttons.orientation = .vertical
+        buttons.alignment = .centerX
+        buttons.spacing = 6
+        for (symbol, text) in Self.suggestions {
+            let button = SuggestionButton(symbol: symbol, title: text) { [weak self] in self?.onSuggestion?(text) }
+            buttons.addArrangedSubview(button)
+            // One width for all, so the column reads as a list.
+            button.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        }
+
+        let stack = NSStackView(views: [badge, title, subtitle, buttons])
         stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
+        stack.alignment = .centerX
+        stack.spacing = 8
+        stack.setCustomSpacing(12, after: badge)
+        stack.setCustomSpacing(18, after: subtitle)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: Self.inset),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.inset),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+/// An SF Symbol on a soft accent-colored circle.
+private final class SymbolBadge: NSView {
+    init(symbol: String) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        let image = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
+            .withSymbolConfiguration(.init(pointSize: 20, weight: .medium))!)
+        image.contentTintColor = .controlAccentColor
+        image.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(image)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 48),
+            heightAnchor.constraint(equalToConstant: 48),
+            image.centerXAnchor.constraint(equalTo: centerXAnchor),
+            image.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func add(_ row: NSView) {
-        stack.addArrangedSubview(row)
-        row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        needsLayout = true
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = 24
+        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+    }
+}
+
+/// A rounded, lightly filled button with an icon and a prompt, which
+/// highlights on hover.
+private final class SuggestionButton: NSView {
+    private let action: () -> Void
+    private var isHovered = false { didSet { needsDisplay = true } }
+    private var isPressed = false { didSet { needsDisplay = true } }
+
+    init(symbol: String, title: String, action: @escaping () -> Void) {
+        self.action = action
+        super.init(frame: .zero)
+        wantsLayer = true
+        let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!)
+        icon.contentTintColor = .secondaryLabelColor
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 12)
+        let stack = NSStackView(views: [icon, label])
+        stack.spacing = 7
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+        ])
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(title)
     }
 
-    func clear() {
-        for view in stack.arrangedSubviews { view.removeFromSuperview() }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = 14
+        layer?.cornerCurve = .continuous
+        let alpha = isPressed ? 0.14 : isHovered ? 0.09 : 0.05
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.cgColor
     }
 
-    /// Wrapping labels need a max width to report their height.
-    override func layout() {
-        let width = bounds.width - 2 * Self.inset
-        for label in labels(in: stack) {
-            let max = label.superview is BubbleView ? width - 20 : width
-            if label.preferredMaxLayoutWidth != max { label.preferredMaxLayoutWidth = max }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func mouseDown(with event: NSEvent) { isPressed = true }
+
+    override func mouseUp(with event: NSEvent) {
+        isPressed = false
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { action() }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        action()
+        return true
+    }
+}
+
+// MARK: Composer
+
+/// The message field: a rounded box whose text grows with what is typed, up
+/// to a few lines, with the send/stop button in its corner.
+private final class Composer: NSView {
+    let textView = PlaceholderTextView()
+    let sendButton = NSButton()
+    private let undo = UndoManager()
+    private let scrollView = NSScrollView()
+    private var textHeight: NSLayoutConstraint!
+
+    private static let font = NSFont.systemFont(ofSize: 13)
+    private static let maxLines: CGFloat = 8
+    private static let sendImage = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: "Send")?
+        .withSymbolConfiguration(.init(pointSize: 22, weight: .regular))
+    private static let stopImage = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "Stop")?
+        .withSymbolConfiguration(.init(pointSize: 22, weight: .regular))
+
+    var text: String {
+        get { textView.string }
+        set {
+            textView.string = newValue
+            // Typing undo steps refer to the old text.
+            undo.removeAllActions()
+            textChanged()
         }
-        super.layout()
     }
 
-    private func labels(in view: NSView) -> [NSTextField] {
-        view.subviews.flatMap { ($0 as? NSTextField).map { [$0] } ?? labels(in: $0) }
+    override var undoManager: UndoManager? { undo }
+
+    var placeholder: String {
+        get { textView.placeholder }
+        set { textView.placeholder = newValue }
+    }
+
+    var isBusy = false {
+        didSet { updateSendButton() }
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+
+        textView.font = Self.font
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.textContainerInset = NSSize(width: 0, height: 0)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.onFocusChange = { [weak self] in self?.needsDisplay = true }
+
+        scrollView.documentView = textView
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+
+        sendButton.isBordered = false
+        sendButton.bezelStyle = .accessoryBarAction
+        sendButton.imagePosition = .imageOnly
+        updateSendButton()
+
+        for view in [scrollView, sendButton] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        textHeight = scrollView.heightAnchor.constraint(equalToConstant: Self.lineHeight)
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            scrollView.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -6),
+            textHeight,
+            sendButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            sendButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            sendButton.widthAnchor.constraint(equalToConstant: 26),
+            sendButton.heightAnchor.constraint(equalToConstant: 26),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private static var lineHeight: CGFloat {
+        NSLayoutManager().defaultLineHeight(for: font)
+    }
+
+    func textChanged() {
+        guard let layoutManager = textView.layoutManager, let container = textView.textContainer else { return }
+        layoutManager.ensureLayout(for: container)
+        let used = layoutManager.usedRect(for: container).height
+        let height = min(max(Self.lineHeight, used), Self.lineHeight * Self.maxLines).rounded(.up)
+        if textHeight.constant != height { textHeight.constant = height }
+        updateSendButton()
+        textView.needsDisplay = true
+    }
+
+    private func updateSendButton() {
+        let empty = textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        sendButton.image = isBusy ? Self.stopImage : Self.sendImage
+        sendButton.toolTip = isBusy ? "Stop (Esc)" : "Send (Return)"
+        sendButton.contentTintColor = isBusy ? .labelColor : empty ? .tertiaryLabelColor : .controlAccentColor
+        sendButton.isEnabled = isBusy || !empty
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        let focused = window?.firstResponder === textView
+        layer?.cornerRadius = 16
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.7).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = (focused ? NSColor.controlAccentColor.withAlphaComponent(0.6) : NSColor.separatorColor).cgColor
+    }
+
+    /// Clicks anywhere in the box go to the text.
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(textView)
+    }
+}
+
+/// A text view that shows a grey hint while empty and reports focus changes.
+final class PlaceholderTextView: NSTextView {
+    var placeholder = "" {
+        didSet { needsDisplay = true }
+    }
+    var onFocusChange: (() -> Void)?
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? .systemFont(ofSize: 13),
+            .foregroundColor: NSColor.placeholderTextColor,
+        ]
+        let origin = NSPoint(x: textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0), y: textContainerOrigin.y)
+        NSAttributedString(string: placeholder, attributes: attributes)
+            .draw(with: NSRect(origin: origin, size: NSSize(width: bounds.width - origin.x, height: bounds.height)),
+                  options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onFocusChange?() }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { onFocusChange?() }
+        return accepted
     }
 }

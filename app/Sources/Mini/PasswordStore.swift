@@ -59,17 +59,22 @@ final class PasswordStore {
     }
 
     /// Sorted by site, then username.
-    private(set) var entries: [Entry] = []
+    private(set) var entries: [Entry] = [] {
+        didSet { byOrigin = Dictionary(grouping: entries, by: \.origin) }
+    }
+    /// `entries` by origin. The address bar asks on every page change.
+    private var byOrigin: [String: [Entry]] = [:]
     private let path = DataDirectory.file("passwords.json")
 
     private init() {
         if let data = FileManager.default.contents(atPath: path) {
             entries = (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
+            byOrigin = Dictionary(grouping: entries, by: \.origin)
         }
     }
 
     func logins(for origin: String) -> [Entry] {
-        entries.filter { $0.origin == origin }
+        byOrigin[origin] ?? []
     }
 
     /// The password of `entry`. macOS may ask before handing Mini its key.

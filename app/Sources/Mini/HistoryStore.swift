@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 struct HistoryPage: Sendable {
     let url: String
@@ -12,6 +13,15 @@ struct HistoryPage: Sendable {
     }
 }
 
+/// A site on the start page.
+struct FrequentSite: Sendable {
+    let host: String
+    /// The site's most visited page, which the tile opens.
+    let url: String
+    let title: String
+    let icon: Data?
+}
+
 /// Mini's browsing history: one row per URL, in `history.sqlite` in the data
 /// folder. Chromium keeps its own History file, but CEF has no API for it and
 /// holds it locked. Database work runs on a serial queue.
@@ -19,6 +29,9 @@ final class HistoryStore: @unchecked Sendable {
     static let shared = HistoryStore(path: DataDirectory.file("history.sqlite"))
 
     private let queue = DispatchQueue(label: "dev.sorrycc.mini.history")
+    /// Numbers each search, so one that a newer search has replaced before it
+    /// got to run can be skipped.
+    private let latestSearch = OSAllocatedUnfairLock(initialState: 0)
     /// Only touched on `queue`. Nil if the file couldn't be opened.
     private let db: SQLiteDatabase?
 
@@ -34,6 +47,10 @@ final class HistoryStore: @unchecked Sendable {
                     last_visit REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS pages_last_visit ON pages (last_visit DESC);
+                CREATE TABLE IF NOT EXISTS icons (
+                    host TEXT PRIMARY KEY,
+                    png BLOB NOT NULL
+                );
                 """)
             self.db = db
         } catch {
@@ -57,8 +74,43 @@ final class HistoryStore: @unchecked Sendable {
         write("UPDATE pages SET title = ? WHERE url = ?", [title, url])
     }
 
+    /// Keeps a site's favicon for the start page. One icon per host.
+    func setIcon(_ png: Data, for url: String) {
+        guard let host = Self.host(of: url) else { return }
+        write("INSERT OR REPLACE INTO icons (host, png) VALUES (?, ?)", [host, png])
+    }
+
     func clear() {
         write("DELETE FROM pages", [])
+        write("DELETE FROM icons", [])
+    }
+
+    /// The most visited sites, by their pages' visits added up, each with
+    /// its most visited page and its favicon if one was saved. `completion`
+    /// runs on the store's queue.
+    func frequentSites(limit: Int, completion: @escaping @Sendable ([FrequentSite]) -> Void) {
+        queue.async { [db] in
+            // Pages come most visited first, so a host's first page is its best.
+            let pages = (try? db?.query("""
+                SELECT url, title, visit_count, last_visit FROM pages
+                ORDER BY visit_count DESC, last_visit DESC LIMIT 5000
+                """, row: Self.page)) ?? []
+            var best: [String: HistoryPage] = [:]
+            var visits: [String: Int] = [:]
+            for page in pages {
+                guard let host = Self.host(of: page.url) else { continue }
+                if best[host] == nil { best[host] = page }
+                visits[host, default: 0] += page.visitCount
+            }
+            let hosts = visits.sorted { ($0.value, best[$0.key]!.lastVisit) > ($1.value, best[$1.key]!.lastVisit) }
+                .prefix(limit).map(\.key)
+            let sites = hosts.map { host in
+                let page = best[host]!
+                let icon = (try? db?.query("SELECT png FROM icons WHERE host = ?", [host]) { $0.data(0) })?.first
+                return FrequentSite(host: host, url: page.url, title: page.title, icon: icon)
+            }
+            completion(sites)
+        }
     }
 
     /// Most recently visited first. Blocks until the query finishes, which is
@@ -74,9 +126,16 @@ final class HistoryStore: @unchecked Sendable {
 
     /// Pages whose URL or title contains `text`, best first: URLs that start
     /// with it, then titles with a word that starts with it, then the rest,
-    /// each by visit count. `completion` runs on the store's queue.
+    /// each by visit count. `completion` runs on the store's queue. A search
+    /// that a newer one replaces before it runs never completes, so typing
+    /// fast doesn't queue up a scan per keystroke.
     func search(_ text: String, limit: Int, completion: @escaping @Sendable ([HistoryPage]) -> Void) {
-        queue.async { [db] in
+        let number = latestSearch.withLock { latest in
+            latest += 1
+            return latest
+        }
+        queue.async { [db, latestSearch] in
+            guard latestSearch.withLock({ $0 }) == number else { return }
             let pattern = "%" + text.replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "%", with: "\\%")
                 .replacingOccurrences(of: "_", with: "\\_") + "%"
@@ -137,6 +196,15 @@ final class HistoryStore: @unchecked Sendable {
             url: row.string(0), title: row.string(1), visitCount: Int(row.int(2)),
             lastVisit: Date(timeIntervalSince1970: row.double(3))
         )
+    }
+
+    /// The host of a web page's URL, without a leading "www.".
+    static func host(of url: String) -> String? {
+        guard url.hasPrefix("http://") || url.hasPrefix("https://"), var host = URL(string: url)?.host()?.lowercased(),
+            !host.isEmpty
+        else { return nil }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        return host
     }
 
     /// `url` without its scheme and a leading "www.".

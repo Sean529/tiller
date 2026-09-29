@@ -18,7 +18,8 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
     private var generation = 0
 
     private static let limit = 8
-    private static let rowHeight: CGFloat = 28
+    private static let rowHeight: CGFloat = 32
+    private static let inset: CGFloat = 6
 
     init(addressBar: AddressBarView) {
         self.addressBar = addressBar
@@ -30,14 +31,15 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         background.material = .menu
         background.state = .active
         background.wantsLayer = true
-        background.layer?.cornerRadius = 10
+        background.layer?.cornerRadius = 14
+        background.layer?.cornerCurve = .continuous
         background.layer?.masksToBounds = true
         list.translatesAutoresizingMaskIntoConstraints = false
         background.addSubview(list)
         NSLayoutConstraint.activate([
-            list.topAnchor.constraint(equalTo: background.topAnchor, constant: 5),
-            list.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 5),
-            list.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -5),
+            list.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.inset),
+            list.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: Self.inset),
+            list.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -Self.inset),
         ])
         panel.contentView = background
         addressBar.field.delegate = self
@@ -75,7 +77,12 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        guard panel.isVisible else { return false }
+        guard panel.isVisible else {
+            // Escape with no list up puts the page's URL back, as in Safari.
+            guard selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+            addressBar.field.revert()
+            return true
+        }
         switch selector {
         case #selector(NSResponder.moveDown(_:)):
             highlight(min(pages.count - 1, (highlighted ?? -1) + 1))
@@ -113,8 +120,8 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
 
         let capsule = addressBar.capsule
         let frame = window.convertToScreen(capsule.convert(capsule.bounds, to: nil))
-        let height = CGFloat(pages.count) * Self.rowHeight + 10
-        panel.setFrame(NSRect(x: frame.minX, y: frame.minY - 4 - height, width: frame.width, height: height), display: true)
+        let height = CGFloat(pages.count) * Self.rowHeight + 2 * Self.inset
+        panel.setFrame(NSRect(x: frame.minX, y: frame.minY - 6 - height, width: frame.width, height: height), display: true)
         if panel.parent == nil { window.addChildWindow(panel, ordered: .above) }
         panel.orderFront(nil)
     }
@@ -149,28 +156,45 @@ private final class SuggestionsPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// A page's title, then its address in grey.
+/// A clock, the page's title, then its address in grey. The highlighted row
+/// is filled with the accent color, as in a menu.
 private final class SuggestionRow: NSView {
     var onHover: (() -> Void)?
     var onClick: (() -> Void)?
 
     var isHighlighted = false {
-        didSet { needsDisplay = true }
+        didSet {
+            guard isHighlighted != oldValue else { return }
+            needsDisplay = true
+            title.textColor = isHighlighted ? .white : .labelColor
+            url.textColor = isHighlighted ? .white.withAlphaComponent(0.8) : .secondaryLabelColor
+            icon.contentTintColor = isHighlighted ? .white : .secondaryLabelColor
+        }
     }
 
+    private let icon = NSImageView(image: SuggestionRow.clock ?? NSImage())
+    private let title: NSTextField
+    private let url: NSTextField
+
+    private static let clock = NSImage(systemSymbolName: "clock", accessibilityDescription: "History")?
+        .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+
     init(page: HistoryPage) {
+        title = NSTextField(labelWithString: page.displayTitle)
+        url = NSTextField(labelWithString: HistoryStore.bare(page.url))
         super.init(frame: .zero)
-        let title = NSTextField(labelWithString: page.displayTitle)
+        icon.contentTintColor = .secondaryLabelColor
+        icon.setContentHuggingPriority(.required, for: .horizontal)
         title.font = .systemFont(ofSize: 13)
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
-        let url = NSTextField(labelWithString: HistoryStore.bare(page.url))
         url.font = .systemFont(ofSize: 12)
         url.textColor = .secondaryLabelColor
         url.lineBreakMode = .byTruncatingTail
         url.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [title, url])
+        let stack = NSStackView(views: [icon, title, url])
         stack.spacing = 8
+        stack.setCustomSpacing(10, after: icon)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -185,8 +209,8 @@ private final class SuggestionRow: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard isHighlighted else { return }
-        NSColor.controlAccentColor.withAlphaComponent(0.2).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
     }
 
     override func updateTrackingAreas() {

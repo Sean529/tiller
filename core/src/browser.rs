@@ -22,6 +22,8 @@ pub struct Callbacks {
     pub open_tab: Option<unsafe extern "C" fn(*mut c_void, *const c_char, bool)>,
     pub close_ready: Option<unsafe extern "C" fn(*mut c_void)>,
     pub key_equivalent: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool>,
+    pub loading_progress: Option<unsafe extern "C" fn(*mut c_void, f64)>,
+    pub find_result: Option<unsafe extern "C" fn(*mut c_void, i32, i32, bool)>,
 }
 
 struct Entry {
@@ -194,6 +196,30 @@ wrap_client! {
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(MiniLoadHandler::new())
         }
+
+        fn find_handler(&self) -> Option<FindHandler> {
+            Some(MiniFindHandler::new())
+        }
+    }
+}
+
+wrap_find_handler! {
+    struct MiniFindHandler;
+
+    impl FindHandler {
+        fn on_find_result(
+            &self,
+            browser: Option<&mut Browser>,
+            _identifier: i32,
+            count: i32,
+            _selection_rect: Option<&Rect>,
+            active_match_ordinal: i32,
+            final_update: i32,
+        ) {
+            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.find_result {
+                unsafe { f(cb.ctx, count, active_match_ordinal, final_update != 0) };
+            }
+        }
     }
 }
 
@@ -219,7 +245,7 @@ wrap_display_handler! {
                 return;
             };
             if let Some(host) = browser.host() {
-                let mut callback = MiniFaviconCallback::new(browser.identifier());
+                let mut callback = MiniFaviconCallback::new(browser.identifier(), page_origin(browser));
                 host.download_image(Some(&CefString::from(url.as_str())), 1, 64, 0, Some(&mut callback));
             }
         }
@@ -228,6 +254,12 @@ wrap_display_handler! {
             if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.title_changed {
                 let title = to_cstring(title);
                 unsafe { f(cb.ctx, title.as_ptr()) };
+            }
+        }
+
+        fn on_loading_progress_change(&self, browser: Option<&mut Browser>, progress: f64) {
+            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.loading_progress {
+                unsafe { f(cb.ctx, progress) };
             }
         }
     }
@@ -249,6 +281,15 @@ fn first_string(list: &mut CefStringList) -> Option<String> {
     Some(s)
 }
 
+/// Scheme, host and port of the page the browser shows, such as
+/// "https://example.com".
+fn page_origin(browser: &Browser) -> String {
+    let url = browser.main_frame().map(|f| CefString::from(&f.url()).to_string()).unwrap_or_default();
+    let start = url.find("://").map_or(0, |i| i + 3);
+    let end = url[start..].find('/').map_or(url.len(), |i| start + i);
+    url[..end].to_string()
+}
+
 fn send_favicon(id: i32, png: &[u8]) {
     if let Some(cb) = callbacks_for_id(id) && let Some(f) = cb.favicon_changed {
         unsafe { f(cb.ctx, png.as_ptr(), png.len()) };
@@ -258,10 +299,17 @@ fn send_favicon(id: i32, png: &[u8]) {
 wrap_download_image_callback! {
     struct MiniFaviconCallback {
         browser_id: i32,
+        // The site the icon belongs to. An icon that arrives after the tab
+        // went to another site is dropped, so it can't be shown or saved
+        // as that site's.
+        origin: String,
     }
 
     impl DownloadImageCallback {
         fn on_download_image_finished(&self, _image_url: Option<&CefString>, _http_status_code: i32, image: Option<&mut Image>) {
+            if get(self.browser_id).is_none_or(|b| page_origin(&b) != self.origin) {
+                return;
+            }
             // CEF returns nothing unless both size out-parameters are given.
             let (mut width, mut height) = (0, 0);
             let png = image.and_then(|image| image.as_png(2.0, 1, Some(&mut width), Some(&mut height)));

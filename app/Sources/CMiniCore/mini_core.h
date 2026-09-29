@@ -19,6 +19,11 @@ typedef struct MiniBrowserCallbacks {
     // A Command or Control key press (an NSEvent *) before the page sees it.
     // Return true if the app handled it.
     bool (*key_equivalent)(void *ctx, void *ns_event);
+    // How much of the page has loaded, from 0 to 1.
+    void (*loading_progress)(void *ctx, double progress);
+    // A find in the page moved on: how many matches, which one is selected
+    // (1-based), and whether the search has finished counting.
+    void (*find_result)(void *ctx, int count, int active, bool final_update);
 } MiniBrowserCallbacks;
 
 // Static version string. Do not free.
@@ -40,6 +45,17 @@ void mini_browser_go_forward(int id);
 void mini_browser_reload(int id);
 void mini_browser_stop(int id);
 void mini_browser_set_focus(int id, bool focus);
+
+// Zooms out (command < 0), resets to 100% (0) or zooms in (> 0).
+void mini_browser_zoom(int id, int command);
+// The zoom as a factor, 1 for 100%.
+double mini_browser_zoom_factor(int id);
+
+// Finds text in the page. find_next continues the current search in the
+// given direction. Results arrive through the find_result callback.
+void mini_browser_find(int id, const char *text, bool forward, bool find_next);
+// Ends the search and clears its highlights.
+void mini_browser_stop_finding(int id);
 
 // Runs JavaScript in the tab's main frame. Nothing comes back.
 void mini_browser_execute_js(int id, const char *code);

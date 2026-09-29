@@ -137,6 +137,47 @@ pub extern "C" fn mini_browser_set_focus(id: c_int, focus: bool) {
     }
 }
 
+/// Zooms the page out (`command` < 0), back to 100% (0) or in (> 0), in
+/// Chromium's zoom steps.
+#[unsafe(no_mangle)]
+pub extern "C" fn mini_browser_zoom(id: c_int, command: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        host.zoom(match command {
+            ..0 => ZoomCommand::OUT,
+            0 => ZoomCommand::RESET,
+            _ => ZoomCommand::IN,
+        });
+    }
+}
+
+/// The page's zoom as a factor, 1 for 100%.
+#[unsafe(no_mangle)]
+pub extern "C" fn mini_browser_zoom_factor(id: c_int) -> f64 {
+    browser::get(id).and_then(|b| b.host()).map_or(1.0, |host| 1.2f64.powf(host.zoom_level()))
+}
+
+/// Finds `text` in the page and highlights the matches. `find_next` moves to
+/// the next or previous match of the same text. Results arrive through
+/// `find_result`.
+///
+/// # Safety
+/// `text` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mini_browser_find(id: c_int, text: *const c_char, forward: bool, find_next: bool) {
+    let text = unsafe { cstr(text) };
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        host.find(Some(&CefString::from(text.as_str())), forward.into(), 0, find_next.into());
+    }
+}
+
+/// Ends a search and removes its highlights.
+#[unsafe(no_mangle)]
+pub extern "C" fn mini_browser_stop_finding(id: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        host.stop_finding(1);
+    }
+}
+
 /// Runs `code` in the tab's main frame. Nothing comes back.
 ///
 /// # Safety

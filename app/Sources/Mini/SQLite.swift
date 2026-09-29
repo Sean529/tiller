@@ -75,6 +75,8 @@ final class SQLiteDatabase: @unchecked Sendable {
             case let value as Double: sqlite3_bind_double(statement, index, value)
             case let value as Bool: sqlite3_bind_int(statement, index, value ? 1 : 0)
             case let value as String: sqlite3_bind_text(statement, index, value, -1, Self.transient)
+            case let value as Data:
+                _ = value.withUnsafeBytes { sqlite3_bind_blob(statement, index, $0.baseAddress, Int32($0.count), Self.transient) }
             default: throw SQLiteError(description: "can't bind \(type(of: value))")
             }
         }
@@ -85,7 +87,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         SQLiteError(description: String(cString: sqlite3_errmsg(handle)))
     }
 
-    /// Tells SQLite to copy bound strings.
+    /// Tells SQLite to copy bound strings and blobs.
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     /// One result row. Columns are read by index.
