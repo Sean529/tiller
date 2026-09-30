@@ -39,7 +39,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private var resuming = false
     private var records: [AgentRecord] = []
     /// The text block Claude Code is streaming into, until the complete block arrives.
-    private var liveText: NSTextField?
+    private var liveText: MarkdownMessageView?
     private var liveTextBuffer = ""
     /// Streamed text is drawn at most this often, so a fast stream doesn't
     /// re-render the whole block for every few characters.
@@ -383,7 +383,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             return
         case .text(let text):
             if let liveText {
-                liveText.attributedStringValue = AgentMarkdown.render(text)
+                liveText.text = text
                 self.liveText = nil
             } else {
                 transcript.add(AgentMarkdown.label(text))
@@ -473,7 +473,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 self.liveTextRenderPending = false
                 guard let liveText = self.liveText else { return }
                 let follow = self.transcript.isNearBottom(of: self.scrollView)
-                liveText.attributedStringValue = AgentMarkdown.render(self.liveTextBuffer)
+                liveText.text = self.liveTextBuffer
                 if follow { self.scrollToBottom() }
             }
         }

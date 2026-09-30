@@ -642,20 +642,135 @@ final class ErrorMessageView: NSView, TranscriptRow {
 // MARK: Markdown
 
 /// Renders the agent's markdown: headings, lists, quotes and fenced code by
-/// line, and bold, italics, code and links within a line. Tables and other
-/// block syntax stay as typed.
+/// line, bold, italics, code and links within a line, and pipe tables as
+/// grids. Other block syntax stays as typed.
 @MainActor
 enum AgentMarkdown {
     private static let bodySize: CGFloat = 13
     private static let listIndent: CGFloat = 16
 
-    static func label(_ text: String) -> NSTextField {
-        let label = NSTextField(wrappingLabelWithString: "")
-        label.isSelectable = true
-        // Lets links in the text be clicked.
-        label.allowsEditingTextAttributes = true
-        label.attributedStringValue = render(text)
-        return label
+    /// A pipe table, its cells already rendered.
+    struct Table {
+        /// The lines it was parsed from, to tell whether it changed.
+        let source: String
+        let header: [NSAttributedString]
+        let rows: [[NSAttributedString]]
+    }
+
+    enum Block {
+        case text(NSAttributedString)
+        case table(Table)
+    }
+
+    static func label(_ text: String) -> MarkdownMessageView {
+        let view = MarkdownMessageView()
+        view.text = text
+        return view
+    }
+
+    /// The message as runs of text with the tables between them.
+    static func blocks(_ text: String) -> [Block] {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var blocks: [Block] = []
+        var pending: [String] = []
+        var inFence = false
+        func flush() {
+            let text = render(pending.joined(separator: "\n"))
+            pending.removeAll()
+            if text.length > 0 { blocks.append(.text(text)) }
+        }
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                inFence.toggle()
+            } else if !inFence, let (table, end) = table(in: lines, at: index) {
+                flush()
+                blocks.append(.table(table))
+                index = end
+                continue
+            }
+            pending.append(line)
+            index += 1
+        }
+        flush()
+        return blocks
+    }
+
+    /// The table whose header is the line at `start`, and the line after its
+    /// last row. A table is a header, a line of dashes, then rows.
+    private static func table(in lines: [String], at start: Int) -> (Table, Int)? {
+        guard start + 1 < lines.count, lines[start].contains("|") else { return nil }
+        let header = cells(lines[start])
+        let delimiter = cells(lines[start + 1])
+        guard !delimiter.isEmpty, delimiter.count == header.count, lines[start + 1].contains("-"),
+            delimiter.allSatisfy({ cell in
+                var dashes = Substring(cell)
+                if dashes.hasPrefix(":") { dashes = dashes.dropFirst() }
+                if dashes.hasSuffix(":") { dashes = dashes.dropLast() }
+                return !dashes.isEmpty && dashes.allSatisfy { $0 == "-" }
+            })
+        else { return nil }
+        let alignments: [NSTextAlignment] = delimiter.map { cell in
+            if cell.hasSuffix(":") { return cell.hasPrefix(":") ? .center : .right }
+            return .left
+        }
+        var end = start + 2
+        var rows: [[String]] = []
+        while end < lines.count {
+            let trimmed = lines[end].trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, trimmed.contains("|"), !trimmed.hasPrefix("```") else { break }
+            var row = Array(cells(trimmed).prefix(header.count))
+            row += Array(repeating: "", count: header.count - row.count)
+            rows.append(row)
+            end += 1
+        }
+        func styled(_ row: [String], font: NSFont) -> [NSAttributedString] {
+            row.enumerated().map { column, cell in
+                let text = inline(cell, font: font)
+                let style = NSMutableParagraphStyle()
+                style.lineSpacing = 1
+                style.alignment = alignments[column]
+                text.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: text.length))
+                return text
+            }
+        }
+        let table = Table(
+            source: lines[start..<end].joined(separator: "\n"),
+            header: styled(header, font: .systemFont(ofSize: bodySize, weight: .semibold)),
+            rows: rows.map { styled($0, font: body) })
+        return (table, end)
+    }
+
+    /// A table line's cells. A pipe after a backslash or inside backticks
+    /// does not end a cell.
+    private static func cells(_ line: String) -> [String] {
+        let characters = Array(line.trimmingCharacters(in: .whitespaces))
+        var cells: [String] = []
+        var current = ""
+        var inCode = false
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            if character == "\\", index + 1 < characters.count, characters[index + 1] == "|" {
+                current.append("|")
+                index += 2
+                continue
+            }
+            if character == "`" { inCode.toggle() }
+            if character == "|" && !inCode {
+                cells.append(current)
+                current = ""
+            } else {
+                current.append(character)
+            }
+            index += 1
+        }
+        cells.append(current)
+        // The pipes at either end of the line border the table.
+        if cells.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { cells.removeFirst() }
+        if cells.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { cells.removeLast() }
+        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
     }
 
     static func render(_ text: String) -> NSAttributedString {
@@ -802,5 +917,192 @@ enum AgentMarkdown {
             result.addAttribute(.foregroundColor, value: NSColor.linkColor, range: range)
         }
         return result
+    }
+}
+
+/// An agent message: its text, with each table drawn as a grid.
+final class MarkdownMessageView: NSView, TranscriptRow {
+    private let stack = NSStackView()
+    private var width: CGFloat = 0
+
+    var text = "" {
+        didSet { if text != oldValue { rebuild() } }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func fit(width: CGFloat) {
+        guard width != self.width else { return }
+        self.width = width
+        for view in stack.arrangedSubviews { fit(view) }
+    }
+
+    private func fit(_ view: NSView) {
+        guard width > 0 else { return }
+        if let table = view as? MarkdownTableView {
+            table.fit(width: width)
+        } else if let label = view as? NSTextField {
+            label.preferredMaxLayoutWidth = width
+        }
+    }
+
+    /// Keeps the views whose kind of block is unchanged, so a streamed
+    /// answer only rewrites the text it is still adding to.
+    private func rebuild() {
+        let blocks = AgentMarkdown.blocks(text)
+        for (index, block) in blocks.enumerated() {
+            let existing = index < stack.arrangedSubviews.count ? stack.arrangedSubviews[index] : nil
+            switch block {
+            case .text(let text):
+                if let label = existing as? NSTextField {
+                    label.attributedStringValue = text
+                } else {
+                    let label = NSTextField(wrappingLabelWithString: "")
+                    label.isSelectable = true
+                    // Lets links in the text be clicked.
+                    label.allowsEditingTextAttributes = true
+                    label.attributedStringValue = text
+                    place(label, at: index, replacing: existing)
+                }
+            case .table(let table):
+                if let view = existing as? MarkdownTableView {
+                    view.table = table
+                } else {
+                    let view = MarkdownTableView()
+                    view.table = table
+                    place(view, at: index, replacing: existing)
+                }
+            }
+        }
+        for view in stack.arrangedSubviews.dropFirst(blocks.count) { view.removeFromSuperview() }
+    }
+
+    private func place(_ view: NSView, at index: Int, replacing existing: NSView?) {
+        existing?.removeFromSuperview()
+        stack.insertArrangedSubview(view, at: index)
+        view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        fit(view)
+    }
+}
+
+/// A markdown table: a bold header, a rule between rows, and cells that wrap
+/// so the table never runs wider than the transcript.
+final class MarkdownTableView: NSView {
+    private static let padding = NSSize(width: 8, height: 5)
+    private static let minimumColumn: CGFloat = 36
+
+    private var labels: [[NSTextField]] = []
+    private var width: CGFloat = 0
+    private var tableSize = NSSize.zero
+    /// Where each row starts, and the bottom of the last.
+    private var rowEdges: [CGFloat] = []
+
+    var table: AgentMarkdown.Table? {
+        didSet {
+            guard let table, table.source != oldValue?.source else { return }
+            for label in labels.joined() { label.removeFromSuperview() }
+            labels = ([table.header] + table.rows).map { row in
+                row.map { text in
+                    let label = NSTextField(wrappingLabelWithString: "")
+                    label.isSelectable = true
+                    label.allowsEditingTextAttributes = true
+                    label.attributedStringValue = text
+                    addSubview(label)
+                    return label
+                }
+            }
+            arrange()
+        }
+    }
+
+    override var isFlipped: Bool { true }
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: tableSize.height) }
+
+    func fit(width: CGFloat) {
+        guard width != self.width else { return }
+        self.width = width
+        arrange()
+    }
+
+    private func measure(_ label: NSTextField, width: CGFloat) -> NSSize {
+        let bounds = NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)
+        let size = label.cell?.cellSize(forBounds: bounds) ?? .zero
+        return NSSize(width: ceil(size.width), height: ceil(size.height))
+    }
+
+    private func arrange() {
+        guard width > 0, let columns = labels.first?.count, columns > 0 else { return }
+        let padding = Self.padding
+        let natural = (0..<columns).map { column in
+            labels.map { measure($0[column], width: .greatestFiniteMagnitude).width }.max() ?? 0
+        }
+        // Narrow columns keep their width; the wide ones share what is left.
+        let available = max(width - CGFloat(columns) * 2 * padding.width, CGFloat(columns) * Self.minimumColumn)
+        var widths = natural
+        if natural.reduce(0, +) > available {
+            var remaining = available
+            var left = columns
+            var cap: CGFloat?
+            for column in (0..<columns).sorted(by: { natural[$0] < natural[$1] }) {
+                if cap == nil, natural[column] > remaining / CGFloat(left) {
+                    cap = max(floor(remaining / CGFloat(left)), Self.minimumColumn)
+                }
+                if let cap {
+                    widths[column] = cap
+                } else {
+                    remaining -= natural[column]
+                    left -= 1
+                }
+            }
+        }
+        var y: CGFloat = 0
+        rowEdges = [0]
+        for row in labels {
+            let heights = row.enumerated().map { measure($1, width: widths[$0]).height }
+            let height = heights.max() ?? 0
+            var x: CGFloat = 0
+            for (column, label) in row.enumerated() {
+                label.frame = NSRect(x: x + padding.width, y: y + padding.height, width: widths[column], height: heights[column])
+                x += widths[column] + 2 * padding.width
+            }
+            y += height + 2 * padding.height
+            rowEdges.append(y)
+        }
+        tableSize = NSSize(width: widths.reduce(0, +) + CGFloat(columns) * 2 * padding.width, height: y)
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard rowEdges.count > 1 else { return }
+        let frame = NSRect(origin: .zero, size: tableSize).insetBy(dx: 0.5, dy: 0.5)
+        let outline = NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6)
+        NSGraphicsContext.saveGraphicsState()
+        outline.addClip()
+        NSColor.labelColor.withAlphaComponent(0.05).setFill()
+        NSRect(x: 0, y: 0, width: tableSize.width, height: rowEdges[1]).fill()
+        NSColor.separatorColor.setFill()
+        for edge in rowEdges.dropFirst().dropLast() {
+            NSRect(x: 0, y: edge - 0.5, width: tableSize.width, height: 1).fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        NSColor.separatorColor.setStroke()
+        outline.lineWidth = 1
+        outline.stroke()
     }
 }
