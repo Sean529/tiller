@@ -6,7 +6,7 @@
 
 A small macOS browser built on Chromium, with a native Swift/AppKit interface and a built-in agent panel that can drive the browser.
 
-https://github.com/sorrycc/tiller/raw/master/docs/tiller-promo.mp4
+https://github.com/user-attachments/assets/1960eca0-6cb0-460b-bb6f-b292b739a147
 
 ## Features
 
