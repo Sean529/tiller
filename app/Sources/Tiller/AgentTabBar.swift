@@ -81,7 +81,7 @@ final class AgentTabBar: NSView {
     }
 }
 
-/// A tab's number in a rounded square, outlined in the accent color when
+/// A tab's number in a rounded square, tinted with the accent color when
 /// selected, with a dot while its agent works. Right-click to close it.
 private final class TabNumberButton: NSView {
     var onSelect: (() -> Void)?
@@ -96,15 +96,16 @@ private final class TabNumberButton: NSView {
     var isBusy = false { didSet { busyDot.isHidden = !isBusy } }
 
     private let number: Int
+    private let label: NSTextField
     private let busyDot = NSView()
     private var isHovered = false { didSet { needsDisplay = true } }
 
     init(number: Int) {
         self.number = number
+        label = NSTextField(labelWithString: "\(number)")
         super.init(frame: .zero)
         wantsLayer = true
-        let label = NSTextField(labelWithString: "\(number)")
-        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         label.alignment = .center
         busyDot.wantsLayer = true
         busyDot.layer?.cornerRadius = 3
@@ -134,9 +135,13 @@ private final class TabNumberButton: NSView {
     override func updateLayer() {
         layer?.cornerRadius = 7
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(isHovered ? 0.1 : 0.05).cgColor
-        layer?.borderWidth = isSelected ? 2 : 1
-        layer?.borderColor = (isSelected ? NSColor.controlAccentColor : NSColor.separatorColor).cgColor
+        let fill: NSColor = isSelected
+            ? .controlAccentColor.withAlphaComponent(isHovered ? 0.3 : 0.22)
+            : .labelColor.withAlphaComponent(isHovered ? 0.1 : 0.05)
+        layer?.backgroundColor = fill.cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = (isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.55) : NSColor.separatorColor).cgColor
+        label.textColor = isSelected ? .labelColor : .secondaryLabelColor
         busyDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
     }
 

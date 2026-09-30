@@ -21,7 +21,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private lazy var sidebarMinWidth = sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 0)
     private lazy var sidebarMaxWidth = sidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 0)
     /// Holds every tab's view. Only the selected one is visible.
-    private let contentView = NSView()
+    private let contentView = PageCardView()
     private let agentPanel = AgentPanelView(frame: NSRect(x: 0, y: 0, width: 360, height: 600))
     /// Where the panel is going. It stays unhidden while it slides out.
     private var agentPanelShown = Settings.defaults.bool(forKey: BrowserWindowController.agentVisibleKey)
@@ -91,6 +91,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         window.title = "Tiller"
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 520, height: 360)
         window.setFrameAutosaveName("TillerBrowserWindow")
         super.init(window: window)
 
@@ -113,8 +114,6 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         sidebar.isCollapsed = Settings.sidebarCollapsed
         let savedWidth = Settings.defaults.double(forKey: Self.sidebarWidthKey)
         if savedWidth > 0 { sidebarWidth = savedWidth }
-        contentView.wantsLayer = true
-        contentView.layer?.cornerCurve = .continuous
         agentPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         contentView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
         agentPanel.delegate = self
@@ -133,8 +132,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         applyTabLayout()
         NotificationCenter.default.addObserver(self, selector: #selector(passwordsChanged(_:)), name: .passwordsDidChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(tabLayoutChanged(_:)), name: .tabLayoutDidChange, object: nil)
+        // Restored tabs load when first selected.
         for saved in restored {
-            openTab(url: saved.isBlank ? "about:blank" : saved.url, select: false, restoring: saved)
+            openTab(url: saved.isBlank ? "about:blank" : saved.url, select: false, restoring: saved, lazily: true)
         }
         if let url {
             openTab(url: url, select: true)
@@ -148,9 +148,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     // MARK: Tabs
 
     /// Opens `url` in a new tab at `index`, or at the end. A `restoring` tab
-    /// shows its saved title and isn't saved to history again.
+    /// shows its saved title and isn't saved to history again. A tab opened
+    /// `lazily` loads when it is first selected, and the caller updates the
+    /// tab strip.
     @discardableResult
-    private func openTab(url: String, select: Bool, at index: Int? = nil, restoring saved: SessionStore.SavedTab? = nil) -> Tab {
+    private func openTab(
+        url: String, select: Bool, at index: Int? = nil, restoring saved: SessionStore.SavedTab? = nil,
+        lazily: Bool = false
+    ) -> Tab {
         closingAll = false
         let tab = Tab()
         tab.delegate = self
@@ -164,6 +169,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tab.hostView.isHidden = true
         // Under the find bar, which shares this view.
         contentView.addSubview(tab.hostView, positioned: .below, relativeTo: nil)
+        if lazily {
+            tab.prepare(url: url, title: saved?.title ?? "")
+            return tab
+        }
         tab.start(url: url, title: saved?.title ?? "")
 
         if select {
@@ -184,6 +193,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         selectedTab?.hostView.isHidden = true
         selectedTab = tab
         tab.hostView.isHidden = false
+        start(tab)
         tabStrip.update(tabs: tabs, selected: tab)
         showState(of: tab)
         addressBar.setProgress(tab.progress, loading: tab.isLoading, animated: false)
@@ -193,6 +203,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         } else {
             tab.focus()
         }
+    }
+
+    /// Starts a restored tab's browser, if it is still waiting.
+    private func start(_ tab: Tab) {
+        guard !tab.isStarted else { return }
+        tab.hostView.frame = contentView.bounds
+        tab.startIfNeeded()
     }
 
     /// Asks a tab to close on the user's or an agent's behalf.
@@ -665,11 +682,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// With tabs in the sidebar the page is a card, rounded where it meets
     /// the sidebar and the agent panel.
     private func roundPage() {
-        let vertical = tabLayout == .vertical
-        contentView.layer?.cornerRadius = vertical ? 10 : 0
-        contentView.layer?.masksToBounds = vertical
-        contentView.layer?.maskedCorners = agentPanelShown
-            ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMaxYCorner]
+        contentView.isCard = tabLayout == .vertical
+        contentView.roundsTrailingCorner = agentPanelShown
     }
 
     /// Gives the sidebar its collapsed width, or the one it had before.
@@ -845,6 +859,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case Item.address:
             item.view = addressBar
             item.label = "Address"
+            // The bar draws its own capsule; without this the toolbar would
+            // put a second piece of glass around it and the buttons before it.
+            item.isBordered = false
             fitTabStrip()
         default: return nil
         }
@@ -860,6 +877,8 @@ extension BrowserWindowController {
     func control(_ method: String, params: [String: Any]) throws -> Any {
         switch method {
         case "tabs.list":
+            // Tab ids are browser ids, so every listed tab needs its browser.
+            tabs.forEach(start)
             return ["tabs": tabs.map(info)]
         case "tabs.new":
             let url = (params["url"] as? String).map(AddressInput.url(for:)) ?? "about:blank"
@@ -1005,6 +1024,73 @@ extension BrowserWindowController {
 
     @objc private func passwordsChanged(_ notification: Notification) {
         if let selectedTab { showState(of: selectedTab) }
+    }
+}
+
+/// Holds the tabs' pages. As a card its top corners are rounded where it
+/// meets the sidebar and the agent panel, and a hairline sets it apart from
+/// them, which a light page on the light window would otherwise run into.
+final class PageCardView: NSView {
+    var isCard = false { didSet { needsDisplay = true } }
+    /// Whether the corner next to the agent panel is rounded too.
+    var roundsTrailingCorner = false {
+        didSet {
+            needsDisplay = true
+            needsLayout = true
+        }
+    }
+
+    private let outline = CAShapeLayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerCurve = .continuous
+        outline.fillColor = nil
+        outline.lineWidth = 1
+        // Above the pages, which are sublayers too.
+        outline.zPosition = 1
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        guard let layer else { return }
+        layer.cornerRadius = isCard ? 10 : 0
+        layer.masksToBounds = isCard
+        layer.maskedCorners = roundsTrailingCorner
+            ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMaxYCorner]
+        outline.isHidden = !isCard
+        outline.strokeColor = NSColor.separatorColor.cgColor
+        if outline.superlayer == nil { layer.addSublayer(outline) }
+    }
+
+    override func layout() {
+        super.layout()
+        // The top and the sides next to the sidebar and the panel. The bottom
+        // and an open side are the window's edge.
+        let radius: CGFloat = 10
+        let inset: CGFloat = 0.5
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: inset, y: 0))
+        path.addLine(to: CGPoint(x: inset, y: bounds.maxY - radius))
+        path.addQuadCurve(to: CGPoint(x: radius, y: bounds.maxY - inset), control: CGPoint(x: inset, y: bounds.maxY - inset))
+        if roundsTrailingCorner {
+            path.addLine(to: CGPoint(x: bounds.maxX - radius, y: bounds.maxY - inset))
+            path.addQuadCurve(
+                to: CGPoint(x: bounds.maxX - inset, y: bounds.maxY - radius),
+                control: CGPoint(x: bounds.maxX - inset, y: bounds.maxY - inset))
+            path.addLine(to: CGPoint(x: bounds.maxX - inset, y: 0))
+        } else {
+            path.addLine(to: CGPoint(x: bounds.maxX, y: bounds.maxY - inset))
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        outline.frame = bounds
+        outline.path = path
+        CATransaction.commit()
     }
 }
 

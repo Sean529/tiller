@@ -162,6 +162,13 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
     private static let limit = 15
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // AppKit also asks while it looks for a shortcut's menu item, on every
+        // Command and Control key press. Only the fixed items have shortcuts.
+        if let event = NSApp.currentEvent, event.type == .keyDown,
+            !event.modifierFlags.intersection([.command, .control]).isEmpty
+        {
+            return
+        }
         for item in menu.items where item.tag == Self.recentTag {
             menu.removeItem(item)
         }
@@ -189,6 +196,15 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
 /// checked, then New Profile and Manage Profiles.
 @MainActor
 private final class ProfilesMenuDelegate: NSObject, NSMenuDelegate {
+    /// No item has a shortcut, which spares reading the profiles from disk
+    /// on every Command and Control key press.
+    func menuHasKeyEquivalent(
+        _ menu: NSMenu, for event: NSEvent, target: AutoreleasingUnsafeMutablePointer<AnyObject?>,
+        action: UnsafeMutablePointer<Selector?>
+    ) -> Bool {
+        false
+    }
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         for profile in Profiles.all {

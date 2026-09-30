@@ -31,6 +31,16 @@ Tiller passes these switches to Chromium:
 - `--disable-backgrounding-occluded-windows`, so a window covered by other apps still counts as visible. Otherwise Chromium drops the agent's mouse and key input while you work elsewhere. The cost is that a covered Tiller window keeps drawing.
 - With extensions on, `--load-extension=<folders>` for the profile's enabled [extensions](browser.md#extensions), and `--noerrdialogs`. Without it, an extension Chromium can't load asks for an error dialog, which hangs Tiller at launch. Chromium writes the error to `chrome_debug.log` in the profile's folder instead, and Settings > Extensions reads it from there. A folder whose path has a comma can't be passed, since Chromium splits the list on commas.
 
+## User agent
+
+Tiller sends Chrome's user agent with its own name added, so sites treat it as the Chrome it is:
+
+```
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Tiller/0.1.0 Safari/537.36
+```
+
+The Chrome version is the major version of the bundled Chromium, the Tiller version is the app's.
+
 ## Data folder
 
 Tiller keeps its data in `~/Library/Application Support/Tiller`. Set `TILLER_DATA_DIR` to use another folder. Profiles opened from a Tiller started that way use the same folder.

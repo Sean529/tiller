@@ -47,6 +47,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Tiller has tabs of its own. This keeps the system's Show Tab Bar and
+        // Show All Tabs out of the View menu.
+        NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.mainMenu = MainMenu.build()
 
         tiller_core_set_quit_handler {

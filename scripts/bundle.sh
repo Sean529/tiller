@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Builds the Rust crates and the Swift app, then assembles and ad-hoc signs
 # build/Tiller.app. Usage: scripts/bundle.sh [debug|release]   (default: release)
+# TILLER_OUT and TILLER_BUNDLE_ID build a second copy with settings of its own,
+# for trying changes while the everyday Tiller keeps running.
 set -euo pipefail
 
 CONFIG="${1:-release}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/build"
+OUT="${TILLER_OUT:-$ROOT/build}"
 APP="$OUT/Tiller.app"
-BUNDLE_ID="dev.sorrycc.tiller"
+BUNDLE_ID="${TILLER_BUNDLE_ID:-dev.sorrycc.tiller}"
 VERSION="0.1.0"
 FRAMEWORK="Chromium Embedded Framework.framework"
 HELPERS=("Helper" "Helper (GPU)" "Helper (Renderer)" "Helper (Plugin)" "Helper (Alerts)")

@@ -6,6 +6,8 @@ struct HistoryPage: Sendable {
     let title: String
     let visitCount: Int
     let lastVisit: Date
+    /// The site's favicon, which only `search` fills in.
+    var icon: Data?
 
     /// The title, or the URL without its scheme when the page has none.
     var displayTitle: String {
@@ -40,6 +42,7 @@ final class HistoryStore: @unchecked Sendable {
             let db = try SQLiteDatabase(path: path)
             try db.execute("""
                 PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
                 CREATE TABLE IF NOT EXISTS pages (
                     url TEXT PRIMARY KEY,
                     title TEXT NOT NULL DEFAULT '',
@@ -47,6 +50,7 @@ final class HistoryStore: @unchecked Sendable {
                     last_visit REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS pages_last_visit ON pages (last_visit DESC);
+                CREATE INDEX IF NOT EXISTS pages_visits ON pages (visit_count DESC, last_visit DESC);
                 CREATE TABLE IF NOT EXISTS icons (
                     host TEXT PRIMARY KEY,
                     png BLOB NOT NULL
@@ -78,6 +82,15 @@ final class HistoryStore: @unchecked Sendable {
     func setIcon(_ png: Data, for url: String) {
         guard let host = Self.host(of: url) else { return }
         write("INSERT OR REPLACE INTO icons (host, png) VALUES (?, ?)", [host, png])
+    }
+
+    /// The favicon saved for the site of `url`, or nil. `completion` runs on
+    /// the store's queue.
+    func icon(for url: String, completion: @escaping @Sendable (Data?) -> Void) {
+        guard let host = Self.host(of: url) else { return completion(nil) }
+        queue.async { [db] in
+            completion((try? db?.query("SELECT png FROM icons WHERE host = ?", [host]) { $0.data(0) })?.first)
+        }
     }
 
     func clear() {
@@ -126,7 +139,7 @@ final class HistoryStore: @unchecked Sendable {
 
     /// Pages whose URL or title contains `text`, best first: URLs that start
     /// with it, then titles with a word that starts with it, then the rest,
-    /// each by visit count. `completion` runs on the store's queue. A search
+    /// each by visit count, with their sites' favicons. `completion` runs on the store's queue. A search
     /// that a newer one replaces before it runs never completes, so typing
     /// fast doesn't queue up a scan per keystroke.
     func search(_ text: String, limit: Int, completion: @escaping @Sendable ([HistoryPage]) -> Void) {
@@ -152,7 +165,13 @@ final class HistoryStore: @unchecked Sendable {
             }
             // A stable sort keeps the query's visit-count order within each rank.
             let best = ranked.enumerated().sorted { ($0.element.1, -$0.offset) > ($1.element.1, -$1.offset) }
-            completion(best.prefix(limit).map(\.element.0))
+            completion(best.prefix(limit).map { ranked in
+                var page = ranked.element.0
+                if let host = Self.host(of: page.url) {
+                    page.icon = (try? db?.query("SELECT png FROM icons WHERE host = ?", [host]) { $0.data(0) })?.first
+                }
+                return page
+            })
         }
     }
 

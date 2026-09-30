@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The agent CLIs Tiller can run. Qoder CLI and Claude Code speak the same
 /// stream-json protocol over stdio in print mode. Codex runs its app server,
@@ -630,8 +631,18 @@ enum AgentEnvironment {
             let path = "\(directory)/\(kind.rawValue)"
             if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
-        return loginShellLookup(kind.rawValue)
+        // The shell takes a while, and a new chat asks on the main thread, so
+        // what it found is kept for as long as the file is there.
+        if let found = shellFound.withLock({ $0[kind.rawValue] }), FileManager.default.isExecutableFile(atPath: found) {
+            return found
+        }
+        let found = loginShellLookup(kind.rawValue)
+        shellFound.withLock { $0[kind.rawValue] = found }
+        return found
     }
+
+    /// Paths from `loginShellLookup`, by CLI name.
+    nonisolated private static let shellFound = OSAllocatedUnfairLock(initialState: [String: String]())
 
     /// `command -v` in a login shell. zsh functions and aliases don't count,
     /// only files on PATH.

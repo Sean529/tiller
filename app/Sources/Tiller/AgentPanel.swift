@@ -10,13 +10,14 @@ protocol AgentPanelDelegate: AnyObject {
 /// The side panel: pick an agent and chat with it, in up to a few tabs, each
 /// with its own agent. A bar above the message field switches tabs, opens
 /// new ones and past chats. The open tabs come back at the next launch.
+/// Like the tab sidebar it has no background of its own, so it reads as one
+/// surface with the toolbar.
 final class AgentPanelView: NSView {
     weak var delegate: AgentPanelDelegate?
 
     /// The message being written in the selected tab.
     var input: NSView { active.input }
 
-    private let background = NSVisualEffectView()
     private let agentPicker = NSPopUpButton()
     private let status = StatusPill()
     private let chatArea = NSView()
@@ -58,10 +59,6 @@ final class AgentPanelView: NSView {
     // MARK: Layout
 
     private func build() {
-        background.material = .sidebar
-        background.blendingMode = .behindWindow
-        background.state = .followsWindowActiveState
-
         for kind in AgentKind.allCases {
             agentPicker.addItem(withTitle: kind.displayName)
             agentPicker.lastItem?.representedObject = kind.rawValue
@@ -79,17 +76,12 @@ final class AgentPanelView: NSView {
         tabBar.onNewChat = { [weak self] in self?.newChat() }
         tabBar.onHistory = { [weak self] button in self?.showHistory(from: button) }
 
-        for view in [background, agentPicker, status, chatArea] as [NSView] {
+        for view in [agentPicker, status, chatArea] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
 
         NSLayoutConstraint.activate([
-            background.topAnchor.constraint(equalTo: topAnchor),
-            background.bottomAnchor.constraint(equalTo: bottomAnchor),
-            background.leadingAnchor.constraint(equalTo: leadingAnchor),
-            background.trailingAnchor.constraint(equalTo: trailingAnchor),
-
             agentPicker.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             agentPicker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             status.leadingAnchor.constraint(equalTo: agentPicker.trailingAnchor, constant: 4),

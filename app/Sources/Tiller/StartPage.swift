@@ -24,8 +24,8 @@ final class StartPageView: NSView {
         heading.font = .systemFont(ofSize: 13, weight: .semibold)
         heading.textColor = .secondaryLabelColor
 
-        grid.rowSpacing = 14
-        grid.columnSpacing = 6
+        grid.rowSpacing = 18
+        grid.columnSpacing = 4
 
         let icon = NSImageView(image: NSApp.applicationIconImage ?? NSImage())
         icon.imageScaling = .scaleProportionallyUpOrDown
@@ -39,10 +39,21 @@ final class StartPageView: NSView {
         emptyHint.addArrangedSubview(icon)
         emptyHint.addArrangedSubview(hint)
 
+        // The heading starts where the first tile's square does.
+        let headingRow = NSView()
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        headingRow.addSubview(heading)
+        NSLayoutConstraint.activate([
+            heading.leadingAnchor.constraint(equalTo: headingRow.leadingAnchor, constant: SiteTile.wellInset),
+            heading.trailingAnchor.constraint(lessThanOrEqualTo: headingRow.trailingAnchor),
+            heading.topAnchor.constraint(equalTo: headingRow.topAnchor),
+            heading.bottomAnchor.constraint(equalTo: headingRow.bottomAnchor),
+        ])
+
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 14
-        content.addArrangedSubview(heading)
+        content.spacing = 16
+        content.addArrangedSubview(headingRow)
         content.addArrangedSubview(grid)
 
         for view in [content, emptyHint] {
@@ -99,10 +110,16 @@ final class StartPageView: NSView {
 /// One site: its favicon, or its first letter, on a rounded square, with the
 /// site's name under it.
 private final class SiteTile: NSView {
+    static let width: CGFloat = 112
+    static let wellSide: CGFloat = 68
+    /// From a tile's edge to its square's.
+    static let wellInset = (width - wellSide) / 2
+
     private let action: () -> Void
     private let well = NSView()
     private let tint: NSColor
     private var isHovered = false { didSet { needsDisplay = true } }
+    private var isPressed = false { didSet { needsDisplay = true } }
 
     init(site: FrequentSite, action: @escaping () -> Void) {
         self.action = action
@@ -113,14 +130,15 @@ private final class SiteTile: NSView {
 
         let glyph: NSView
         if let data = site.icon, let image = NSImage(data: data) {
-            let view = NSImageView(image: image)
+            let view = FaviconView()
+            view.image = image
             view.imageScaling = .scaleProportionallyUpOrDown
-            view.widthAnchor.constraint(equalToConstant: 30).isActive = true
-            view.heightAnchor.constraint(equalToConstant: 30).isActive = true
+            view.widthAnchor.constraint(equalToConstant: 32).isActive = true
+            view.heightAnchor.constraint(equalToConstant: 32).isActive = true
             glyph = view
         } else {
             let letter = NSTextField(labelWithString: site.host.first.map { String($0).uppercased() } ?? "?")
-            letter.font = .systemFont(ofSize: 24, weight: .semibold)
+            letter.font = .systemFont(ofSize: 26, weight: .semibold).rounded
             letter.textColor = tint
             glyph = letter
         }
@@ -137,16 +155,16 @@ private final class SiteTile: NSView {
         well.addSubview(glyph)
         addSubview(name)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 108),
+            widthAnchor.constraint(equalToConstant: Self.width),
             well.topAnchor.constraint(equalTo: topAnchor),
             well.centerXAnchor.constraint(equalTo: centerXAnchor),
-            well.widthAnchor.constraint(equalToConstant: 64),
-            well.heightAnchor.constraint(equalToConstant: 64),
+            well.widthAnchor.constraint(equalToConstant: Self.wellSide),
+            well.heightAnchor.constraint(equalToConstant: Self.wellSide),
             glyph.centerXAnchor.constraint(equalTo: well.centerXAnchor),
             glyph.centerYAnchor.constraint(equalTo: well.centerYAnchor),
-            name.topAnchor.constraint(equalTo: well.bottomAnchor, constant: 7),
-            name.leadingAnchor.constraint(equalTo: leadingAnchor),
-            name.trailingAnchor.constraint(equalTo: trailingAnchor),
+            name.topAnchor.constraint(equalTo: well.bottomAnchor, constant: 8),
+            name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            name.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             name.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         toolTip = site.title.isEmpty ? site.url : "\(site.title)\n\(site.url)"
@@ -165,9 +183,10 @@ private final class SiteTile: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        well.layer?.cornerRadius = 16
+        well.layer?.cornerRadius = 18
         well.layer?.cornerCurve = .continuous
-        well.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(isHovered ? 0.12 : 0.06).cgColor
+        let alpha = isPressed ? 0.16 : isHovered ? 0.11 : 0.06
+        well.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
         well.layer?.borderWidth = 1
         well.layer?.borderColor = NSColor.separatorColor.cgColor
     }
@@ -180,14 +199,22 @@ private final class SiteTile: NSView {
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
     override func mouseExited(with event: NSEvent) { isHovered = false }
-    override func mouseDown(with event: NSEvent) {}
+    override func mouseDown(with event: NSEvent) { isPressed = true }
 
     override func mouseUp(with event: NSEvent) {
+        isPressed = false
         if bounds.contains(convert(event.locationInWindow, from: nil)) { action() }
     }
 
     override func accessibilityPerformPress() -> Bool {
         action()
         return true
+    }
+}
+
+private extension NSFont {
+    /// The same font in the rounded design, where the system has one.
+    var rounded: NSFont {
+        fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: pointSize) } ?? self
     }
 }

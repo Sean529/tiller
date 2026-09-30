@@ -85,7 +85,8 @@ final class FindBar: NSView, NSTextFieldDelegate {
         let hasText = !field.stringValue.isEmpty
         switch result {
         case let (count, active)? where count > 0:
-            countLabel.stringValue = "\(active) of \(count)"
+            // Chromium counts before it picks a match.
+            countLabel.stringValue = active > 0 ? "\(active) of \(count)" : count == 1 ? "1 match" : "\(count) matches"
             countLabel.textColor = .secondaryLabelColor
         case _? where hasText:
             countLabel.stringValue = "No matches"

@@ -470,7 +470,7 @@ enum AgentMarkdown {
                 result.append(NSAttributedString(string: "\n", attributes: [.font: body]))
             }
             let start = result.length
-            result.append(inFence ? code(line) : block(line, trimmed: trimmed))
+            result.append(rendered(line, trimmed: trimmed, inFence: inFence))
             if previousBlank, start > 0 {
                 // A gap before the paragraph that followed a blank line.
                 let range = NSRange(location: start, length: result.length - start)
@@ -483,6 +483,21 @@ enum AgentMarkdown {
             previousBlank = false
         }
         return result
+    }
+
+    /// Lines rendered before, by their text after an F in a fence or a B
+    /// outside. A streamed answer renders again with every few words, and
+    /// all but its last line are the same each time.
+    private static var renderedLines: [String: NSAttributedString] = [:]
+    private static let renderedLinesLimit = 4000
+
+    private static func rendered(_ line: String, trimmed: String, inFence: Bool) -> NSAttributedString {
+        let key = (inFence ? "F" : "B") + line
+        if let cached = renderedLines[key] { return cached }
+        let text = inFence ? code(line) : block(line, trimmed: trimmed)
+        if renderedLines.count >= renderedLinesLimit { renderedLines.removeAll(keepingCapacity: true) }
+        renderedLines[key] = text
+        return text
     }
 
     private static let body = NSFont.systemFont(ofSize: bodySize)

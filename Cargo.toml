@@ -16,3 +16,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# The core parses DevTools replies, screenshots among them, on the UI thread.
+[profile.release.package.serde_json]
+opt-level = 3

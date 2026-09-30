@@ -156,8 +156,9 @@ private final class SuggestionsPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// A clock, the page's title, then its address in grey. The highlighted row
-/// is filled with the accent color, as in a menu.
+/// The site's favicon, or a clock without one, the page's title, then its
+/// address in grey. The highlighted row is filled with the accent color, as
+/// in a menu.
 private final class SuggestionRow: NSView {
     var onHover: (() -> Void)?
     var onClick: (() -> Void)?
@@ -168,11 +169,12 @@ private final class SuggestionRow: NSView {
             needsDisplay = true
             title.textColor = isHighlighted ? .white : .labelColor
             url.textColor = isHighlighted ? .white.withAlphaComponent(0.8) : .secondaryLabelColor
-            icon.contentTintColor = isHighlighted ? .white : .secondaryLabelColor
+            if !showsFavicon { icon.contentTintColor = isHighlighted ? .white : .secondaryLabelColor }
         }
     }
 
-    private let icon = NSImageView(image: SuggestionRow.clock ?? NSImage())
+    private let icon = FaviconView()
+    private let showsFavicon: Bool
     private let title: NSTextField
     private let url: NSTextField
 
@@ -182,8 +184,18 @@ private final class SuggestionRow: NSView {
     init(page: HistoryPage) {
         title = NSTextField(labelWithString: page.displayTitle)
         url = NSTextField(labelWithString: HistoryStore.bare(page.url))
+        let favicon = page.icon.flatMap(NSImage.init(data:))
+        showsFavicon = favicon != nil
         super.init(frame: .zero)
-        icon.contentTintColor = .secondaryLabelColor
+        if let favicon {
+            favicon.size = NSSize(width: 16, height: 16)
+            icon.image = favicon
+        } else {
+            icon.image = Self.clock
+            icon.contentTintColor = .secondaryLabelColor
+        }
+        icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
         icon.setContentHuggingPriority(.required, for: .horizontal)
         title.font = .systemFont(ofSize: 13)
         title.lineBreakMode = .byTruncatingTail

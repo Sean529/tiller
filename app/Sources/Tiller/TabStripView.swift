@@ -256,7 +256,7 @@ final class TabItemView: NSView {
         }
     }
 
-    private let icon = NSImageView()
+    private let icon = FaviconView()
     private let spinner = NSProgressIndicator()
     private let titleLabel = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
@@ -336,8 +336,7 @@ final class TabItemView: NSView {
             titleLabel.stringValue = title
             toolTip = title
         }
-        let image = tab.favicon ?? Self.globe
-        if icon.image !== image { icon.image = image }
+        icon.image = tab.favicon ?? Self.globe
         icon.contentTintColor = .secondaryLabelColor
         updateAppearance()
     }

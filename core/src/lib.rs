@@ -65,6 +65,11 @@ pub unsafe extern "C" fn tiller_core_start(data_dir: *const c_char, extensions: 
         root_cache_path: CefString::from(root.as_str()),
         cache_path: CefString::from(format!("{root}/Default").as_str()),
         persist_session_cookies: 1,
+        // Chrome's user agent, with Tiller named after it, so sites treat
+        // Tiller as the Chrome it is. Chrome only gives its major version.
+        user_agent_product: CefString::from(
+            format!("Chrome/{}.0.0.0 Tiller/{}", sys::CHROME_VERSION_MAJOR, env!("CARGO_PKG_VERSION")).as_str(),
+        ),
         log_severity: LogSeverity::WARNING,
         ..Default::default()
     };

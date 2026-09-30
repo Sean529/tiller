@@ -19,6 +19,8 @@ final class AddressBarView: NSView {
     }
 
     private let statusIcon = NSImageView()
+    /// The symbol `statusIcon` shows, so it is only made when it changes.
+    private var statusSymbol = ""
     private let glass = NSGlassEffectView()
     private let progressFill = NSView()
     private var capsuleLeading: NSLayoutConstraint!
@@ -173,8 +175,11 @@ final class AddressBarView: NSView {
         } else {
             ("globe", "Page")
         }
-        statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        if statusSymbol != symbol {
+            statusSymbol = symbol
+            statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+                .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        }
         statusIcon.toolTip = url.hasPrefix("http") ? description : nil
     }
 }
@@ -194,12 +199,25 @@ final class AddressField: NSTextField {
             showURL()
             return false
         }
-        // A click places the caret after this returns; select everything
-        // afterwards so the first click selects the whole URL, as in Safari.
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.currentEditor()?.selectAll(nil) }
-        }
+        currentEditor()?.selectAll(nil)
         return true
+    }
+
+    /// The first click selects the whole URL, as in Safari. Left to the
+    /// field editor, it would put the caret where the click landed.
+    override func mouseDown(with event: NSEvent) {
+        guard isEditing else {
+            window?.makeFirstResponder(self)
+            // Becoming first responder on a click can hand the click to the
+            // field editor, which puts the caret where it landed, so select
+            // now and again once that has settled.
+            currentEditor()?.selectAll(nil)
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated { self?.currentEditor()?.selectAll(nil) }
+            }
+            return
+        }
+        super.mouseDown(with: event)
     }
 
     override func textDidEndEditing(_ notification: Notification) {

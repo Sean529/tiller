@@ -29,6 +29,9 @@ final class Tab {
     let hostView = BrowserHostView()
 
     private(set) var browserID: Int32 = -1
+    /// Whether the browser exists. A tab restored from the last session waits
+    /// for its first selection, so a launch with many tabs loads only one page.
+    private(set) var isStarted = false
     private(set) var url = ""
     private(set) var title = ""
     private(set) var isLoading = false
@@ -53,9 +56,33 @@ final class Tab {
         return URL(string: url)?.host() ?? url
     }
 
+    /// Keeps `url` and `title` for a later `startIfNeeded`, and shows the
+    /// site's saved favicon meanwhile.
+    func prepare(url: String, title: String) {
+        self.url = url
+        self.title = title
+        HistoryStore.shared.icon(for: url) { [weak self] png in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, !self.isStarted, self.favicon == nil, let png else { return }
+                    self.showFavicon(png)
+                    // History has this icon already.
+                    self.recordedIcon = png
+                    self.delegate?.tabDidChange(self)
+                }
+            }
+        }
+    }
+
+    /// Starts a prepared tab's browser. `hostView` must be in a window and sized.
+    func startIfNeeded() {
+        if !isStarted { start(url: url, title: title) }
+    }
+
     /// Creates the browser inside `hostView`, which must already be in a window
     /// and sized. `title` shows until the page reports its own.
     func start(url: String, title: String = "") {
+        isStarted = true
         self.url = url
         self.title = title
         let size = hostView.bounds.size
@@ -210,11 +237,15 @@ final class Tab {
 
     nonisolated private func faviconChanged(_ png: Data) {
         MainActor.assumeIsolated {
-            faviconPNG = png.isEmpty ? nil : png
-            favicon = png.isEmpty ? nil : NSImage(data: png)
-            favicon?.size = NSSize(width: 16, height: 16)
+            showFavicon(png)
             delegate?.tabDidChange(self)
         }
+    }
+
+    private func showFavicon(_ png: Data) {
+        faviconPNG = png.isEmpty ? nil : png
+        favicon = png.isEmpty ? nil : NSImage(data: png)
+        favicon?.size = NSSize(width: 16, height: 16)
     }
 
     nonisolated private func openTab(_ url: String, background: Bool) {

@@ -89,6 +89,8 @@ class SettingsPane: NSViewController {
     func addNote(_ note: NSTextField) {
         let row = grid.addRow(with: [NSGridCell.emptyContentView, note])
         row.topPadding = -4
+        // Sets the note's control apart from the one that follows.
+        row.bottomPadding = 6
     }
 
     static func note(_ text: String = "") -> NSTextField {
@@ -97,6 +99,17 @@ class SettingsPane: NSViewController {
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    /// A note of up to two lines that wraps within `width`, for under a
+    /// table. It keeps room for both, since the pane is sized once.
+    static func wrappingNote(width: CGFloat) -> NSTextField {
+        let label = note()
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 2
+        label.preferredMaxLayoutWidth = width
+        label.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
         return label
     }
 
@@ -283,7 +296,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     private let copyButton = NSButton(title: "Copy Password", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let removeAllButton = NSButton(title: "Remove All…", target: nil, action: nil)
-    private let note = SettingsPane.note()
+    private let note = SettingsPane.wrappingNote(width: 560)
     private var entries: [PasswordStore.Entry] { PasswordStore.shared.entries }
 
     init() {
@@ -301,7 +314,6 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
             table.addTableColumn(column)
         }
         table.allowsMultipleSelection = true
-        table.usesAlternatingRowBackgroundColors = true
         table.style = .inset
         table.dataSource = self
         table.delegate = self
@@ -437,7 +449,7 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
     private let addCRXButton = NSButton(title: "Add CRX File…", target: nil, action: nil)
     private let optionsButton = NSButton(title: "Options", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
-    private let note = SettingsPane.note()
+    private let note = SettingsPane.wrappingNote(width: 600)
     private var store: ExtensionStore { .shared }
 
     init() {
@@ -458,7 +470,6 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
             table.addTableColumn(column)
         }
         table.allowsMultipleSelection = true
-        table.usesAlternatingRowBackgroundColors = true
         table.style = .inset
         table.rowHeight = 22
         table.dataSource = self
@@ -758,10 +769,20 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         showFolderState()
 
         let scroll = NSTextView.scrollableTextView()
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
-        scroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        // A rounded box like the text fields above it.
+        let box = NSBox()
+        box.boxType = .custom
+        box.cornerRadius = 6
+        box.borderColor = .separatorColor
+        box.fillColor = .labelColor.withAlphaComponent(0.04)
+        box.contentViewMargins = NSSize(width: 1, height: 1)
+        box.contentView = scroll
+        box.heightAnchor.constraint(equalToConstant: 120).isActive = true
         let textView = scroll.documentView as! NSTextView
+        textView.drawsBackground = false
         textView.string = Settings.agentInstructions
         textView.font = .systemFont(ofSize: 13)
         textView.isRichText = false
@@ -770,7 +791,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         textView.textContainerInset = NSSize(width: 2, height: 4)
         textView.delegate = self
         instructionsView = textView
-        let row = addRow("Extra instructions:", Self.fixWidth(scroll))
+        let row = addRow("Extra instructions:", Self.fixWidth(box))
         row.rowAlignment = .none
         row.cell(at: 0).yPlacement = .top
         addNote(Self.note("Added after Tiller's prompt. Applies from the next new chat."))
@@ -950,7 +971,7 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
     private let addButton = NSButton(title: "New Profile…", target: nil, action: nil)
     private let renameButton = NSButton(title: "Rename…", target: nil, action: nil)
     private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
-    private let note = SettingsPane.note()
+    private let note = SettingsPane.wrappingNote(width: 560)
     private var profiles: [Profile] = []
 
     init() {
@@ -967,7 +988,6 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
             column.width = width
             table.addTableColumn(column)
         }
-        table.usesAlternatingRowBackgroundColors = true
         table.style = .inset
         table.dataSource = self
         table.delegate = self
