@@ -20,6 +20,21 @@ if [ ! -d "$CEF_PATH/$FRAMEWORK" ]; then
     echo "CEF not found at $CEF_PATH. See README.md for the one-time download." >&2
     exit 1
 fi
+# The framework copied into the app can come from another folder than the
+# headers the Rust crates build against: the stock CEF download lacks H.264
+# and AAC, so README.md has a build with them go in ~/.local/share/cef-codecs.
+# CEF_FRAMEWORK_DIR overrides; without it that folder is used when it holds
+# the framework, else the CEF_PATH one.
+if [ -z "${CEF_FRAMEWORK_DIR:-}" ]; then
+    CEF_FRAMEWORK_DIR="$HOME/.local/share/cef-codecs"
+    [ -d "$CEF_FRAMEWORK_DIR/$FRAMEWORK" ] || CEF_FRAMEWORK_DIR="$CEF_PATH"
+fi
+if [ ! -d "$CEF_FRAMEWORK_DIR/$FRAMEWORK" ]; then
+    echo "CEF framework not found at $CEF_FRAMEWORK_DIR." >&2
+    exit 1
+fi
+FRAMEWORK_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$CEF_FRAMEWORK_DIR/$FRAMEWORK/Resources/Info.plist" 2>/dev/null || echo unknown)"
+echo "==> CEF framework $FRAMEWORK_VERSION from $CEF_FRAMEWORK_DIR"
 
 cargo_flags=()
 [ "$CONFIG" = "release" ] && cargo_flags+=(--release)
@@ -98,7 +113,7 @@ cp -R "$ROOT/app/Resources/Agents" "$APP/Contents/Resources/Agents"
 write_plist "$APP/Contents" "Tiller" "$BUNDLE_ID" 0
 
 # ditto keeps the framework's symlinks and permissions intact.
-ditto "$CEF_PATH/$FRAMEWORK" "$APP/Contents/Frameworks/$FRAMEWORK"
+ditto "$CEF_FRAMEWORK_DIR/$FRAMEWORK" "$APP/Contents/Frameworks/$FRAMEWORK"
 
 # Keep only the English and Chinese Chromium locales, and drop SwiftShader,
 # the software renderer used only when the GPU is unavailable.
