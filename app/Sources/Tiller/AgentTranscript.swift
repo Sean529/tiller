@@ -34,19 +34,39 @@ final class TranscriptView: NSView {
 
     var isEmpty: Bool { stack.arrangedSubviews.isEmpty }
 
+    /// The group taking tool calls until any other row, or `closeToolGroup()`.
+    private var openGroup: ToolGroupView?
+
+    /// Tool calls that follow one another go into one group; any other row
+    /// ends the group.
     func add(_ row: NSView) {
-        // Tool calls in a row sit closer together than other messages.
-        if row is ToolRowView, let last = stack.arrangedSubviews.last, last is ToolRowView {
-            stack.setCustomSpacing(4, after: last)
+        if let call = row as? ToolRowView {
+            if let openGroup {
+                openGroup.add(call)
+                needsLayout = true
+            } else {
+                let group = ToolGroupView(first: call)
+                add(group)
+                openGroup = group
+            }
+            return
         }
+        closeToolGroup()
         stack.addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         if lastWidth > 0 { Self.fit(row, width: lastWidth) }
         needsLayout = true
     }
 
+    /// Ends the current run of tool calls, folding them under their header.
+    func closeToolGroup() {
+        openGroup?.close()
+        openGroup = nil
+    }
+
     func clear() {
         for view in stack.arrangedSubviews { view.removeFromSuperview() }
+        openGroup = nil
     }
 
     /// Whether the bottom of the transcript is in view, give or take a line.
@@ -264,29 +284,35 @@ private final class ThumbnailView: NSView {
 }
 
 /// One tool call: a spinner, then a check or a cross, beside the tool and
-/// what it acted on. A failed call adds the first line of its error.
+/// what it acted on. A running call shows a few lines of its arguments; a
+/// finished one keeps a single line. A failed call adds the first line of
+/// its error. With `disclosure`, the row is the clickable header of a
+/// `ToolGroupView`, with a chevron for its state.
 final class ToolRowView: NSView, TranscriptRow {
+    enum Outcome { case running, done, failed, unfinished }
+
+    /// The tool's name without the MCP server prefix.
+    private(set) var tool: String
+    private(set) var outcome = Outcome.running
+    /// Called when the call finishes, whichever way.
+    var onFinish: (() -> Void)?
+    /// Called when a disclosure row is clicked.
+    var onToggle: (() -> Void)?
+    var isExpanded = false {
+        didSet { chevron?.image = Self.chevronImage(expanded: isExpanded) }
+    }
+
     private let spinner = NSProgressIndicator()
     private let icon = NSImageView()
     private let label = NSTextField(wrappingLabelWithString: "")
-    private let heading: NSAttributedString
+    private let chevron: NSImageView?
+    private var heading: NSAttributedString
 
     /// `detail` is what `detail(_:)` made of the call's input.
-    init(name: String, detail: String) {
-        // Chats saved before the rename from Mini carry the old server name.
-        let prefix = ["mcp__tiller__", "mcp__mini__"].first { name.hasPrefix($0) }
-        let tool = prefix.map { String(name.dropFirst($0.count)) } ?? name
-        let text = NSMutableAttributedString(string: tool, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
-            .foregroundColor: NSColor.labelColor,
-        ])
-        if !detail.isEmpty {
-            text.append(NSAttributedString(string: "  " + detail, attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]))
-        }
-        heading = text
+    init(name: String, detail: String, disclosure: Bool = false) {
+        tool = Self.tool(name)
+        heading = Self.heading(tool: tool, detail: detail)
+        chevron = disclosure ? NSImageView(image: Self.chevronImage(expanded: false)!) : nil
         super.init(frame: .zero)
         wantsLayer = true
 
@@ -296,8 +322,11 @@ final class ToolRowView: NSView, TranscriptRow {
         spinner.startAnimation(nil)
         icon.isHidden = true
         label.attributedStringValue = heading
-        label.maximumNumberOfLines = 4
+        label.maximumNumberOfLines = disclosure ? 1 : 4
         label.lineBreakMode = .byTruncatingTail
+        // Without this, a line cut by the limit ends at a word break with no
+        // ellipsis when the text would have wrapped there.
+        label.cell?.truncatesLastVisibleLine = true
         for view in [spinner, icon, label] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -310,16 +339,38 @@ final class ToolRowView: NSView, TranscriptRow {
             spinner.centerXAnchor.constraint(equalTo: icon.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
             label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 5),
             label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
         ])
+        if let chevron {
+            chevron.contentTintColor = .tertiaryLabelColor
+            chevron.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(chevron)
+            NSLayoutConstraint.activate([
+                chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
+                chevron.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+                chevron.widthAnchor.constraint(equalToConstant: 12),
+                label.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -6),
+            ])
+            label.isSelectable = false
+            setAccessibilityRole(.disclosureTriangle)
+        } else {
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9).isActive = true
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func fit(width: CGFloat) {
-        label.preferredMaxLayoutWidth = width - 39
+        label.preferredMaxLayoutWidth = width - 39 - (chevron == nil ? 0 : 18)
+    }
+
+    /// Changes what the row says. A group header counts its calls as they come.
+    func update(name: String, detail: String) {
+        tool = Self.tool(name)
+        heading = Self.heading(tool: tool, detail: detail)
+        label.attributedStringValue = heading
+        setAccessibilityLabel(heading.string)
     }
 
     /// A nil `isError` means the call never finished: the agent stopped first.
@@ -334,13 +385,40 @@ final class ToolRowView: NSView, TranscriptRow {
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
             .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
         icon.contentTintColor = color
-        guard isError == true, !summary.isEmpty else { return }
-        let text = NSMutableAttributedString(attributedString: heading)
-        text.append(NSAttributedString(string: "\n" + summary, attributes: [
-            .font: NSFont.systemFont(ofSize: 11),
-            .foregroundColor: NSColor.systemRed,
-        ]))
-        label.attributedStringValue = text
+        outcome = switch isError {
+        case true?: .failed
+        case false?: .done
+        case nil: .unfinished
+        }
+        label.maximumNumberOfLines = 1
+        if isError == true, !summary.isEmpty {
+            let text = NSMutableAttributedString(attributedString: heading)
+            text.append(NSAttributedString(string: "\n" + summary, attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.systemRed,
+            ]))
+            label.attributedStringValue = text
+            label.maximumNumberOfLines = 3
+        }
+        onFinish?()
+    }
+
+    // Clicks anywhere on a disclosure row toggle it, the label included.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return chevron != nil && hit != nil ? self : hit
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if chevron != nil, bounds.contains(convert(event.locationInWindow, from: nil)) { onToggle?() }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard chevron != nil else { return false }
+        onToggle?()
+        return true
     }
 
     override var wantsUpdateLayer: Bool { true }
@@ -351,10 +429,41 @@ final class ToolRowView: NSView, TranscriptRow {
         layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
     }
 
+    private static func tool(_ name: String) -> String {
+        // Chats saved before the rename from Mini carry the old server name.
+        let prefix = ["mcp__tiller__", "mcp__mini__"].first { name.hasPrefix($0) }
+        return prefix.map { String(name.dropFirst($0.count)) } ?? name
+    }
+
+    private static func heading(tool: String, detail: String) -> NSAttributedString {
+        let text = NSMutableAttributedString(string: tool, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
+        ])
+        if !detail.isEmpty {
+            text.append(NSAttributedString(string: "  " + detail, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+        }
+        return text
+    }
+
+    private static func chevronImage(expanded: Bool) -> NSImage? {
+        NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: expanded ? "Hide steps" : "Show steps")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+    }
+
     /// The arguments worth showing: where it acts, and what it types or runs.
+    /// URLs lose their scheme and scripts their line breaks, so a row's one
+    /// line holds what matters.
     static func detail(_ input: [String: Any]) -> String {
         var parts: [String] = []
-        if let url = input["url"] { parts.append("\(url)") }
+        if let url = input["url"] {
+            var address = "\(url)"
+            for scheme in ["https://", "http://"] where address.hasPrefix(scheme) { address.removeFirst(scheme.count) }
+            parts.append(address)
+        }
         if let ref = input["ref"] { parts.append("ref \(ref)") } else if let selector = input["selector"] { parts.append("\(selector)") }
         if let text = input["text"] { parts.append("\"\(text)\"") }
         if let expression = input["expression"] { parts.append("\(expression)") }
@@ -362,8 +471,107 @@ final class ToolRowView: NSView, TranscriptRow {
         if let pattern = input["pattern"] { parts.append("\(pattern)") }
         if let path = input["file_path"] ?? input["path"] { parts.append("\(path)") }
         if parts.isEmpty, let tab = input["tab_id"] { parts.append("tab \(tab)") }
-        let string = parts.joined(separator: " ").replacingOccurrences(of: "\n", with: " ")
+        let string = parts.joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
         return string.count > 80 ? String(string.prefix(80)) + "…" : string
+    }
+}
+
+/// A run of tool calls between messages, under a header that counts them.
+/// The calls show while the run is under way and fold under the header when
+/// it ends; clicking the header shows them again. A run of one call is just
+/// that call, with no header.
+final class ToolGroupView: NSView, TranscriptRow {
+    private let header = ToolRowView(name: "", detail: "", disclosure: true)
+    private let stack = NSStackView()
+    private let rows = NSStackView()
+    private var calls: [ToolRowView] = []
+    private(set) var isOpen = true
+    /// Set once the user clicked the header: closing then leaves their choice alone.
+    private var toggled = false
+    private var width: CGFloat = 0
+    /// How far the calls sit in from the header. None when there is no header.
+    private var indent: CGFloat { calls.count > 1 ? 12 : 0 }
+    private var rowsLeading: NSLayoutConstraint!
+    private var rowsWidth: NSLayoutConstraint!
+
+    init(first: ToolRowView) {
+        super.init(frame: .zero)
+        for list in [stack, rows] {
+            list.orientation = .vertical
+            list.alignment = .leading
+            list.spacing = 4
+            list.translatesAutoresizingMaskIntoConstraints = false
+        }
+        addSubview(stack)
+        stack.addArrangedSubview(header)
+        stack.addArrangedSubview(rows)
+        header.onToggle = { [weak self] in
+            guard let self else { return }
+            toggled = true
+            setExpanded(!header.isExpanded)
+        }
+        header.isExpanded = true
+        rowsLeading = rows.leadingAnchor.constraint(equalTo: stack.leadingAnchor)
+        rowsWidth = rows.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            rowsLeading, rowsWidth,
+        ])
+        add(first)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func add(_ call: ToolRowView) {
+        calls.append(call)
+        call.translatesAutoresizingMaskIntoConstraints = false
+        rows.addArrangedSubview(call)
+        call.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+        call.onFinish = { [weak self] in self?.updateHeader() }
+        rowsLeading.constant = indent
+        rowsWidth.constant = -indent
+        if width > 0 { fit(width: width) }
+        updateHeader()
+    }
+
+    /// The run ended: the header takes its outcome and the calls fold away.
+    func close() {
+        guard isOpen else { return }
+        isOpen = false
+        if !toggled { setExpanded(false) }
+        updateHeader()
+    }
+
+    func fit(width: CGFloat) {
+        self.width = width
+        header.fit(width: width)
+        for call in calls { call.fit(width: width - indent) }
+    }
+
+    private func setExpanded(_ expanded: Bool) {
+        header.isExpanded = expanded
+        header.toolTip = expanded ? "Hide steps" : "Show steps"
+        updateHeader()
+    }
+
+    private func updateHeader() {
+        // One call has no header to reopen it from, so it stays in view.
+        header.isHidden = calls.count < 2
+        rows.isHidden = !header.isExpanded && calls.count > 1
+        var names: [String] = []
+        for call in calls where !names.contains(call.tool) { names.append(call.tool) }
+        let failed = calls.filter { $0.outcome == .failed }.count
+        header.update(
+            name: "\(calls.count) steps" + (failed > 0 ? " · \(failed) failed" : ""),
+            detail: names.joined(separator: ", ")
+        )
+        guard !isOpen else { return }
+        let settled = calls.allSatisfy { $0.outcome == .done || $0.outcome == .failed }
+        header.finish(isError: failed > 0 ? true : settled ? false : nil, summary: "")
     }
 }
 

@@ -60,6 +60,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         if conversation != nil {
             records = AgentHistoryStore.shared.records(for: id)
             records.forEach(show)
+            transcript.closeToolGroup()
         }
         showIdle()
         NotificationCenter.default.addObserver(
@@ -80,6 +81,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             addNote("Stopped")
         }
         finishToolRows()
+        transcript.closeToolGroup()
         endSession()
         for attachment in composer.attachments { try? FileManager.default.removeItem(at: attachment.url) }
         composer.attachments = []
@@ -408,6 +410,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             addError(message)
         case .turnFinished(let error, let stopped):
             keepLiveText()
+            transcript.closeToolGroup()
             if let error { addError(error) }
             if stopped { addNote("Stopped") }
             showIdle()
@@ -415,6 +418,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         case .exited(let message):
             keepLiveText()
             finishToolRows()
+            transcript.closeToolGroup()
             if resuming {
                 // The saved session couldn't be continued, so start over.
                 conversation?.sessionID = nil
