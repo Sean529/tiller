@@ -37,6 +37,7 @@ final class AgentPanelView: NSView {
         super.init(frame: frame)
         build()
         restoreTabs()
+        AgentEnvironment.warmUp()
         NotificationCenter.default.addObserver(
             self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
         )
@@ -52,6 +53,7 @@ final class AgentPanelView: NSView {
         saveTabs()
         chats.forEach { $0.shutDown() }
         AgentHistoryStore.shared.flush()
+        AgentHistoryStore.shared.waitForWrites()
     }
 
     var hasKeyboardFocus: Bool {

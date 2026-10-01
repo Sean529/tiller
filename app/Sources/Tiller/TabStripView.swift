@@ -81,10 +81,10 @@ final class TabStripView: NSView {
         }
         existing.values.forEach { $0.removeFromSuperview() }
         selectedItem = items.first { $0.tab === selected }
-        for item in items {
-            item.isSelected = item === selectedItem
-            item.refresh()
-        }
+        // Selection changes redraw the two tabs concerned on their own; a tab
+        // whose title or icon changed came through `refresh(_:)` already.
+        for item in items { item.isSelected = item === selectedItem }
+        added.forEach { $0.refresh() }
         let animate = window != nil && !items.isEmpty && (added.count < items.count || !existing.isEmpty)
         layoutItems(animated: animate, fadeIn: animate ? added : [])
     }

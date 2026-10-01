@@ -38,6 +38,19 @@ struct AgentAttachment {
         self.image = NSImage(cgImage: scaled, size: NSSize(width: scaled.width, height: scaled.height))
     }
 
+    /// A small copy of the image file at `url`, at most `side` pixels on its
+    /// long edge, made without decoding the whole image.
+    static func thumbnail(at url: URL, side: CGFloat) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(side * 2),
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+
     private static func scaled(_ image: CGImage) -> CGImage? {
         let longEdge = max(image.width, image.height)
         guard longEdge > maxPixels else { return image }

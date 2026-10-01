@@ -61,23 +61,34 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// A saved chat opens at its newest message once it has a size.
     private var pendingScrollToBottom = false
 
+    /// Whether the saved transcript has been read and drawn. A saved chat
+    /// waits until it is first shown or written to, so a launch with several
+    /// tabs of long chats doesn't build them all behind a hidden panel.
+    private var recordsLoaded: Bool
+
     /// A new chat, or a saved one with its transcript.
     init(conversation: AgentConversation? = nil) {
         id = conversation?.id ?? UUID().uuidString
         self.conversation = conversation
         tools = conversation?.tools ?? Settings.agentTools
+        recordsLoaded = conversation == nil
         super.init(frame: .zero)
         build()
-        if conversation != nil {
-            records = AgentHistoryStore.shared.records(for: id)
-            records.forEach(show)
-            transcript.closeToolGroup()
-            pendingScrollToBottom = !records.isEmpty
-        }
         showIdle()
         NotificationCenter.default.addObserver(
             self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
         )
+    }
+
+    /// Reads and draws the saved transcript, once.
+    func loadIfNeeded() {
+        guard !recordsLoaded else { return }
+        recordsLoaded = true
+        records = AgentHistoryStore.shared.records(for: id)
+        records.forEach(show)
+        transcript.closeToolGroup()
+        pendingScrollToBottom = !records.isEmpty
+        showIdle()
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -184,9 +195,17 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     override func layout() {
         super.layout()
-        guard pendingScrollToBottom, bounds.height > 0, !isHidden else { return }
+        guard bounds.height > 0, !isHiddenOrHasHiddenAncestor else { return }
+        loadIfNeeded()
+        guard pendingScrollToBottom else { return }
         pendingScrollToBottom = false
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.scrollToBottom() } }
+    }
+
+    /// Shown for the first time, or the panel came back: draw the saved chat.
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        if !recordsLoaded { needsLayout = true }
     }
 
     @objc private func transcriptScrolled(_ notification: Notification) {
@@ -339,6 +358,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
 
     func send(_ text: String, images: [AgentAttachment] = []) {
+        loadIfNeeded()
         var conversation = conversation ?? AgentConversation(
             id: id, kind: .current, title: AgentConversation.title(from: text), created: Date(), updated: Date()
         )
@@ -349,8 +369,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         emptyState.isHidden = true
         records.append(.user(text: text, images: images.map(\.url.lastPathComponent)))
         saveRecords()
+        // Only the files are kept for Quick Look, not the images' bytes.
+        let urls = images.map(\.url)
         transcript.add(UserMessageView(text: text, images: images.map(\.image)) { [weak self] index in
-            self?.preview(images.map(\.url), at: index)
+            self?.preview(urls, at: index)
         })
         do {
             try session.send(text, images: images, context: context?() ?? "", skill: skill(calledBy: text))
@@ -372,7 +394,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
 
     private func saveRecords() {
-        guard conversation != nil else { return }
+        // An unloaded chat has nothing new; writing would empty its file.
+        guard conversation != nil, recordsLoaded else { return }
         AgentHistoryStore.shared.setRecords(records, for: id)
     }
 
@@ -602,7 +625,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         setStatus(session == nil ? "" : "Ready", busy: false)
         composer.placeholder = "Ask \(kind.displayName) about this page…"
         emptyState.kind = kind
-        emptyState.isHidden = !transcript.isEmpty
+        emptyState.isHidden = !transcript.isEmpty || !recordsLoaded
     }
 
     private func setBusy(_ busy: Bool) {
@@ -634,10 +657,13 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private func show(_ record: AgentRecord) {
         switch record {
         case .user(let text, let names):
+            // Thumbnails read from the files, not the whole images: a saved
+            // chat can hold a dozen screenshots.
             let loaded = names.map { folder.appendingPathComponent($0) }
-                .compactMap { url in NSImage(contentsOf: url).map { (url, $0) } }
+                .compactMap { url in AgentAttachment.thumbnail(at: url, side: 128).map { (url, $0) } }
+            let urls = loaded.map(\.0)
             transcript.add(UserMessageView(text: text, images: loaded.map(\.1)) { [weak self] index in
-                self?.preview(loaded.map(\.0), at: index)
+                self?.preview(urls, at: index)
             })
         case .text(let text):
             transcript.add(AgentMarkdown.label(text))

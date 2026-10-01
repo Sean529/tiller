@@ -91,7 +91,9 @@ final class AgentHistoryStore {
         pendingRecords[id] = nil
         indexChanged = true
         scheduleWrite()
-        try? FileManager.default.removeItem(at: folder(for: id))
+        // After any write of its transcript still on its way.
+        let folder = folder(for: id)
+        Self.writer.async { try? FileManager.default.removeItem(at: folder) }
     }
 
     /// Where a chat keeps its transcript and images. Created when first written.
@@ -132,27 +134,44 @@ final class AgentHistoryStore {
 
     // MARK: Writing
 
-    /// Writes pending changes now rather than after the short delay.
+    /// Writes pending changes now rather than after the short delay. The
+    /// encoding and writing happen on a background queue, in order, from a
+    /// copy of what is pending: a long agent run saves its transcript twice
+    /// a second, and the whole of it each time.
     func flush() {
         writeScheduled = false
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            for (id, records) in pendingRecords where conversation(id) != nil {
-                let folder = folder(for: id)
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try Self.write(JSONEncoder().encode(records), to: folder.appendingPathComponent("transcript.json"))
+        let transcripts = pendingRecords.filter { conversation($0.key) != nil }
+        pendingRecords.removeAll()
+        let index = indexChanged ? self.index : nil
+        indexChanged = false
+        guard !transcripts.isEmpty || index != nil else { return }
+        let directory = directory, indexURL = indexURL
+        Self.writer.async {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                for (id, records) in transcripts {
+                    let folder = directory.appendingPathComponent(id, isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try Self.write(JSONEncoder().encode(records), to: folder.appendingPathComponent("transcript.json"))
+                }
+                if let index {
+                    try Self.write(JSONEncoder().encode(index), to: indexURL)
+                }
+            } catch {
+                NSLog("Tiller: could not save agent chats: %@", error.localizedDescription)
             }
-            pendingRecords.removeAll()
-            if indexChanged {
-                indexChanged = false
-                try Self.write(JSONEncoder().encode(index), to: indexURL)
-            }
-        } catch {
-            NSLog("Tiller: could not save agent chats: %@", error.localizedDescription)
         }
     }
 
-    private static func write(_ data: Data, to url: URL) throws {
+    /// Blocks until every write so far is on disk. For quitting.
+    func waitForWrites() {
+        Self.writer.sync {}
+    }
+
+    /// One queue, so writes land in the order they were made.
+    private static let writer = DispatchQueue(label: "dev.sorrycc.tiller.agent-chats", qos: .utility)
+
+    nonisolated private static func write(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }

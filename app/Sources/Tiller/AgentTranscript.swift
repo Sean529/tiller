@@ -162,8 +162,11 @@ final class ThumbnailGrid: NSView {
 
     var onOpen: ((Int) -> Void)?
     var onRemove: ((Int) -> Void)?
-    var images: [NSImage] = [] {
-        didSet { rebuild() }
+    /// Only the thumbnails are kept; the images given are let go once they
+    /// are drawn small.
+    var images: [NSImage] {
+        get { [] }
+        set { rebuild(with: newValue) }
     }
 
     private let side: CGFloat
@@ -181,7 +184,7 @@ final class ThumbnailGrid: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private func rebuild() {
+    private func rebuild(with images: [NSImage]) {
         thumbnails.forEach { $0.removeFromSuperview() }
         thumbnails = images.enumerated().map { index, image in
             let thumbnail = ThumbnailView(image: image, removable: onRemove != nil)
@@ -196,12 +199,12 @@ final class ThumbnailGrid: NSView {
 
     /// Before the grid has a width, everything goes in one row.
     private var perRow: Int {
-        guard bounds.width > 0 else { return max(1, images.count) }
+        guard bounds.width > 0 else { return max(1, thumbnails.count) }
         return max(1, Int((bounds.width + Self.spacing) / (side + Self.spacing)))
     }
 
     override var intrinsicContentSize: NSSize {
-        let rows = (images.count + perRow - 1) / perRow
+        let rows = (thumbnails.count + perRow - 1) / perRow
         return NSSize(width: NSView.noIntrinsicMetric, height: rows == 0 ? 0 : CGFloat(rows) * (side + Self.spacing) - Self.spacing)
     }
 
@@ -666,21 +669,32 @@ enum AgentMarkdown {
     private static let bodySize: CGFloat = 13
     private static let listIndent: CGFloat = 16
 
-    /// A pipe table, its cells already rendered.
+    /// A pipe table, its cells as written. They are rendered when drawn, so a
+    /// table still streaming in renders only the cells it gained.
     struct Table {
         /// The lines it was parsed from, to tell whether it changed.
         let source: String
-        let header: [NSAttributedString]
-        let rows: [[NSAttributedString]]
+        let header: [String]
+        let rows: [[String]]
+        let alignments: [NSTextAlignment]
+
+        /// The cell's text rendered for its column, from a cache.
+        @MainActor
+        func cell(_ text: String, header: Bool, column: Int) -> NSAttributedString {
+            AgentMarkdown.cell(text, header: header, alignment: alignments[min(column, alignments.count - 1)])
+        }
     }
 
+    /// The pieces of a message. Text and quotes stay as written and are
+    /// rendered when a view takes them, so a block a streamed answer isn't
+    /// adding to any more costs nothing on the next render.
     enum Block {
-        case text(NSAttributedString)
+        case text(String)
         case table(Table)
         /// A fenced code block, with the language named after the opening fence.
         case code(language: String, text: String)
-        /// Lines quoted with `>`, already rendered.
-        case quote(NSAttributedString)
+        /// Lines quoted with `>`, without the markers.
+        case quote(String)
         /// A horizontal rule.
         case rule
     }
@@ -699,9 +713,9 @@ enum AgentMarkdown {
         var blocks: [Block] = []
         var pending: [String] = []
         func flush() {
-            let text = render(pending.joined(separator: "\n"))
-            pending.removeAll()
-            if text.length > 0 { blocks.append(.text(text)) }
+            defer { pending.removeAll() }
+            guard pending.contains(where: { !$0.allSatisfy(\.isWhitespace) }) else { return }
+            blocks.append(.text(pending.joined(separator: "\n")))
         }
         var index = 0
         while index < lines.count {
@@ -734,9 +748,7 @@ enum AgentMarkdown {
                     quoted.append(String(content))
                     end += 1
                 }
-                let text = NSMutableAttributedString(attributedString: render(quoted.joined(separator: "\n")))
-                text.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: text.length))
-                blocks.append(.quote(text))
+                blocks.append(.quote(quoted.joined(separator: "\n")))
                 index = end
                 continue
             }
@@ -817,21 +829,33 @@ enum AgentMarkdown {
             rows.append(row)
             end += 1
         }
-        func styled(_ row: [String], font: NSFont) -> [NSAttributedString] {
-            row.enumerated().map { column, cell in
-                let text = inline(cell, font: font)
-                let style = NSMutableParagraphStyle()
-                style.lineSpacing = 1
-                style.alignment = alignments[column]
-                text.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: text.length))
-                return text
-            }
-        }
-        let table = Table(
-            source: lines[start..<end].joined(separator: "\n"),
-            header: styled(header, font: .systemFont(ofSize: bodySize, weight: .semibold)),
-            rows: rows.map { styled($0, font: body) })
+        let table = Table(source: lines[start..<end].joined(separator: "\n"), header: header, rows: rows, alignments: alignments)
         return (table, end)
+    }
+
+    /// Cells rendered before, by alignment, weight and text. Streaming
+    /// renders a table again with every row it gains, and all but the last
+    /// row's cells are as they were.
+    private static var renderedCells: [String: NSAttributedString] = [:]
+
+    fileprivate static func cell(_ text: String, header: Bool, alignment: NSTextAlignment) -> NSAttributedString {
+        let key = "\(header ? "H" : "B")\(alignment.rawValue)" + text
+        if let cached = renderedCells[key] { return cached }
+        let rendered = inline(text, font: header ? .systemFont(ofSize: bodySize, weight: .semibold) : body)
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 1
+        style.alignment = alignment
+        rendered.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: rendered.length))
+        if renderedCells.count >= renderedLinesLimit { renderedCells.removeAll(keepingCapacity: true) }
+        renderedCells[key] = rendered
+        return rendered
+    }
+
+    /// A quote's lines, rendered and dimmed.
+    static func renderQuote(_ source: String) -> NSAttributedString {
+        let text = NSMutableAttributedString(attributedString: render(source))
+        text.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: text.length))
+        return text
     }
 
     /// A table line's cells. A pipe after a backslash or inside backticks
@@ -1053,22 +1077,23 @@ final class MarkdownMessageView: NSView, TranscriptRow {
         }
     }
 
-    /// Keeps the views whose kind of block is unchanged, so a streamed
-    /// answer only rewrites the text it is still adding to.
+    /// Keeps the views whose kind of block is unchanged, and the text of
+    /// those whose source is unchanged, so a streamed answer only renders
+    /// and lays out the block it is still adding to.
     private func rebuild() {
         let blocks = AgentMarkdown.blocks(text)
         for (index, block) in blocks.enumerated() {
             let existing = index < stack.arrangedSubviews.count ? stack.arrangedSubviews[index] : nil
             switch block {
-            case .text(let text):
-                if let label = existing as? NSTextField {
-                    if label.attributedStringValue != text { label.attributedStringValue = text }
+            case .text(let source):
+                if let label = existing as? TranscriptLinkLabel {
+                    label.show(source)
                 } else {
                     let label = TranscriptLinkLabel(wrappingLabelWithString: "")
                     label.isSelectable = true
                     // Lets links in the text be clicked.
                     label.allowsEditingTextAttributes = true
-                    label.attributedStringValue = text
+                    label.show(source)
                     place(label, at: index, replacing: existing)
                 }
             case .table(let table):
@@ -1087,12 +1112,12 @@ final class MarkdownMessageView: NSView, TranscriptRow {
                     view.set(language: language, code: code)
                     place(view, at: index, replacing: existing)
                 }
-            case .quote(let text):
+            case .quote(let source):
                 if let view = existing as? MarkdownQuoteView {
-                    view.text = text
+                    view.source = source
                 } else {
                     let view = MarkdownQuoteView()
-                    view.text = text
+                    view.source = source
                     place(view, at: index, replacing: existing)
                 }
             case .rule:
@@ -1206,28 +1231,51 @@ final class MarkdownTableContentView: NSView {
     /// Narrower than this, a column's words would break mid-word.
     private static let minimumColumn: CGFloat = 72
 
-    private var labels: [[NSTextField]] = []
+    private var labels: [[TranscriptLinkLabel]] = []
+    /// Each label's width when its text is on one line, measured once.
+    private var naturalWidths: [ObjectIdentifier: CGFloat] = [:]
     private var width: CGFloat = 0
     private(set) var tableSize = NSSize.zero
     /// Where each row starts, and the bottom of the last.
     private var rowEdges: [CGFloat] = []
 
+    /// Cells whose text and alignment are as before keep their labels, so a
+    /// table streaming in only renders the row it gained.
     var table: AgentMarkdown.Table? {
         didSet {
             guard let table, table.source != oldValue?.source else { return }
-            for label in labels.joined() { label.removeFromSuperview() }
-            labels = ([table.header] + table.rows).map { row in
-                row.map { text in
-                    let label = TranscriptLinkLabel(wrappingLabelWithString: "")
-                    label.isSelectable = true
-                    label.allowsEditingTextAttributes = true
-                    label.attributedStringValue = text
-                    addSubview(label)
-                    return label
+            let rows = [table.header] + table.rows
+            let before = oldValue.map { [$0.header] + $0.rows } ?? []
+            let sameAlignments = oldValue?.alignments == table.alignments
+            for (r, row) in rows.enumerated() {
+                if r >= labels.count { labels.append([]) }
+                for (c, text) in row.enumerated() {
+                    let kept = sameAlignments && c < labels[r].count && r < before.count && c < before[r].count && before[r][c] == text
+                    if kept { continue }
+                    let rendered = table.cell(text, header: r == 0, column: c)
+                    if c < labels[r].count {
+                        let label = labels[r][c]
+                        label.attributedStringValue = rendered
+                        naturalWidths[ObjectIdentifier(label)] = nil
+                    } else {
+                        let label = TranscriptLinkLabel(wrappingLabelWithString: "")
+                        label.isSelectable = true
+                        label.allowsEditingTextAttributes = true
+                        label.attributedStringValue = rendered
+                        addSubview(label)
+                        labels[r].append(label)
+                    }
                 }
+                while labels[r].count > row.count { remove(labels[r].removeLast()) }
             }
+            while labels.count > rows.count { labels.removeLast().forEach(remove) }
             if width > 0 { arrange(width: width) }
         }
+    }
+
+    private func remove(_ label: TranscriptLinkLabel) {
+        naturalWidths[ObjectIdentifier(label)] = nil
+        label.removeFromSuperview()
     }
 
     override var isFlipped: Bool { true }
@@ -1246,11 +1294,19 @@ final class MarkdownTableContentView: NSView {
         return NSSize(width: ceil(size.width), height: ceil(size.height))
     }
 
+    private func naturalWidth(of label: TranscriptLinkLabel) -> CGFloat {
+        let key = ObjectIdentifier(label)
+        if let width = naturalWidths[key] { return width }
+        let width = measure(label, width: .greatestFiniteMagnitude).width
+        naturalWidths[key] = width
+        return width
+    }
+
     private func arrange() {
         guard width > 0, let columns = labels.first?.count, columns > 0 else { return }
         let padding = Self.padding
         let natural = (0..<columns).map { column in
-            labels.map { measure($0[column], width: .greatestFiniteMagnitude).width }.max() ?? 0
+            labels.compactMap { column < $0.count ? naturalWidth(of: $0[column]) : nil }.max() ?? 0
         }
         // Narrow columns keep their width; the wide ones share what is left.
         let available = max(width - CGFloat(columns) * 2 * padding.width, CGFloat(columns) * Self.minimumColumn)
@@ -1274,10 +1330,10 @@ final class MarkdownTableContentView: NSView {
         var y: CGFloat = 0
         rowEdges = [0]
         for row in labels {
-            let heights = row.enumerated().map { measure($1, width: widths[$0]).height }
+            let heights = row.enumerated().map { measure($1, width: widths[min($0, columns - 1)]).height }
             let height = heights.max() ?? 0
             var x: CGFloat = 0
-            for (column, label) in row.enumerated() {
+            for (column, label) in row.enumerated() where column < columns {
                 label.frame = NSRect(x: x + padding.width, y: y + padding.height, width: widths[column], height: heights[column])
                 x += widths[column] + 2 * padding.width
             }
@@ -1440,10 +1496,11 @@ final class MarkdownQuoteView: NSView, TranscriptRow {
     private let label = TranscriptLinkLabel(wrappingLabelWithString: "")
     private static let inset: CGFloat = 14
 
-    var text: NSAttributedString? {
+    /// The quoted lines, without their markers.
+    var source = "" {
         didSet {
-            guard let text, text != oldValue else { return }
-            label.attributedStringValue = text
+            guard source != oldValue else { return }
+            label.attributedStringValue = AgentMarkdown.renderQuote(source)
         }
     }
 
@@ -1503,6 +1560,16 @@ final class MarkdownRuleView: NSView {
 /// default browser. A click opens and selects a tab, Cmd+click opens one
 /// behind the current tab. Other links, such as mailto:, go to their apps.
 final class TranscriptLinkLabel: NSTextField {
+    /// The markdown the label shows, so the same text again isn't rendered
+    /// or laid out again.
+    private var source: String?
+
+    func show(_ markdown: String) {
+        guard markdown != source else { return }
+        source = markdown
+        attributedStringValue = AgentMarkdown.render(markdown)
+    }
+
     /// The field editor's delegate is the label it edits, so it asks here.
     @objc func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         let url = (link as? URL) ?? (link as? String).flatMap { URL(string: $0) }

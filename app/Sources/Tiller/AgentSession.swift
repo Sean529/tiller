@@ -116,7 +116,6 @@ final class AgentSession {
     private(set) var isBusy = false
     private var process: Process?
     private var stdin: FileHandle?
-    private var stdoutBuffer = Data()
     private var stderrTail = ""
     /// Bumped for every process, so output and exit events from a stopped one are ignored.
     private var generation = 0
@@ -180,12 +179,17 @@ final class AgentSession {
         process.standardOutput = output
         process.standardError = errors
 
-        // Pipe handlers run on a background queue. Hop to the main actor with
-        // the raw bytes and parse there.
+        // Pipe handlers run on a background queue, one call at a time per
+        // handle. The lines are split and parsed there, since a turn's output
+        // is a JSON line per token and tool results carry whole screenshots,
+        // and only the parsed messages hop to the main actor.
+        let parser = JSONLineParser()
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty { handle.readabilityHandler = nil }
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.received(stdout: data, generation: generation) } }
+            let messages = parser.feed(data)
+            guard !messages.isEmpty else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.received(messages, generation: generation) } }
         }
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -267,7 +271,6 @@ final class AgentSession {
     private func reset() {
         process = nil
         stdin = nil
-        stdoutBuffer.removeAll()
         stderrTail = ""
         isBusy = false
         interrupted = false
@@ -290,15 +293,10 @@ final class AgentSession {
 
     // MARK: Output
 
-    private func received(stdout data: Data, generation: Int) {
-        guard generation == self.generation, !data.isEmpty else { return }
-        stdoutBuffer.append(data)
-        while let newline = stdoutBuffer.firstIndex(of: 0x0A) {
-            let line = stdoutBuffer[stdoutBuffer.startIndex..<newline]
-            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex...newline)
-            // Not every line is JSON: qodercli prints some notices to stdout.
-            guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
-            if kind == .codex { handleCodex(message) } else { handle(message) }
+    private func received(_ messages: [JSONLineParser.Message], generation: Int) {
+        guard generation == self.generation else { return }
+        for message in messages {
+            if kind == .codex { handleCodex(message.object) } else { handle(message.object) }
         }
     }
 
@@ -616,6 +614,38 @@ final class AgentSession {
     }
 }
 
+/// Splits a pipe's bytes into lines and parses each as a JSON object. Lines
+/// that aren't JSON are dropped: qodercli prints some notices to stdout. Fed
+/// from one handle's readability handler, which runs one call at a time,
+/// so nothing else touches the buffer.
+final class JSONLineParser: @unchecked Sendable {
+    /// A parsed line. The dictionary is built here and read on the main
+    /// actor, never written again, which is what makes handing it over safe.
+    struct Message: @unchecked Sendable {
+        let object: [String: Any]
+    }
+
+    private var buffer = Data()
+    /// How much of `buffer` has no newline, so a long line arriving in
+    /// pieces isn't searched from its start for every piece.
+    private var scanned = 0
+
+    func feed(_ data: Data) -> [Message] {
+        buffer.append(data)
+        var messages: [Message] = []
+        while let newline = buffer[(buffer.startIndex + scanned)...].firstIndex(of: 0x0A) {
+            let line = buffer[buffer.startIndex..<newline]
+            if let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+                messages.append(Message(object: object))
+            }
+            buffer.removeSubrange(buffer.startIndex...newline)
+            scanned = 0
+        }
+        scanned = buffer.count
+        return messages
+    }
+}
+
 /// Where the agent CLIs are, and what they run with.
 @MainActor
 enum AgentEnvironment {
@@ -671,24 +701,43 @@ enum AgentEnvironment {
     }
 
     /// Where the CLI is when Settings has no path for it. Can start a login
-    /// shell, so Settings calls it off the main thread.
+    /// shell, so Settings calls it off the main thread, and `warmUp` asks for
+    /// every CLI in the background at launch so a new chat finds the answer
+    /// waiting.
     nonisolated static func detectedExecutable(for kind: AgentKind) -> String? {
         for directory in searchDirectories {
             let path = "\(directory)/\(kind.rawValue)"
             if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
-        // The shell takes a while, and a new chat asks on the main thread, so
-        // what it found is kept for as long as the file is there.
-        if let found = shellFound.withLock({ $0[kind.rawValue] }), FileManager.default.isExecutableFile(atPath: found) {
-            return found
+        // The shell takes a while, so what it said is kept: a path for as
+        // long as the file is there, and nothing for a minute, so a CLI
+        // installed meanwhile is found without asking the shell on every send.
+        let now = Date()
+        if let cached = shellFound.withLock({ $0[kind.rawValue] }) {
+            if let path = cached.path {
+                if FileManager.default.isExecutableFile(atPath: path) { return path }
+            } else if now.timeIntervalSince(cached.asked) < 60 {
+                return nil
+            }
         }
         let found = loginShellLookup(kind.rawValue)
-        shellFound.withLock { $0[kind.rawValue] = found }
+        shellFound.withLock { $0[kind.rawValue] = (found, now) }
         return found
     }
 
-    /// Paths from `loginShellLookup`, by CLI name.
-    nonisolated private static let shellFound = OSAllocatedUnfairLock(initialState: [String: String]())
+    /// Looks every CLI up off the main thread, so the first message of a chat
+    /// doesn't wait for a login shell.
+    static func warmUp() {
+        Task.detached(priority: .utility) {
+            for kind in AgentKind.allCases where Settings.agentPath(for: kind) == nil {
+                _ = detectedExecutable(for: kind)
+            }
+        }
+    }
+
+    /// What `loginShellLookup` said, by CLI name: the path, or nil when it
+    /// found nothing, and when it was asked.
+    nonisolated private static let shellFound = OSAllocatedUnfairLock(initialState: [String: (path: String?, asked: Date)]())
 
     /// `command -v` in a login shell. zsh functions and aliases don't count,
     /// only files on PATH.
