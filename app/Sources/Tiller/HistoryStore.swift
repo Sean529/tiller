@@ -36,6 +36,11 @@ final class HistoryStore: @unchecked Sendable {
     private let latestSearch = OSAllocatedUnfairLock(initialState: 0)
     /// Only touched on `queue`. Nil if the file couldn't be opened.
     private let db: SQLiteDatabase?
+    /// Counts writes, so a reader can tell whether anything changed since it last looked.
+    private let writes = OSAllocatedUnfairLock(initialState: 0)
+
+    /// Goes up with every write. Equal values mean the history is as it was.
+    var version: Int { writes.withLock { $0 } }
 
     init(path: String) {
         do {
@@ -117,12 +122,11 @@ final class HistoryStore: @unchecked Sendable {
             }
             let hosts = visits.sorted { ($0.value, best[$0.key]!.lastVisit) > ($1.value, best[$1.key]!.lastVisit) }
                 .prefix(limit).map(\.key)
-            let sites = hosts.map { host in
+            let icons = Self.icons(for: Array(hosts), in: db)
+            completion(hosts.map { host in
                 let page = best[host]!
-                let icon = (try? db?.query("SELECT png FROM icons WHERE host = ?", [host]) { $0.data(0) })?.first
-                return FrequentSite(host: host, url: page.url, title: page.title, icon: icon)
-            }
-            completion(sites)
+                return FrequentSite(host: host, url: page.url, title: page.title, icon: icons[host])
+            })
         }
     }
 
@@ -179,6 +183,7 @@ final class HistoryStore: @unchecked Sendable {
     /// takes the higher visit count and later visit. Reports how many were
     /// merged, on the store's queue.
     func importPages(_ pages: [HistoryPage], completion: @escaping @Sendable (Result<Int, Error>) -> Void) {
+        writes.withLock { $0 += 1 }
         queue.async { [db] in
             guard let db else { return completion(.failure(SQLiteError(description: "history database unavailable"))) }
             completion(Result {
@@ -198,7 +203,16 @@ final class HistoryStore: @unchecked Sendable {
         }
     }
 
+    /// The saved favicons of `hosts`, in one query.
+    private static func icons(for hosts: [String], in db: SQLiteDatabase?) -> [String: Data] {
+        guard !hosts.isEmpty else { return [:] }
+        let marks = Array(repeating: "?", count: hosts.count).joined(separator: ",")
+        let rows = (try? db?.query("SELECT host, png FROM icons WHERE host IN (\(marks))", hosts) { ($0.string(0), $0.data(1)) }) ?? []
+        return Dictionary(rows, uniquingKeysWith: { first, _ in first })
+    }
+
     private func write(_ sql: String, _ values: [Any?]) {
+        writes.withLock { $0 += 1 }
         // Values are strings and numbers, which are safe to hand to the queue.
         nonisolated(unsafe) let values = values
         queue.async { [db] in

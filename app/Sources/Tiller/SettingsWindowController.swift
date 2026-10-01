@@ -1104,7 +1104,7 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
 
     override func loadView() {
         for (id, title, width) in [
-            ("on", "On", 30.0), ("name", "Skill", 160.0), ("description", "Description", 300.0), ("source", "Source", 70.0),
+            ("on", "On", 30.0), ("name", "Skill", 150.0), ("description", "Description", 280.0), ("source", "Source", 90.0),
         ] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = title

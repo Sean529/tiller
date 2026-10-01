@@ -230,6 +230,41 @@ pub extern "C" fn tiller_browser_stop_finding(id: c_int) {
     }
 }
 
+/// Opens the system print dialog for the page.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_print(id: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        host.print();
+    }
+}
+
+/// Opens Chromium's developer tools for the tab in a window of their own, or
+/// brings that window forward.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_show_dev_tools(id: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        let window_info = WindowInfo { bounds: Rect { x: 120, y: 120, width: 1100, height: 760 }, ..Default::default() };
+        host.show_dev_tools(Some(&window_info), None, Some(&BrowserSettings::default()), None);
+    }
+}
+
+/// Opens the page's source. It arrives through `open_tab`, as a view-source: page.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_view_source(id: c_int) {
+    if let Some(frame) = browser::get(id).and_then(|b| b.main_frame()) {
+        frame.view_source();
+    }
+}
+
+/// Takes a page out of the fullscreen it asked for, as when the user leaves
+/// the window's full screen first.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_exit_fullscreen(id: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        host.exit_fullscreen(1);
+    }
+}
+
 /// Runs `code` in the tab's main frame. Nothing comes back.
 ///
 /// # Safety
@@ -296,8 +331,8 @@ pub unsafe extern "C" fn tiller_ipc_start(socket_path: *const c_char, ctx: *mut 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tiller_ipc_reply(token: u64, reply_json: *const c_char) {
     let reply = unsafe { cstr(reply_json) };
-    match serde_json::from_str(&reply) {
-        Ok(value) => ipc::reply(token, value),
+    match serde_json::from_str::<&serde_json::value::RawValue>(&reply) {
+        Ok(_) => ipc::reply_raw(token, reply),
         Err(e) => ipc::reply_error(token, format!("bad reply from app: {e}")),
     }
 }

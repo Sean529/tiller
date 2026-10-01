@@ -7,6 +7,8 @@ protocol TabStripDelegate: AnyObject {
     /// The user dragged `tab` to `index`.
     func tabStrip(_ strip: TabStripView, move tab: Tab, to index: Int)
     func tabStripNewTab(_ strip: TabStripView)
+    /// The menu for a right-click on `tab`.
+    func tabStrip(_ strip: TabStripView, menuFor tab: Tab) -> NSMenu?
 }
 
 /// The tabs, as a row in the toolbar or a column in the sidebar. In a row,
@@ -344,7 +346,8 @@ final class TabItemView: NSView {
     private func updateAppearance() {
         let fill: NSColor = isSelected ? .labelColor.withAlphaComponent(0.11)
             : isHovered ? .labelColor.withAlphaComponent(0.05) : .clear
-        layer?.backgroundColor = fill.cgColor
+        // The fill eases between rest, hover and selected rather than snapping.
+        withEasing { layer?.backgroundColor = fill.cgColor }
         titleLabel.textColor = isSelected ? .labelColor : .secondaryLabelColor
         // A compact tab only offers to close when it is the selected one, so a
         // pass of the mouse along a crowded row can't hit a close button.
@@ -390,6 +393,11 @@ final class TabItemView: NSView {
     // Middle click closes, as in other browsers.
     override func otherMouseUp(with event: NSEvent) {
         if event.buttonNumber == 2 { onClose?() }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let strip else { return nil }
+        return strip.delegate?.tabStrip(strip, menuFor: tab)
     }
 
     // Clicks in the tab select it instead of dragging the window.
@@ -458,8 +466,9 @@ final class NewTabRowView: NSView {
 
     override func updateLayer() {
         super.updateLayer()
-        layer?.backgroundColor = (isHovered ? NSColor.labelColor.withAlphaComponent(0.05) : .clear).cgColor
+        withEasing { layer?.backgroundColor = (isHovered ? NSColor.labelColor.withAlphaComponent(0.05) : .clear).cgColor }
     }
+
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

@@ -204,6 +204,13 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     #if DEBUG
     func stopForTesting() { sendOrStop(nil) }
 
+    /// Replaces the message field's text, as typing would, so the skill
+    /// picker follows it.
+    func setTextForTesting(_ text: String) {
+        composer.text = text
+        updatePicker()
+    }
+
     /// Pastes the clipboard into the composer twice, as Cmd+V would, then
     /// sends `text` with it after a few seconds.
     func pasteAndSendForTesting(_ text: String) {

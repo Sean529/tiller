@@ -147,11 +147,11 @@ private final class TabNumberButton: NSView {
         layer?.cornerRadius = 7
         layer?.cornerCurve = .continuous
         let fill: NSColor = isSelected
-            ? .controlAccentColor.withAlphaComponent(isHovered ? 0.3 : 0.22)
-            : .labelColor.withAlphaComponent(isHovered ? 0.1 : 0.05)
-        layer?.backgroundColor = fill.cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = (isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.55) : NSColor.separatorColor).cgColor
+            ? .controlAccentColor.withAlphaComponent(isHovered ? 0.26 : 0.18)
+            : .labelColor.withAlphaComponent(isHovered ? 0.09 : 0.045)
+        withEasing { layer?.backgroundColor = fill.cgColor }
+        layer?.borderWidth = isSelected ? 1 : 0
+        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.45).cgColor
         label.textColor = isSelected ? .labelColor : .secondaryLabelColor
         busyDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
     }

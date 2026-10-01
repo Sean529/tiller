@@ -30,6 +30,8 @@ enum MainMenu {
         file.addItem(withTitle: "New Tab", action: #selector(BrowserWindowController.newTab(_:)), keyEquivalent: "t")
         file.addItem(withTitle: "Open Location…", action: #selector(BrowserWindowController.openLocation(_:)), keyEquivalent: "l")
         file.addItem(.separator())
+        file.addItem(withTitle: "Print…", action: #selector(BrowserWindowController.printPage(_:)), keyEquivalent: "p")
+        file.addItem(.separator())
         file.addItem(withTitle: "Close Tab", action: #selector(BrowserWindowController.closeTab(_:)), keyEquivalent: "w")
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "W")
         file.addItem(withTitle: "Reopen Closed Tab", action: #selector(BrowserWindowController.reopenClosedTab(_:)), keyEquivalent: "T")
@@ -54,6 +56,7 @@ enum MainMenu {
 
         let view = NSMenu(title: "View")
         view.addItem(withTitle: "Reload Page", action: #selector(BrowserWindowController.reloadPage(_:)), keyEquivalent: "r")
+        view.addItem(withTitle: "Stop", action: #selector(BrowserWindowController.stopLoading(_:)), keyEquivalent: ".")
         view.addItem(.separator())
         view.addItem(withTitle: "Actual Size", action: #selector(BrowserWindowController.actualSize(_:)), keyEquivalent: "0")
         view.addItem(withTitle: "Zoom In", action: #selector(BrowserWindowController.zoomIn(_:)), keyEquivalent: "=")
@@ -63,6 +66,15 @@ enum MainMenu {
         view.addItem(.separator())
         agentItem = view.addItem(withTitle: "Show Agent", action: #selector(BrowserWindowController.toggleAgentPanel(_:)), keyEquivalent: "")
         applyAgentShortcut()
+        view.addItem(withTitle: "Show Tab Sidebar", action: #selector(BrowserWindowController.toggleTabSidebar(_:)), keyEquivalent: "L")
+        view.addItem(.separator())
+        let source = view.addItem(withTitle: "View Page Source", action: #selector(BrowserWindowController.viewPageSource(_:)), keyEquivalent: "u")
+        source.keyEquivalentModifierMask = [.command, .option]
+        let devTools = view.addItem(withTitle: "Developer Tools", action: #selector(BrowserWindowController.showDevTools(_:)), keyEquivalent: "i")
+        devTools.keyEquivalentModifierMask = [.command, .option]
+        view.addItem(.separator())
+        let fullScreen = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.command, .control]
         add(view, titled: "View", to: main)
 
         let history = NSMenu(title: "History")
@@ -93,8 +105,16 @@ enum MainMenu {
             item.tag = number
         }
         window.addItem(.separator())
+        window.addItem(withTitle: "Downloads", action: #selector(BrowserWindowController.showDownloads(_:)), keyEquivalent: "J")
+        window.addItem(.separator())
         add(window, titled: "Window", to: main)
         NSApp.windowsMenu = window
+
+        let help = NSMenu(title: "Help")
+        help.addItem(withTitle: "Tiller Help", action: #selector(AppDelegate.openHelp(_:)), keyEquivalent: "?")
+        help.addItem(withTitle: "Tiller on GitHub", action: #selector(AppDelegate.openGitHub(_:)), keyEquivalent: "")
+        add(help, titled: "Help", to: main)
+        NSApp.helpMenu = help
 
         return main
     }

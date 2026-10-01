@@ -15,6 +15,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.showWindow(sender)
     }
 
+    #if DEBUG
+    /// Opens Settings on the pane titled `pane`, for `ui.settings` on the control socket.
+    func showSettings(pane: String) {
+        showSettings(nil)
+        settingsController?.showPane(titled: pane)
+    }
+    #endif
+
+    /// The manual, in a new tab.
+    @objc func openHelp(_ sender: Any?) {
+        openInNewTab("https://github.com/sorrycc/tiller/tree/master/docs")
+    }
+
+    @objc func openGitHub(_ sender: Any?) {
+        openInNewTab("https://github.com/sorrycc/tiller")
+    }
+
     @objc func installCommandLineTool(_ sender: Any?) {
         Task { await CommandLineTool.installAndReport() }
     }

@@ -35,7 +35,9 @@ struct SwiftHandler {
 }
 
 static HANDLER: OnceLock<SwiftHandler> = OnceLock::new();
-static PENDING: Mutex<Option<HashMap<u64, mpsc::Sender<Value>>>> = Mutex::new(None);
+/// Replies travel as the JSON text of `{"result": ...}` or `{"error": ...}`,
+/// so a large result is copied, never parsed and printed again.
+static PENDING: Mutex<Option<HashMap<u64, mpsc::Sender<String>>>> = Mutex::new(None);
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 /// Longer than any single tool waits, so a slow page gives an error instead of a hang.
@@ -69,18 +71,27 @@ fn serve(stream: UnixStream) {
         }
         let (id, reply) = match serde_json::from_str::<Value>(&line) {
             Ok(request) => (request.get("id").cloned().unwrap_or(Value::Null), dispatch(request)),
-            Err(e) => (Value::Null, json!({ "error": format!("invalid JSON: {e}") })),
+            Err(e) => (Value::Null, json!({ "error": format!("invalid JSON: {e}") }).to_string()),
         };
-        let mut reply = reply;
-        reply["id"] = id;
-        if writeln!(writer, "{reply}").and_then(|_| writer.flush()).is_err() {
+        if writeln!(writer, "{}", with_id(&id, &reply)).and_then(|_| writer.flush()).is_err() {
             return;
         }
     }
 }
 
+/// `reply`, an object, with `"id": id` as its first member.
+fn with_id(id: &Value, reply: &str) -> String {
+    let body = reply.trim();
+    let inner = body.strip_prefix('{').and_then(|b| b.strip_suffix('}')).unwrap_or("").trim();
+    if inner.is_empty() {
+        format!("{{\"id\":{id}}}")
+    } else {
+        format!("{{\"id\":{id},{inner}}}")
+    }
+}
+
 /// Posts the request to the UI thread and waits for its reply.
-fn dispatch(request: Value) -> Value {
+fn dispatch(request: Value) -> String {
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
     PENDING.lock().unwrap().get_or_insert_default().insert(token, tx);
@@ -88,24 +99,29 @@ fn dispatch(request: Value) -> Value {
     let mut task = RequestTask::new(request.to_string(), token);
     if post_task(ThreadId::UI, Some(&mut task)) == 0 {
         take(token);
-        return json!({ "error": "browser is shutting down" });
+        return json!({ "error": "browser is shutting down" }).to_string();
     }
     match rx.recv_timeout(REPLY_TIMEOUT) {
         Ok(reply) => reply,
         Err(_) => {
             take(token);
-            json!({ "error": "timed out waiting for the browser" })
+            json!({ "error": "timed out waiting for the browser" }).to_string()
         }
     }
 }
 
-fn take(token: u64) -> Option<mpsc::Sender<Value>> {
+fn take(token: u64) -> Option<mpsc::Sender<String>> {
     PENDING.lock().unwrap().as_mut()?.remove(&token)
 }
 
 /// Sends `reply` (`{"result": ...}` or `{"error": ...}`) to whoever is waiting
 /// on `token`. Late replies after a timeout are dropped.
 pub fn reply(token: u64, reply: Value) {
+    reply_raw(token, reply.to_string());
+}
+
+/// Like `reply`, with the reply already as JSON text.
+pub fn reply_raw(token: u64, reply: String) {
     if let Some(tx) = take(token) {
         let _ = tx.send(reply);
     }

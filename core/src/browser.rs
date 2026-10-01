@@ -3,7 +3,8 @@
 
 use crate::ipc;
 use cef::*;
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::{Value, json, value::RawValue};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -27,6 +28,8 @@ pub struct Callbacks {
     pub find_result: Option<unsafe extern "C" fn(*mut c_void, i32, i32, bool)>,
     pub auto_resize: Option<unsafe extern "C" fn(*mut c_void, i32, i32)>,
     pub copy_text: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub status_changed: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub fullscreen_changed: Option<unsafe extern "C" fn(*mut c_void, bool)>,
 }
 
 struct Entry {
@@ -164,6 +167,23 @@ fn fail_devtools_calls(browser_id: i32) {
     }
 }
 
+/// The parts of a DevTools message that matter here. The result stays as the
+/// text it arrived as: a screenshot's reply is megabytes of base64, and this
+/// runs on the UI thread, so it is passed through rather than parsed into a
+/// tree and written out again.
+#[derive(Deserialize)]
+struct DevToolsMessage<'a> {
+    id: Option<i64>,
+    #[serde(borrow)]
+    result: Option<&'a RawValue>,
+    error: Option<DevToolsError>,
+}
+
+#[derive(Deserialize)]
+struct DevToolsError {
+    message: Option<String>,
+}
+
 wrap_dev_tools_message_observer! {
     struct TillerDevToolsObserver;
 
@@ -171,14 +191,19 @@ wrap_dev_tools_message_observer! {
         /// Answers the matching call. Events and replies to anyone else's calls
         /// are left for CEF's default handling.
         fn on_dev_tools_message(&self, _browser: Option<&mut Browser>, message: Option<&[u8]>) -> i32 {
-            let Some(message) = message.and_then(|m| serde_json::from_slice::<Value>(m).ok()) else { return 0 };
-            let Some(id) = message["id"].as_i64() else { return 0 };
+            let Some(text) = message.and_then(|m| std::str::from_utf8(m).ok()) else { return 0 };
+            // Events carry no id. Skipping them without a parse keeps a busy
+            // page's stream of events off the UI thread's plate.
+            if !text.contains("\"id\"") {
+                return 0;
+            }
+            let Ok(message) = serde_json::from_str::<DevToolsMessage>(text) else { return 0 };
+            let Some(id) = message.id else { return 0 };
             let Some(call) = DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&(id as i32))) else { return 0 };
-            let reply = match message.get("error") {
-                Some(error) => json!({ "error": error["message"].as_str().unwrap_or("DevTools error") }),
-                None => json!({ "result": message.get("result").cloned().unwrap_or_else(|| json!({})) }),
-            };
-            ipc::reply(call.token, reply);
+            match message.error {
+                Some(error) => ipc::reply_error(call.token, error.message.unwrap_or_else(|| "DevTools error".into())),
+                None => ipc::reply_raw(call.token, format!("{{\"result\":{}}}", message.result.map_or("{}", |r| r.get()))),
+            }
             1
         }
     }
@@ -373,6 +398,22 @@ wrap_display_handler! {
             }
         }
 
+        /// The link under the mouse, or nothing when it leaves one.
+        fn on_status_message(&self, browser: Option<&mut Browser>, value: Option<&CefString>) {
+            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.status_changed {
+                let text = to_cstring(value);
+                unsafe { f(cb.ctx, text.as_ptr()) };
+            }
+        }
+
+        /// The page asked for the whole screen, as a video player does, or
+        /// gave it back. The app takes the window there and back.
+        fn on_fullscreen_mode_change(&self, browser: Option<&mut Browser>, fullscreen: i32) {
+            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.fullscreen_changed {
+                unsafe { f(cb.ctx, fullscreen != 0) };
+            }
+        }
+
         fn on_loading_progress_change(&self, browser: Option<&mut Browser>, progress: f64) {
             if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.loading_progress {
                 unsafe { f(cb.ctx, progress) };
@@ -521,7 +562,10 @@ wrap_life_span_handler! {
         /// send performClose: to it, tell Swift to remove the tab's view. Tearing
         /// down that view finishes the close and leads to `on_before_close`.
         fn do_close(&self, browser: Option<&mut Browser>) -> i32 {
-            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.close_ready {
+            // A browser of its own, such as the developer tools window,
+            // closes the usual way.
+            let Some(cb) = callbacks_for(browser) else { return 0 };
+            if let Some(f) = cb.close_ready {
                 unsafe { f(cb.ctx) };
             }
             1

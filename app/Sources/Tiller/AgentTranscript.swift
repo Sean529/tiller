@@ -224,14 +224,16 @@ final class ThumbnailGrid: NSView {
 }
 
 /// One thumbnail: the image filling a rounded square, with an optional
-/// remove button in its corner.
+/// remove button in its corner. The square shows a copy of the image shrunk
+/// to its size: a screenshot's full bitmap would otherwise sit in the
+/// layer for every thumbnail in a long chat.
 private final class ThumbnailView: NSView {
     var onOpen: (() -> Void)?
     var onRemove: (() -> Void)?
     private let image: NSImage
 
     init(image: NSImage, removable: Bool) {
-        self.image = image
+        self.image = Self.thumbnail(of: image, side: 128)
         super.init(frame: .zero)
         wantsLayer = true
         toolTip = "Click to preview"
@@ -257,6 +259,21 @@ private final class ThumbnailView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     @objc private func removeClicked(_ sender: Any?) { onRemove?() }
+
+    /// `image` cropped to a square from its middle and drawn `side` points
+    /// wide, which is enough for a thumbnail on any screen.
+    private static func thumbnail(of image: NSImage, side: CGFloat) -> NSImage {
+        let size = image.size
+        guard size.width > side || size.height > side, size.width > 0, size.height > 0 else { return image }
+        let crop = min(size.width, size.height)
+        let source = NSRect(x: (size.width - crop) / 2, y: (size.height - crop) / 2, width: crop, height: crop)
+        let thumbnail = NSImage(size: NSSize(width: side, height: side))
+        thumbnail.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(in: NSRect(x: 0, y: 0, width: side, height: side), from: source, operation: .copy, fraction: 1)
+        thumbnail.unlockFocus()
+        return thumbnail
+    }
 
     override var wantsUpdateLayer: Bool { true }
 

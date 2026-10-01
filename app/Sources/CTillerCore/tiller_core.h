@@ -29,6 +29,11 @@ typedef struct TillerBrowserCallbacks {
     void (*auto_resize)(void *ctx, int width, int height);
     // The page's context menu asked to copy `text`, such as a link's URL.
     void (*copy_text)(void *ctx, const char *text);
+    // The link under the mouse, or an empty string once it leaves one.
+    void (*status_changed)(void *ctx, const char *text);
+    // The page asked for the whole screen (true), as a video player does, or
+    // gave it back (false).
+    void (*fullscreen_changed)(void *ctx, bool fullscreen);
 } TillerBrowserCallbacks;
 
 // Static version string. Do not free.
@@ -84,6 +89,15 @@ void tiller_browser_set_auto_resize(int id, int min_width, int min_height, int m
 void tiller_browser_find(int id, const char *text, bool forward, bool find_next);
 // Ends the search and clears its highlights.
 void tiller_browser_stop_finding(int id);
+
+// Opens the system print dialog for the page.
+void tiller_browser_print(int id);
+// Opens Chromium's developer tools for the tab in their own window.
+void tiller_browser_show_dev_tools(int id);
+// Opens the page's source, which arrives through open_tab as a view-source: page.
+void tiller_browser_view_source(int id);
+// Takes the page out of the fullscreen it asked for.
+void tiller_browser_exit_fullscreen(int id);
 
 // Runs JavaScript in the tab's main frame. Nothing comes back.
 void tiller_browser_execute_js(int id, const char *code);

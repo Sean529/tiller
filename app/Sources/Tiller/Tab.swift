@@ -16,10 +16,16 @@ protocol TabDelegate: AnyObject {
     func tab(_ tab: Tab, foundMatches count: Int, active: Int, final: Bool)
     /// The page's size in points, once `autoResize` is on.
     func tab(_ tab: Tab, autoResizedTo size: NSSize)
+    /// The link under the mouse, or an empty string once it leaves one.
+    func tab(_ tab: Tab, statusChanged text: String)
+    /// The page asked for the whole screen, as a video player does, or gave it back.
+    func tab(_ tab: Tab, fullscreenChanged fullscreen: Bool)
 }
 
 extension TabDelegate {
     func tab(_ tab: Tab, autoResizedTo size: NSSize) {}
+    func tab(_ tab: Tab, statusChanged text: String) {}
+    func tab(_ tab: Tab, fullscreenChanged fullscreen: Bool) {}
 }
 
 /// One CEF browser and the view that hosts it.
@@ -140,6 +146,14 @@ final class Tab {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(string, forType: .string)
                 }
+            },
+            status_changed: { ctx, text in
+                guard let ctx else { return }
+                Tab.from(ctx).statusChanged(text.map { String(cString: $0) } ?? "")
+            },
+            fullscreen_changed: { ctx, fullscreen in
+                guard let ctx else { return }
+                Tab.from(ctx).fullscreenChanged(fullscreen)
             }
         )
         let view = Unmanaged.passUnretained(hostView).toOpaque()
@@ -190,6 +204,18 @@ final class Tab {
 
     /// Runs `code` in the main frame. Does nothing once the tab has closed.
     func executeJavaScript(_ code: String) { tiller_browser_execute_js(browserID, code) }
+
+    /// Opens the system print dialog for the page.
+    func print() { tiller_browser_print(browserID) }
+
+    /// Opens Chromium's developer tools in a window of their own.
+    func showDevTools() { tiller_browser_show_dev_tools(browserID) }
+
+    /// Opens the page's source in a new tab.
+    func viewSource() { tiller_browser_view_source(browserID) }
+
+    /// Takes the page out of the fullscreen it asked for.
+    func exitFullscreen() { tiller_browser_exit_fullscreen(browserID) }
 
     func focus() {
         hostView.window?.makeFirstResponder(hostView)
@@ -255,6 +281,14 @@ final class Tab {
 
     nonisolated private func autoResized(_ size: NSSize) {
         MainActor.assumeIsolated { delegate?.tab(self, autoResizedTo: size) }
+    }
+
+    nonisolated private func statusChanged(_ text: String) {
+        MainActor.assumeIsolated { delegate?.tab(self, statusChanged: text) }
+    }
+
+    nonisolated private func fullscreenChanged(_ fullscreen: Bool) {
+        MainActor.assumeIsolated { delegate?.tab(self, fullscreenChanged: fullscreen) }
     }
 
     nonisolated private func faviconChanged(_ png: Data) {

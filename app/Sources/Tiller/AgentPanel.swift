@@ -328,6 +328,28 @@ final class AgentPanelView: NSView {
     func stopForTesting() { active.stopForTesting() }
 
     func pasteAndSendForTesting(_ text: String) { active.pasteAndSendForTesting(text) }
+
+    /// One of the tab bar's buttons, by name, for `ui.agentAction`.
+    func performForTesting(_ action: String) {
+        switch action {
+        case "newChat": newChat()
+        case "newTab": newTab()
+        case "closeTab": closeTab(activeIndex)
+        case "history": showHistory(from: tabBar)
+        case "tools": showTools(from: tabBar)
+        case "focus": window?.makeFirstResponder(input)
+        default:
+            if action.hasPrefix("tab"), let index = Int(action.dropFirst(3)), chats.indices.contains(index - 1) {
+                select(index - 1, focus: true)
+            }
+        }
+    }
+
+    /// Puts `text` in the selected chat's message field, as if typed.
+    func setTextForTesting(_ text: String) {
+        window?.makeFirstResponder(input)
+        active.setTextForTesting(text)
+    }
     #endif
 
     func send(_ text: String) {

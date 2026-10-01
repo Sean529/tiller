@@ -13,13 +13,15 @@ How Tiller's browser features behave. Settings and storage are covered in [Setti
 | Cmd+Shift+] / Cmd+Shift+[, Cmd+Option+Right / Cmd+Option+Left, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
 | Middle click on a tab | Close it |
+| Right-click on a tab | New Tab, Reload, Duplicate Tab, Close Tab, Close Other Tabs and Close Tabs to the Right |
 | Drag a tab | Move it along the row or the sidebar |
+| Cmd+Shift+L | Move the tabs between the toolbar and the sidebar |
 
 Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
 
 Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view.
 
-Settings > General > Show tabs moves the tabs into a sidebar on the left. The address bar then takes their place in the toolbar, and the page sits as a card between the sidebar and the agent panel. A New Tab row follows the last tab, and the list scrolls when it is longer than the window. Drag the sidebar's edge to resize it, between 80 and 400 points. The button at its top collapses it to icons and expands it again. The width and the collapsed state are kept per profile.
+Settings > General > Show tabs, or View > Show Tab Sidebar, moves the tabs into a sidebar on the left. The address bar then takes their place in the toolbar, and the page sits as a card between the sidebar and the agent panel. A New Tab row follows the last tab, and the list scrolls when it is longer than the window. Drag the sidebar's edge to resize it, between 80 and 400 points. The button at its top collapses it to icons and expands it again. The width and the collapsed state are kept per profile.
 
 Tiller saves its open tabs as they change and opens them again at the next launch, whether it quit through Cmd+Q, a closed window, a closed last tab or a crash. Each tab reloads its last URL when you first select it, so a launch with many tabs loads only the one in front. Listing the tabs from an agent or the `tiller` tool loads them all. Back/forward history, scroll position and form contents aren't kept. A session of only blank tabs opens the homepage instead. Tabs are still saved when Settings says to open the homepage, so switching back restores the last run's tabs.
 
@@ -40,6 +42,18 @@ New tabs go right after the tab they came from. The same clicks work on the star
 
 Popups and `target=_blank` links open as new tabs too. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.
 
+## Pages
+
+| Shortcut | Action |
+|---|---|
+| Cmd+R / Cmd+. | Reload / stop |
+| Cmd+P | Print the page, through the system print dialog |
+| Cmd+Option+I | Developer Tools, Chromium's, in a window of their own |
+| Cmd+Option+U | View the page's source in a new tab |
+| Ctrl+Cmd+F | Enter or leave full screen |
+
+While the mouse is over a link, its address shows in a small plate at the bottom left of the page. A page that asks for the whole screen, as a video player does, takes the window to full screen with the sidebar and the agent panel out of the way, and gives them back when it is done; leaving full screen with the green button or Escape ends the page's fullscreen too.
+
 ## Find and zoom
 
 | Shortcut | Action |
@@ -55,7 +69,7 @@ Find shortcuts go to the menu before the page, like the other non-Edit shortcuts
 
 The address bar shows the full URL with everything but the site dimmed, after a lock for https pages or a warning sign for http ones. Clicking it or pressing Cmd+L selects the URL, and Escape puts it back after you've typed over it. Reload, which turns into Stop while a page loads, is in the toolbar next to Back and Forward. While a page loads, the bar fills with a faint tint from the left.
 
-A blank tab shows your most visited sites as tiles, one per site, each opening that site's most visited page. Favicons for the tiles are kept in `history.sqlite` alongside history. With no history yet, it shows a hint to use the address bar.
+A blank tab shows your most visited sites as tiles, one per site, each opening that site's most visited page, and under them the tabs closed most recently. Favicons for the tiles are kept in `history.sqlite` alongside history. With no history and no closed tabs yet, it shows a hint to use the address bar. The tiles are only rebuilt when history has changed since the last new tab.
 
 ## History
 
@@ -114,7 +128,7 @@ Chromium runs extensions in English, so Tiller shows their names from their Engl
 
 ## Downloads
 
-Files download to `~/Downloads`, under a name no file there has yet (`name-2.ext` and so on). A button appears in the toolbar with the first download of the run: while files come in, a ring around it fills with their progress, and clicking it lists the downloads with each one's size or progress. A download under way has a button to cancel it, and a finished one opens when clicked, with a button to show it in the Finder. Clear forgets the finished ones. The list is kept only while Tiller runs.
+Files download to `~/Downloads`, under a name no file there has yet (`name-2.ext` and so on). A button appears in the toolbar with the first download of the run: while files come in, a ring around it fills with their progress, and clicking it, or Window > Downloads (Cmd+Shift+J), lists the downloads with each one's size or progress. A download under way has a button to cancel it, and a finished one opens when clicked, with a button to show it in the Finder. Clear forgets the finished ones. The list is kept only while Tiller runs.
 
 ## Default browser
 

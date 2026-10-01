@@ -27,8 +27,8 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         list.orientation = .vertical
         list.spacing = 0
         list.alignment = .width
-        let background = NSVisualEffectView()
-        background.material = .menu
+        let background = SuggestionsBackground()
+        background.material = .popover
         background.state = .active
         background.wantsLayer = true
         background.layer?.cornerRadius = 14
@@ -138,6 +138,16 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         let url = pages[index].url
         hide()
         onOpen?(url, disposition)
+    }
+}
+
+/// The list's plate: a popover's material with a hairline around it, like
+/// the glass of the address bar it hangs from.
+private final class SuggestionsBackground: NSVisualEffectView {
+    override func updateLayer() {
+        super.updateLayer()
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.6).cgColor
     }
 }
 
