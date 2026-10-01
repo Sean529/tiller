@@ -37,7 +37,6 @@ final class AgentPanelView: NSView {
         super.init(frame: frame)
         build()
         restoreTabs()
-        AgentEnvironment.warmUp()
         NotificationCenter.default.addObserver(
             self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
         )
@@ -47,6 +46,18 @@ final class AgentPanelView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The panel is on screen: have the selected chat's CLI looked up now,
+    /// so the first message doesn't wait on a login shell.
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        AgentEnvironment.warmUp(active.kind)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil, !isHiddenOrHasHiddenAncestor { AgentEnvironment.warmUp(active.kind) }
+    }
 
     /// Ends every tab's agent and saves the chats. Called when the window closes.
     func shutDown() {

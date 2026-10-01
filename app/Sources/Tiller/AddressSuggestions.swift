@@ -64,6 +64,7 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
     func hide() {
         generation += 1
         highlighted = nil
+        shownPages = []
         guard panel.isVisible else { return }
         panel.parent?.removeChildWindow(panel)
         panel.orderOut(nil)
@@ -76,8 +77,9 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         generation += 1
         guard !text.isEmpty else { return hide() }
         let generation = generation
-        // The row for the text itself goes up at once; history follows.
-        if !panel.isVisible { show([], for: text) }
+        // The row for the text itself follows every keystroke, over the
+        // pages found for the last one; the ones for this come after.
+        show(shownPages, for: text)
         HistoryStore.shared.search(text, limit: Self.limit) { [weak self] pages in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -124,7 +126,11 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
     /// highlighted, so Return does what the address bar would anyway. When
     /// the best match's address starts with the text, that row is
     /// highlighted instead, as Safari does.
+    /// The history pages the rows show, kept for the next keystroke.
+    private var shownPages: [HistoryPage] = []
+
     private func show(_ pages: [HistoryPage], for text: String) {
+        shownPages = pages
         rows = [.input(text)] + pages.map(Suggestion.page)
         guard let window = addressBar.window else { return hide() }
         list.arrangedSubviews.forEach { $0.removeFromSuperview() }

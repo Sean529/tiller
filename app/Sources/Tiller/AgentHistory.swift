@@ -57,9 +57,11 @@ final class AgentHistoryStore {
     private var indexChanged = false
     /// Transcripts waiting to be written, by conversation id.
     private var pendingRecords: [String: [AgentRecord]] = [:]
-    /// The transcripts set this run, by conversation id, so a read never
-    /// gets the file from before a write still on its way to disk.
-    private var knownRecords: [String: [AgentRecord]] = [:]
+    /// The transcripts set this run whose write hasn't reached disk, by
+    /// conversation id, so a read never gets the file from before it. Each
+    /// is numbered, so a write finishing drops only what it wrote.
+    private var knownRecords: [String: (records: [AgentRecord], version: Int)] = [:]
+    private var recordsVersion = 0
     private var writeScheduled = false
 
     private init() {
@@ -106,14 +108,15 @@ final class AgentHistoryStore {
     }
 
     func records(for id: String) -> [AgentRecord] {
-        if let known = knownRecords[id] { return known }
+        if let known = knownRecords[id] { return known.records }
         let data = try? Data(contentsOf: folder(for: id).appendingPathComponent("transcript.json"))
         return data.flatMap { try? JSONDecoder().decode([AgentRecord].self, from: $0) } ?? []
     }
 
     func setRecords(_ records: [AgentRecord], for id: String) {
         pendingRecords[id] = records
-        knownRecords[id] = records
+        recordsVersion += 1
+        knownRecords[id] = (records, recordsVersion)
         scheduleWrite()
     }
 
@@ -146,6 +149,7 @@ final class AgentHistoryStore {
     func flush() {
         writeScheduled = false
         let transcripts = pendingRecords.filter { conversation($0.key) != nil }
+        let versions = transcripts.keys.compactMap { id in knownRecords[id].map { (id, $0.version) } }
         pendingRecords.removeAll()
         let index = indexChanged ? self.index : nil
         indexChanged = false
@@ -164,6 +168,15 @@ final class AgentHistoryStore {
                 }
             } catch {
                 NSLog("Tiller: could not save agent chats: %@", error.localizedDescription)
+            }
+            // On disk now: the copies in memory can go, unless set again since.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let store = AgentHistoryStore.shared
+                    for (id, version) in versions where store.knownRecords[id]?.version == version {
+                        store.knownRecords[id] = nil
+                    }
+                }
             }
         }
     }

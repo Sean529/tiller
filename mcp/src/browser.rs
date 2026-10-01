@@ -68,7 +68,7 @@ impl Browser {
                 self.mouse(id, "mouseMoved", x, y)?;
                 self.mouse(id, "mousePressed", x, y)?;
                 self.mouse(id, "mouseReleased", x, y)?;
-                let mut info = self.wait_for_load(id)?;
+                let mut info = self.wait_for_load_within(id, 1000)?;
                 if point["covered"] == true {
                     info["note"] = json!("another element was on top of the target at its center and got the click");
                 }
@@ -94,7 +94,7 @@ impl Browser {
                         }
                         self.cdp(id, "Input.dispatchKeyEvent", key)?;
                     }
-                    return json_out(self.wait_for_load(id)?);
+                    return json_out(self.wait_for_load_within(id, 1000)?);
                 }
                 json_out(json!({ "typed": value.chars().count() }))
             }
@@ -103,14 +103,24 @@ impl Browser {
                 // In CSS pixels, the units clicks take, rather than the
                 // display's: a Retina screenshot has four times the bytes
                 // to encode, send and read, and the model sees it no better.
+                // The clip is in page coordinates, so it starts where the page
+                // is scrolled to. A page whose script can't run just now, as
+                // with an alert up, is captured at the display's scale.
                 let mut params = json!({ "format": "jpeg", "quality": 80 });
-                let viewport = self.evaluate(id, "({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio })")?;
-                if let (Some(w), Some(h), Some(dpr)) = (viewport["w"].as_f64(), viewport["h"].as_f64(), viewport["dpr"].as_f64())
-                    && dpr > 1.0
+                let viewport = self
+                    .evaluate(id, "({ x: visualViewport.pageLeft, y: visualViewport.pageTop, w: visualViewport.width, h: visualViewport.height, dpr: devicePixelRatio })")
+                    .unwrap_or(Value::Null);
+                if let (Some(x), Some(y), Some(w), Some(h), Some(dpr)) = (
+                    viewport["x"].as_f64(),
+                    viewport["y"].as_f64(),
+                    viewport["w"].as_f64(),
+                    viewport["h"].as_f64(),
+                    viewport["dpr"].as_f64(),
+                ) && dpr > 1.0
                     && w > 0.0
                     && h > 0.0
                 {
-                    params["clip"] = json!({ "x": 0, "y": 0, "width": w, "height": h, "scale": 1.0 / dpr });
+                    params["clip"] = json!({ "x": x, "y": y, "width": w, "height": h, "scale": 1.0 / dpr });
                 }
                 let mut shot = self.cdp(id, "Page.captureScreenshot", params)?;
                 match shot["data"].take() {
@@ -163,10 +173,15 @@ impl Browser {
 
     /// Waits until the tab stops loading, then returns its info. The app
     /// answers when the load ends, or once half a second passes with none
-    /// starting, as after a click that changes nothing. A Tiller from before
-    /// that request is polled instead.
+    /// starting. A Tiller from before that request is polled instead.
     fn wait_for_load(&mut self, id: i64) -> Result<Value, String> {
-        match self.request("tabs.wait_load", json!({ "tab_id": id, "grace_ms": 500, "timeout_ms": LOAD_TIMEOUT.as_millis() as u64 })) {
+        self.wait_for_load_within(id, 500)
+    }
+
+    /// Like `wait_for_load`, giving a load `grace` milliseconds to start. A
+    /// click or a submitted form may run script before it navigates.
+    fn wait_for_load_within(&mut self, id: i64, grace: u64) -> Result<Value, String> {
+        match self.request("tabs.wait_load", json!({ "tab_id": id, "grace_ms": grace, "timeout_ms": LOAD_TIMEOUT.as_millis() as u64 })) {
             Err(message) if message.starts_with("unknown method") => {}
             other => return other,
         }
@@ -260,7 +275,15 @@ impl Browser {
         line.push('\n');
         stream.write_all(line.as_bytes()).map_err(|e| Failure::Connection(e.to_string()))?;
         let mut reply = String::new();
-        if reader.read_line(&mut reply).map_err(|e| Failure::Connection(e.to_string()))? == 0 {
+        // A timeout is the app not answering, not a connection to retry on:
+        // sending a click or keystroke again could apply it twice.
+        let read = reader.read_line(&mut reply).map_err(|e| match e.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                Failure::App("Tiller did not answer within 90 seconds".into())
+            }
+            _ => Failure::Connection(e.to_string()),
+        })?;
+        if read == 0 {
             return Err(Failure::Connection("connection closed".into()));
         }
         let mut reply: Value = serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Tiller: {e}")))?;

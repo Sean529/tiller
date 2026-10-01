@@ -414,10 +414,13 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             if session.isRunning { setStatus("Working…", busy: true) }
             setBusy(true)
             transcript.showThinking()
-        } catch {
-            let message = (error as? ControlError)?.message ?? error.localizedDescription
+        } catch let error as AgentSetupError {
             // A CLI that can't be found or run is fixed in Settings.
-            addError(message, action: message.contains("Settings") ? openSettings : tryAgain)
+            addError(error.message, action: openSettings)
+            endSession()
+            showIdle()
+        } catch {
+            addError((error as? ControlError)?.message ?? error.localizedDescription, action: tryAgain)
             endSession()
             showIdle()
         }

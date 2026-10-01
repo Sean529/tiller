@@ -99,6 +99,13 @@ enum AgentEvent {
     case exited(message: String?)
 }
 
+/// Something about the agent's setup that Settings puts right: a CLI that
+/// can't be found or run, or a working folder that isn't one.
+struct AgentSetupError: Error {
+    let message: String
+    init(_ message: String) { self.message = message }
+}
+
 /// One running agent CLI. The process stays alive across turns and keeps the
 /// conversation. The CLI also saves it, so after the process stops a new
 /// session can pick it up again with its `sessionID`.
@@ -150,9 +157,9 @@ final class AgentSession {
         guard process == nil else { return }
         guard let executable = AgentEnvironment.executable(for: kind) else {
             if let path = Settings.agentPath(for: kind) {
-                throw ControlError("\(path) is not an executable file. Fix the \(kind.displayName) path in Settings (Cmd+,).")
+                throw AgentSetupError("\(path) is not an executable file. Fix the \(kind.displayName) path in Settings (Cmd+,).")
             }
-            throw ControlError("\(kind.rawValue) not found. Install it, or set its path in Settings (Cmd+,).")
+            throw AgentSetupError("\(kind.rawValue) not found. Install it, or set its path in Settings (Cmd+,).")
         }
         // Creates the skill folders that --add-dir and Codex's skills root name.
         _ = AgentSkillStore.shared
@@ -725,15 +732,15 @@ enum AgentEnvironment {
         return found
     }
 
-    /// Looks every CLI up off the main thread, so the first message of a chat
-    /// doesn't wait for a login shell.
-    static func warmUp() {
-        Task.detached(priority: .utility) {
-            for kind in AgentKind.allCases where Settings.agentPath(for: kind) == nil {
-                _ = detectedExecutable(for: kind)
-            }
-        }
+    /// Looks `kind` up off the main thread, so the first message of a chat
+    /// doesn't wait for a login shell. Once per CLI per run: the lookup
+    /// keeps what it found.
+    static func warmUp(_ kind: AgentKind) {
+        guard Settings.agentPath(for: kind) == nil, warmedUp.insert(kind).inserted else { return }
+        Task.detached(priority: .utility) { _ = detectedExecutable(for: kind) }
     }
+
+    private static var warmedUp: Set<AgentKind> = []
 
     /// What `loginShellLookup` said, by CLI name: the path, or nil when it
     /// found nothing, and when it was asked.
@@ -823,7 +830,7 @@ enum AgentEnvironment {
         if let folder = Settings.agentFolderPath {
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDirectory), isDirectory.boolValue else {
-                throw ControlError("\(folder) is not a folder. Fix the agent's folder in Settings (Cmd+,).")
+                throw AgentSetupError("\(folder) is not a folder. Fix the agent's folder in Settings (Cmd+,).")
             }
             return URL(fileURLWithPath: folder)
         }

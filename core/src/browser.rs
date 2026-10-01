@@ -506,6 +506,15 @@ fn set_icon_url(id: i32, url: Option<String>) {
     });
 }
 
+/// Forgets `url` as the tab's icon, unless a later page set another.
+fn clear_icon_url(id: i32, url: &str) {
+    BROWSERS.with_borrow_mut(|map| {
+        if let Some(entry) = map.get_mut(&id) && entry.icon_url.as_deref() == Some(url) {
+            entry.icon_url = None;
+        }
+    });
+}
+
 wrap_download_image_callback! {
     struct TillerFaviconCallback {
         browser_id: i32,
@@ -516,10 +525,12 @@ wrap_download_image_callback! {
     }
 
     impl DownloadImageCallback {
-        fn on_download_image_finished(&self, _image_url: Option<&CefString>, _http_status_code: i32, image: Option<&mut Image>) {
+        fn on_download_image_finished(&self, image_url: Option<&CefString>, _http_status_code: i32, image: Option<&mut Image>) {
+            let url = image_url.map(|u| u.to_string()).unwrap_or_default();
             if get(self.browser_id).is_none_or(|b| page_origin(&b) != self.origin) {
-                // Not this site's any more; the next page names its own icon.
-                set_icon_url(self.browser_id, None);
+                // Not this site's any more. The next site may have named its
+                // own icon meanwhile, which stays.
+                clear_icon_url(self.browser_id, &url);
                 return;
             }
             // CEF returns nothing unless both size out-parameters are given.
@@ -532,7 +543,7 @@ wrap_download_image_callback! {
                 }
                 _ => {
                     // Nothing came, so the same URL is worth another try later.
-                    set_icon_url(self.browser_id, None);
+                    clear_icon_url(self.browser_id, &url);
                     send_favicon(self.browser_id, &[]);
                 }
             }

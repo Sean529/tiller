@@ -25,14 +25,100 @@ thread_local! {
     /// Paths handed to downloads still under way, which don't exist on disk
     /// yet, so a second download of the same file gets another name.
     static RESERVED: RefCell<HashMap<u32, PathBuf>> = RefCell::new(HashMap::new());
-    /// When each download's progress was last reported.
-    static REPORTED: RefCell<HashMap<u32, Instant>> = RefCell::new(HashMap::new());
+    /// For each download under way: when its progress was last reported,
+    /// and the latest report held back since, waiting for its turn.
+    static THROTTLE: RefCell<HashMap<u32, Throttle>> = RefCell::new(HashMap::new());
 }
 
 /// Chromium reports progress for every chunk received, far more often than
 /// a progress ring can show. Progress is passed on at most this often; a
-/// change of state always is.
+/// change of state always is, and a report held back goes out when the
+/// interval is up, so a download that then stalls isn't shown behind.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+struct Throttle {
+    last: Instant,
+    /// The most recent report not passed on, if any.
+    held: Option<Report>,
+    /// Whether a task to send the held report is on its way.
+    scheduled: bool,
+}
+
+/// What the app is told about a download, as `report` sends it.
+#[derive(Clone)]
+struct Report {
+    browser_id: i32,
+    id: u32,
+    path: CString,
+    url: CString,
+    original: CString,
+    received: i64,
+    total: i64,
+    state: i32,
+}
+
+impl Report {
+    fn of(browser: Option<&mut Browser>, item: &DownloadItem) -> Report {
+        let state = if item.is_complete() != 0 {
+            1
+        } else if item.is_canceled() != 0 {
+            2
+        } else if item.is_interrupted() != 0 {
+            3
+        } else {
+            0
+        };
+        Report {
+            browser_id: browser.map_or(-1, |b| b.identifier()),
+            id: item.id(),
+            path: to_cstring(CefString::from(&item.full_path()).to_string()),
+            url: to_cstring(CefString::from(&item.url()).to_string()),
+            original: to_cstring(CefString::from(&item.original_url()).to_string()),
+            received: item.received_bytes(),
+            total: item.total_bytes(),
+            state,
+        }
+    }
+
+    fn send(&self) {
+        let Some((ctx, handler)) = HANDLER.get() else { return };
+        unsafe {
+            handler(
+                ctx,
+                self.browser_id,
+                self.id,
+                self.path.as_ptr(),
+                self.url.as_ptr(),
+                self.original.as_ptr(),
+                self.received,
+                self.total,
+                self.state,
+            )
+        };
+    }
+}
+
+// Sends the report held back for a download once the interval is up.
+wrap_task! {
+    struct HeldReportTask {
+        id: u32,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            let held = THROTTLE.with_borrow_mut(|map| {
+                let entry = map.get_mut(&self.id)?;
+                entry.scheduled = false;
+                let held = entry.held.take()?;
+                entry.last = Instant::now();
+                Some(held)
+            });
+            if let Some(report) = held {
+                report.send();
+            }
+        }
+    }
+}
 
 pub fn set_handler(ctx: *mut c_void, handler: Option<Callback>) {
     HANDLER.set(handler.map(|h| (ctx, h)));
@@ -77,33 +163,9 @@ fn to_cstring(s: String) -> CString {
 }
 
 fn report(browser: Option<&mut Browser>, item: &DownloadItem) {
-    let Some((ctx, handler)) = HANDLER.get() else { return };
-    let browser_id = browser.map_or(-1, |b| b.identifier());
-    let state = if item.is_complete() != 0 {
-        1
-    } else if item.is_canceled() != 0 {
-        2
-    } else if item.is_interrupted() != 0 {
-        3
-    } else {
-        0
-    };
-    let path = to_cstring(CefString::from(&item.full_path()).to_string());
-    let url = to_cstring(CefString::from(&item.url()).to_string());
-    let original = to_cstring(CefString::from(&item.original_url()).to_string());
-    unsafe {
-        handler(
-            ctx,
-            browser_id,
-            item.id(),
-            path.as_ptr(),
-            url.as_ptr(),
-            original.as_ptr(),
-            item.received_bytes(),
-            item.total_bytes(),
-            state,
-        )
-    };
+    if HANDLER.get().is_some() {
+        Report::of(browser, item).send();
+    }
 }
 
 wrap_download_handler! {
@@ -144,22 +206,39 @@ wrap_download_handler! {
                 if let Some(callback) = callback {
                     CALLBACKS.with_borrow_mut(|map| map.insert(id, callback.clone()));
                 }
-                let now = Instant::now();
-                let due = REPORTED.with_borrow_mut(|map| match map.get(&id) {
-                    Some(last) if now.duration_since(*last) < PROGRESS_INTERVAL => false,
-                    _ => {
-                        map.insert(id, now);
-                        true
-                    }
-                });
-                if !due {
+                if HANDLER.get().is_none() {
                     return;
                 }
-            } else {
-                CALLBACKS.with_borrow_mut(|map| map.remove(&id));
-                RESERVED.with_borrow_mut(|map| map.remove(&id));
-                REPORTED.with_borrow_mut(|map| map.remove(&id));
+                let now = Instant::now();
+                let report = Report::of(browser, item);
+                // Too soon after the last one: hold it, and have it sent
+                // once the interval is up unless a newer one replaces it.
+                let schedule = THROTTLE.with_borrow_mut(|map| {
+                    let entry = map.entry(id).or_insert(Throttle { last: now - PROGRESS_INTERVAL, held: None, scheduled: false });
+                    if now.duration_since(entry.last) >= PROGRESS_INTERVAL {
+                        entry.last = now;
+                        entry.held = None;
+                        Ok(report)
+                    } else {
+                        entry.held = Some(report);
+                        let schedule = !entry.scheduled;
+                        entry.scheduled = true;
+                        Err(schedule)
+                    }
+                });
+                match schedule {
+                    Ok(report) => report.send(),
+                    Err(true) => {
+                        let mut task = HeldReportTask::new(id);
+                        post_delayed_task(ThreadId::UI, Some(&mut task), PROGRESS_INTERVAL.as_millis() as i64);
+                    }
+                    Err(false) => {}
+                }
+                return;
             }
+            CALLBACKS.with_borrow_mut(|map| map.remove(&id));
+            RESERVED.with_borrow_mut(|map| map.remove(&id));
+            THROTTLE.with_borrow_mut(|map| map.remove(&id));
             report(browser, item);
         }
     }

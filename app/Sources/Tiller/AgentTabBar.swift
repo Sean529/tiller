@@ -94,8 +94,8 @@ final class AgentTabBar: NSView {
 
 /// A tab's number in a rounded square, tinted with the accent color when
 /// selected, with a dot while its agent works. The selected tab's number
-/// gives way to a cross under the mouse, which closes it; right-click closes
-/// any tab.
+/// gives way to a cross under the mouse, which closes it, unless its agent
+/// is working; right-click closes any tab.
 private final class TabNumberButton: NSView {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
@@ -112,7 +112,12 @@ private final class TabNumberButton: NSView {
             needsDisplay = true
         }
     }
-    var isBusy = false { didSet { busyDot.isHidden = !isBusy } }
+    var isBusy = false {
+        didSet {
+            busyDot.isHidden = !isBusy
+            updateLabel()
+        }
+    }
 
     private let number: Int
     private let label: NSTextField
@@ -124,8 +129,9 @@ private final class TabNumberButton: NSView {
         }
     }
 
-    /// Whether a click closes the tab rather than selecting it.
-    private var offersClose: Bool { isSelected && isHovered }
+    /// Whether a click closes the tab rather than selecting it. Not while
+    /// its agent works: closing would end the turn, so that takes the menu.
+    private var offersClose: Bool { isSelected && isHovered && !isBusy }
 
     private func updateLabel() {
         label.stringValue = offersClose ? "×" : "\(number)"
