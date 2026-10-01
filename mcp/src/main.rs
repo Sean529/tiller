@@ -131,6 +131,29 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": { "tab_id": tab_id } },
         },
         {
+            "name": "list_skills",
+            "description": "Lists the skills agents can call with /name: Tiller's skill library, which save_skill can change (editable), and the CLIs' own skills, which are read-only.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            "name": "read_skill",
+            "description": "Returns a skill's SKILL.md and the other files in its folder.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string" },
+            }, "required": ["name"] },
+        },
+        {
+            "name": "save_skill",
+            "description": "Creates a skill in Tiller's skill library, or updates one there. Agents load it from their next start, and the user calls it with /name. Read an existing skill with read_skill before changing it. Files not given or deleted stay as they are.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "Letters, digits, dots, dashes and underscores. Lowercase with dashes by convention." },
+                "content": { "type": "string", "description": "The whole SKILL.md, starting with front matter (---, name, description, ---). Or only its body, when description is given." },
+                "description": { "type": "string", "description": "What the skill does and when to use it. Needed only when content has no front matter." },
+                "files": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Other files to write, by path inside the skill's folder, such as scripts/run.sh or reference.md." },
+                "delete_files": { "type": "array", "items": { "type": "string" }, "description": "Paths inside the skill's folder to delete." },
+            }, "required": ["name", "content"] },
+        },
+        {
             "name": "eval_js",
             "description": "Runs a JavaScript expression in the page and returns its value as JSON. Promises are awaited.",
             "inputSchema": { "type": "object", "properties": {

@@ -1,8 +1,8 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// The Settings window (Cmd+,), with General, Passwords, Extensions, Agent and
-/// Profiles panes. Every change is saved as it is made, in the current profile.
+/// The Settings window (Cmd+,), with General, Passwords, Extensions, Agent,
+/// Skills and Profiles panes. Every change is saved as it is made, in the current profile.
 @MainActor
 final class SettingsWindowController: NSWindowController {
     private let tabs = NSTabViewController()
@@ -14,6 +14,7 @@ final class SettingsWindowController: NSWindowController {
             (PasswordsSettingsPane(), "key"),
             (ExtensionsSettingsPane(), "puzzlepiece.extension"),
             (AgentSettingsPane(), "sparkles"),
+            (SkillsSettingsPane(), "wand.and.stars"),
             (ProfilesSettingsPane(), "person.2"),
         ]
         for (pane, symbol) in panes {
@@ -1069,6 +1070,239 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
                 if self.pathKind == kind { self.loadPathField() }
             }
         }
+    }
+}
+
+
+// MARK: Skills
+
+/// Tiller's skill library: skills every agent can call with `/name`, with a
+/// switch for each and buttons to add, reveal and remove them. Agents load the
+/// library when they start, so a change applies from a chat's next start.
+final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    static let paneTitle = "Skills"
+
+    private let table = NSTableView()
+    private let addFolderButton = NSButton(title: "Add Folder…", target: nil, action: nil)
+    private let addArchiveButton = NSButton(title: "Add Archive…", target: nil, action: nil)
+    private let addGitButton = NSButton(title: "Add from Git…", target: nil, action: nil)
+    private let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let note = SettingsPane.wrappingNote(width: 600)
+    private var placeholder: NSTextField?
+    private var isInstalling = false {
+        didSet { updateControls() }
+    }
+    private var store: AgentSkillStore { .shared }
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        title = Self.paneTitle
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        for (id, title, width) in [
+            ("on", "On", 30.0), ("name", "Skill", 160.0), ("description", "Description", 300.0), ("source", "Source", 70.0),
+        ] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.allowsMultipleSelection = true
+        table.style = .inset
+        table.rowHeight = 22
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(reveal(_:))
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let (tableBox, placeholder) = SettingsPane.withPlaceholder(scroll, "No Skills")
+        self.placeholder = placeholder
+
+        for (button, action) in [
+            (addFolderButton, #selector(addFolder(_:))),
+            (addArchiveButton, #selector(addArchive(_:))),
+            (addGitButton, #selector(addGit(_:))),
+            (revealButton, #selector(reveal(_:))),
+            (removeButton, #selector(remove(_:))),
+        ] {
+            button.target = self
+            button.action = action
+        }
+        let buttons = NSStackView(views: [addFolderButton, addArchiveButton, addGitButton, NSView(), revealButton, removeButton])
+        buttons.spacing = 8
+
+        let stack = NSStackView(views: [tableBox, buttons, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let view = NSView()
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalToConstant: 600),
+            scroll.heightAnchor.constraint(equalToConstant: 280),
+            buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+        ])
+        self.view = view
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = view.fittingSize
+        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .agentSkillsDidChange, object: nil)
+        reload(nil)
+        showDefaultNote()
+    }
+
+    @objc private func reload(_ notification: Notification?) {
+        let selected = table.selectedRowIndexes
+        table.reloadData()
+        table.selectRowIndexes(selected.filteredIndexSet { $0 < store.entries.count }, byExtendingSelection: false)
+        updateControls()
+    }
+
+    private func updateControls() {
+        for button in [addFolderButton, addArchiveButton, addGitButton] { button.isEnabled = !isInstalling }
+        revealButton.isEnabled = table.selectedRowIndexes.count == 1
+        removeButton.isEnabled = !table.selectedRowIndexes.isEmpty && !isInstalling
+        placeholder?.isHidden = !store.entries.isEmpty
+    }
+
+    private func showDefaultNote() {
+        SettingsPane.show(
+            "Every agent can call these with /name, besides its own skills. Changes apply when a chat's agent next "
+                + "starts. Agents can also create and improve skills here when you ask them to.",
+            in: note
+        )
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { store.entries.count }
+
+    func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
+        guard store.entries.indices.contains(row) else { return nil }
+        let entry = store.entries[row]
+        let skill = store.skill(for: entry)
+        switch column?.identifier.rawValue {
+        case "on":
+            let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleEnabled(_:)))
+            checkbox.tag = row
+            checkbox.state = entry.enabled ? .on : .off
+            return checkbox
+        case "name":
+            let label = NSTextField(labelWithString: entry.name)
+            label.lineBreakMode = .byTruncatingTail
+            label.toolTip = store.folder(for: entry.name)
+            return label
+        case "description":
+            let label = NSTextField(labelWithString: skill?.description ?? "SKILL.md is missing")
+            label.textColor = skill == nil ? .systemRed : .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.toolTip = skill?.description
+            return label
+        default:
+            let label = NSTextField(labelWithString: entry.source.displayName)
+            label.textColor = .secondaryLabelColor
+            label.toolTip = entry.origin.isEmpty ? nil : entry.origin
+            return label
+        }
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateControls()
+    }
+
+    @objc private func toggleEnabled(_ sender: NSButton) {
+        store.setEnabled(sender.state == .on, at: sender.tag)
+    }
+
+    @objc private func addFolder(_ sender: Any?) {
+        choose(
+            files: false, types: [],
+            message: "Choose a skill's folder, the one with SKILL.md in it, or a folder of skills"
+        ) { [weak self] path in
+            guard let self else { return }
+            self.installing { try await self.store.addFolder(path) }
+        }
+    }
+
+    @objc private func addArchive(_ sender: Any?) {
+        choose(
+            files: true, types: [.zip, UTType(filenameExtension: "skill") ?? .data],
+            message: "Choose a .zip or .skill archive with one or more skills"
+        ) { [weak self] path in
+            guard let self else { return }
+            self.installing { try await self.store.addArchive(path) }
+        }
+    }
+
+    @objc private func addGit(_ sender: Any?) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Add Skills from Git"
+        alert.informativeText = "A repository URL, owner/repo on GitHub, or a link to a folder on GitHub. "
+            + "Tiller adds the skill at its root, or every skill in the folders inside."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        field.placeholderString = "https://github.com/owner/repo"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            let input = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard response == .alertFirstButtonReturn, !input.isEmpty else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                SettingsPane.show("Cloning \(input)…", in: self.note)
+                self.installing { try await self.store.addGit(input) }
+            }
+        }
+    }
+
+    private func choose(files: Bool, types: [UTType], message: String, then add: @escaping (String) -> Void) {
+        guard let window = view.window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = files
+        panel.canChooseDirectories = !files
+        if !types.isEmpty { panel.allowedContentTypes = types }
+        panel.message = message
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            MainActor.assumeIsolated { add(url.path) }
+        }
+    }
+
+    private func installing(_ work: @escaping () async throws -> [String]) {
+        isInstalling = true
+        Task {
+            defer { isInstalling = false }
+            do {
+                let names = try await work()
+                let list = names.count > 3 ? "\(names.count) skills" : names.joined(separator: ", ")
+                SettingsPane.show("Added \(list). Agents load \(names.count == 1 ? "it" : "them") when a chat next starts.", in: note)
+            } catch {
+                SettingsPane.show(error.localizedDescription, in: note, warning: true)
+            }
+        }
+    }
+
+    @objc private func reveal(_ sender: Any?) {
+        guard table.selectedRowIndexes.count == 1, store.entries.indices.contains(table.selectedRow) else { return }
+        let folder = store.folder(for: store.entries[table.selectedRow].name)
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder + "/SKILL.md")])
+    }
+
+    @objc private func remove(_ sender: Any?) {
+        store.remove(at: table.selectedRowIndexes)
+        table.deselectAll(nil)
+        showDefaultNote()
     }
 }
 

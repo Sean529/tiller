@@ -6,8 +6,8 @@ struct ControlError: Error {
     init(_ message: String) { self.message = message }
 }
 
-/// Answers tiller_mcp's tab requests (list, open, select, navigate, close) that
-/// arrive on the control socket. DevTools calls on the same socket never reach
+/// Answers tiller_mcp's tab requests (list, open, select, navigate, close) and
+/// skill requests (list, read, save) that arrive on the control socket. DevTools calls on the same socket never reach
 /// Swift; the core sends them to the tab directly.
 @MainActor
 final class ControlServer {
@@ -39,9 +39,13 @@ final class ControlServer {
                 guard let request = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
                     let method = request["method"] as? String
                 else { throw ControlError("request needs a method") }
-                guard let browser else { throw ControlError("no browser window is open") }
                 let params = request["params"] as? [String: Any] ?? [:]
-                reply = ["result": try browser.control(method, params: params)]
+                if method.hasPrefix("skills.") {
+                    reply = ["result": try AgentSkillCatalog.control(method, params: params)]
+                } else {
+                    guard let browser else { throw ControlError("no browser window is open") }
+                    reply = ["result": try browser.control(method, params: params)]
+                }
             } catch let error as ControlError {
                 reply = ["error": error.message]
             } catch {

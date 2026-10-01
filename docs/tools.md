@@ -1,6 +1,6 @@
 # Browser tools
 
-Tiller exposes one set of browser tools two ways: as an MCP server for agents and as the `tiller` command-line tool for shells and scripts.
+Tiller exposes one set of browser tools two ways: as an MCP server for agents and as the `tiller` command-line tool for shells and scripts. The MCP server also has three tools for the [skill library](agent.md#tillers-skill-library).
 
 ## MCP server
 
@@ -18,6 +18,9 @@ Tiller exposes one set of browser tools two ways: as an MCP server for agents an
 | `type` | Types into a field, replacing its text unless `append` is set, optionally presses Enter |
 | `screenshot` | JPEG of the visible part of the tab |
 | `eval_js` | Runs an expression in the page and returns the value as JSON |
+| `list_skills` | Every skill agents can call: the library's, marked editable and on or off, then the CLIs' own |
+| `read_skill` | A skill's `SKILL.md` and the other files in its folder |
+| `save_skill` | Creates or updates a library skill from the whole `SKILL.md`, or its body plus a `description`, with optional `files` to write and `delete_files` to remove |
 
 Tools act on the selected tab unless given `tab_id`, and work in background tabs without bringing them to the front, so agents can each work in a tab of their own while you use another. Only `select_tab` and `new_tab` without `background` change the selected tab.
 
@@ -25,7 +28,7 @@ Background tabs are hidden, and Chromium stops drawing hidden pages and stalls o
 
 `read_page` marks each element it lists with a `data-tiller-ref` attribute, which pages can see. Refs are renumbered on every call.
 
-How it's wired: tab operations (`tabs.*`, including `tabs.wake`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
+How it's wired: tab operations (`tabs.*`, including `tabs.wake`) and skill operations (`skills.*`, in `AgentSkills.swift`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
 
 To try it without an agent:
 

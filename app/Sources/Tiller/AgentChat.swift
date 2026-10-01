@@ -35,6 +35,12 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private let scrollView = NSScrollView()
     private let emptyState = AgentEmptyState()
     private let composer = Composer()
+    private let skillPicker = SkillPicker()
+    /// The skills the running agent said it loaded. Until then, `/` offers
+    /// what Tiller finds on disk.
+    private var loadedSkills: [AgentSkill]?
+    /// What `/` offers while the picker is open, read when it opens.
+    private var pickerSkills: [AgentSkill]?
 
     private var session: AgentSession?
     /// Set while a session resumes a saved conversation and hasn't started yet.
@@ -98,6 +104,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         session?.stop()
         session = nil
         resuming = false
+        loadedSkills = nil
     }
 
     // MARK: Layout
@@ -130,7 +137,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             self.preview(self.composer.attachments.map(\.url), at: index)
         }
 
-        for view in [scrollView, separator, emptyState, tabBarHost, composer] as [NSView] {
+        skillPicker.isHidden = true
+        skillPicker.onPick = { [weak self] skill in self?.complete(skill) }
+
+        for view in [scrollView, separator, emptyState, tabBarHost, composer, skillPicker] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -165,6 +175,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             composer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+
+            skillPicker.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            skillPicker.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            skillPicker.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
         ])
     }
 
@@ -216,6 +230,24 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// Enter sends. Option+Enter or Shift+Enter adds a line. Escape stops a
     /// running turn.
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if !skillPicker.isHidden {
+            switch selector {
+            case #selector(NSResponder.moveUp(_:)):
+                skillPicker.moveSelection(by: -1)
+                return true
+            case #selector(NSResponder.moveDown(_:)):
+                skillPicker.moveSelection(by: 1)
+                return true
+            case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertNewline(_:)):
+                if let skill = skillPicker.selectedSkill { complete(skill) }
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                hidePicker()
+                return true
+            default:
+                break
+            }
+        }
         switch selector {
         case #selector(NSResponder.insertNewline(_:)):
             let flags = NSApp.currentEvent?.modifierFlags ?? []
@@ -239,6 +271,49 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {
         composer.textChanged()
+        updatePicker()
+    }
+
+    // MARK: Skills
+
+    /// What `/` can call in this chat.
+    private var availableSkills: [AgentSkill] {
+        loadedSkills ?? AgentSkillCatalog.skills(for: kind)
+    }
+
+    /// Open while the text is a `/` and the start of a name, with nothing after.
+    private func updatePicker() {
+        let text = composer.text
+        guard text.hasPrefix("/"), !text.contains(where: \.isWhitespace) else { return hidePicker() }
+        let skills = pickerSkills ?? availableSkills
+        pickerSkills = skills
+        skillPicker.show(skills, matching: String(text.dropFirst()))
+    }
+
+    private func hidePicker() {
+        skillPicker.isHidden = true
+        pickerSkills = nil
+    }
+
+    /// Puts `/name ` in the field, keeping it undoable.
+    private func complete(_ skill: AgentSkill) {
+        let textView = composer.textView
+        let range = NSRange(location: 0, length: (textView.string as NSString).length)
+        let replacement = "/" + skill.name + " "
+        if textView.shouldChangeText(in: range, replacementString: replacement) {
+            textView.replaceCharacters(in: range, with: replacement)
+            textView.didChangeText()
+        }
+        textView.setSelectedRange(NSRange(location: (replacement as NSString).length, length: 0))
+        hidePicker()
+        window?.makeFirstResponder(textView)
+    }
+
+    /// The skill a message starting with `/name` calls.
+    private func skill(calledBy text: String) -> AgentSkill? {
+        guard text.hasPrefix("/") else { return nil }
+        let name = text.dropFirst().prefix { !$0.isWhitespace }
+        return availableSkills.first { $0.name == name }
     }
 
     /// The composer keeps its own undo, which a sent message clears.
@@ -252,6 +327,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         guard !text.isEmpty || !images.isEmpty, !isBusy else { return }
         composer.text = ""
         composer.attachments = []
+        hidePicker()
         send(text, images: images)
     }
 
@@ -270,7 +346,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             self?.preview(images.map(\.url), at: index)
         })
         do {
-            try session.send(text, images: images, context: context?() ?? "")
+            try session.send(text, images: images, context: context?() ?? "", skill: skill(calledBy: text))
             if session.isRunning { setStatus("Working…", busy: true) }
             setBusy(true)
         } catch {
@@ -405,6 +481,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             guard var conversation else { break }
             conversation.title = title
             save(conversation)
+        case .skills(let skills):
+            loadedSkills = skills
         case .textStarted:
             liveTextBuffer = ""
             let label = AgentMarkdown.label("")

@@ -1,0 +1,164 @@
+import AppKit
+
+/// The list that opens above the message field while it holds a `/` and the
+/// start of a skill's name: matching skills with what they do. Arrow keys
+/// move the selection, and Tab, Return or a click completes the name.
+final class SkillPicker: NSView {
+    var onPick: ((AgentSkill) -> Void)?
+
+    private let stack = NSStackView()
+    private var rows: [SkillPickerRow] = []
+    private(set) var skills: [AgentSkill] = []
+    private var selected = 0
+    private static let maxRows = 7
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+        ])
+        setAccessibilityRole(.list)
+        setAccessibilityLabel("Skills")
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Skills whose name starts with `query` come first, then those that
+    /// have it elsewhere in the name. Returns whether any matched.
+    @discardableResult
+    func show(_ all: [AgentSkill], matching query: String) -> Bool {
+        let query = query.lowercased()
+        let starts = all.filter { $0.name.lowercased().hasPrefix(query) }
+        let contains = query.isEmpty ? [] : all.filter { !$0.name.lowercased().hasPrefix(query) && $0.name.lowercased().contains(query) }
+        let matches = Array((starts + contains).prefix(Self.maxRows))
+        if matches.map(\.name) != skills.map(\.name) {
+            skills = matches
+            selected = 0
+            rows.forEach { $0.removeFromSuperview() }
+            rows = matches.enumerated().map { index, skill in
+                let row = SkillPickerRow(skill: skill)
+                row.onHover = { [weak self] in self?.select(index) }
+                row.onClick = { [weak self] in self?.onPick?(skill) }
+                stack.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+                return row
+            }
+            select(0)
+        }
+        isHidden = matches.isEmpty
+        return !matches.isEmpty
+    }
+
+    func moveSelection(by offset: Int) {
+        guard !skills.isEmpty else { return }
+        select((selected + offset + skills.count) % skills.count)
+    }
+
+    var selectedSkill: AgentSkill? { skills.indices.contains(selected) ? skills[selected] : nil }
+
+    private func select(_ index: Int) {
+        selected = index
+        for (i, row) in rows.enumerated() { row.isSelected = i == index }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = 12
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.12
+        layer?.shadowRadius = 8
+        layer?.shadowOffset = CGSize(width: 0, height: -2)
+        layer?.masksToBounds = false
+    }
+}
+
+/// One skill in the picker: `/name`, its argument hint, and its description.
+private final class SkillPickerRow: NSView {
+    var onHover: (() -> Void)?
+    var onClick: (() -> Void)?
+    var isSelected = false { didSet { if isSelected != oldValue { needsDisplay = true } } }
+
+    init(skill: AgentSkill) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        let name = NSTextField(labelWithString: "/" + skill.name)
+        name.font = .systemFont(ofSize: 13, weight: .medium)
+        name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        let hint = NSTextField(labelWithString: skill.argumentHint ?? "")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .tertiaryLabelColor
+        hint.lineBreakMode = .byTruncatingTail
+        hint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        hint.isHidden = skill.argumentHint == nil
+        let badge = NSTextField(labelWithString: skill.origin == .library ? "Tiller" : "")
+        badge.font = .systemFont(ofSize: 10, weight: .medium)
+        badge.textColor = .secondaryLabelColor
+        badge.isHidden = skill.origin != .library
+        let top = NSStackView(views: [name, hint, NSView(), badge])
+        top.spacing = 6
+        let description = NSTextField(labelWithString: skill.description.isEmpty ? " " : skill.description)
+        description.font = .systemFont(ofSize: 11)
+        description.textColor = .secondaryLabelColor
+        description.lineBreakMode = .byTruncatingTail
+        description.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let stack = NSStackView(views: [top, description])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            top.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        toolTip = skill.description.isEmpty ? nil : skill.description
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("/" + skill.name)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor : nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHover?() }
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
+    }
+}

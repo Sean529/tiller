@@ -14,13 +14,31 @@ A chat is saved with its first message. Its title is the first line of that mess
 
 A message can carry up to five images. Paste one with Cmd+V (a screenshot, an image copied from a page, or image files copied in Finder), drop images on the field, or pick them with the paperclip button. They show as thumbnails above the text, each with a button to remove it, and clicking a thumbnail, there or in the transcript, opens it in Quick Look. Tiller scales each image down to 2000 pixels on its long edge and saves it as PNG, or as JPEG if the PNG is over 3.5 MB, in the chat's folder. Claude Code and Qoder CLI get the image in the message, and Codex gets the file's path. The images stay with the chat and are deleted with it; images attached but never sent are deleted when the tab closes.
 
+## Skills
+
+A skill is a folder with a `SKILL.md`: front matter with its `name` and `description`, then instructions the agent follows when it is called. Type `/` at the start of a message to pick one: a list above the field shows the skills whose names match what follows the `/`, with what each does and, for Tiller's own, a Tiller label. Up and Down move through it, Tab, Return or a click puts `/name ` in the field, and Escape closes it. Anything after the name goes to the skill as its arguments.
+
+Before the agent starts, the list has Tiller's skill library and the skills the CLI finds itself in your folders: `~/.claude/skills` for Claude Code, `~/.agents/skills` and `~/.qoder/skills` for Qoder CLI, `~/.agents/skills` for Codex. Once the agent is running, the list is the skills it reported loading, plugins' included, described from their files where Tiller finds them.
+
+A skill call has to come first in the message, so for Claude Code and Qoder CLI a message starting with `/` goes before the selected tab's details instead of after them. Codex gets the skill as its own input item, and the text calls it as `$name`, as Codex writes it.
+
+### Tiller's skill library
+
+Settings > Skills lists the profile's own skills, which every agent loads besides its own. Add Folder… copies a skill's folder, or every skill in the folders inside it. Add Archive… unpacks a `.zip` or `.skill` file, and Add from Git… clones a repository URL, `owner/repo` on GitHub, or a link to a folder on GitHub (`…/tree/<branch>/<path>`). Both take the skill at the top, or else every skill one level down, looking inside a `skills` folder or a single wrapping folder when there are none. A skill with the name of one already in the library replaces it and stays on or off. The checkbox turns a skill off without removing it; Show in Finder reveals its `SKILL.md`, and Remove deletes it. Agents read the library when they start, so changes apply from a chat's next start: a new chat, or the next message after the agent stopped.
+
+The library is in `agent-skills` in the [profile's folder](settings-and-data.md#data-folder): `skills.json` lists the skills, `library/<name>` holds each one, and `exposed/skills` links the ones that are on. Claude Code and Qoder CLI get `exposed` with `--add-dir` and find the skills in its `.claude/skills` and `.qoder/skills`, both links to `exposed/skills`. Codex gets `exposed/skills` from `skills/extraRoots/set`.
+
+### Creating skills from a chat
+
+Ask the agent to create a skill, or to change or improve one, and it uses three of Tiller's tools: `list_skills`, `read_skill` and `save_skill`. They work with built-in tools off. `save_skill` writes `SKILL.md` and any other files to the library, and when it updates a skill, files it doesn't mention stay. Only library skills can be changed: the agent can read skills in your own folders, but saving one by that name is refused until you add its folder in Settings > Skills.
+
 ## How agents run
 
 Tiller runs Qoder CLI and Claude Code in print mode with stream-json on stdin and stdout, and Codex as `codex app-server`, which speaks JSON-RPC on stdin and stdout. The process stays alive between messages so the conversation carries over, and the CLI also saves the conversation so it can be resumed later. Each message is prefixed with the selected tab's id, title and URL. The panel shows the agent's text, streamed for Claude Code and Codex, with its markdown headings, lists, quotes, links and tables rendered, and fenced code on a plate with its language and a copy button. Each tool call gets a row with a spinner that turns into a check, or a cross with the error. The transcript follows new output unless you've scrolled up to read. Web links in the agent's text open in a new Tiller tab, selected, or behind the current one with Cmd+click. Other links, such as `mailto:`, go to their apps.
 
 ## Tools the agent gets
 
-By default the agent gets Tiller's [browser tools](tools.md) and, apart from Codex's shell, nothing else:
+By default the agent gets Tiller's [browser and skill tools](tools.md) and, apart from Codex's shell, nothing else:
 
 | | Qoder CLI | Claude Code | Codex (in `thread/start`) |
 |---|---|---|---|
@@ -28,7 +46,7 @@ By default the agent gets Tiller's [browser tools](tools.md) and, apart from Cod
 | Only Tiller's MCP server | `--mcp-config <file> --strict-mcp-config` | same | `mcp_servers.tiller` in `config`, with Tiller's own `CODEX_HOME` so your `config.toml` servers don't load |
 | Tiller's tools allowed without asking | `--allowed-tools mcp__tiller --permission-mode dont_ask` | `--allowedTools mcp__tiller --permission-mode dontAsk` | `default_tools_approval_mode = "approve"` on the server, `approvalPolicy: "never"` for everything else |
 
-The MCP config is written to `agent-mcp.json` in the profile's folder and points at the `tiller_mcp` inside the running app. The agent runs in the empty `agent` directory in the profile's folder, or in the folder set in Settings > Agent > Work in. A real project folder loads that project's instructions and settings too.
+The MCP config is written to `agent-mcp.json` in the profile's folder and points at the `tiller_mcp` inside the running app. Claude Code and Qoder CLI also get `--add-dir` with the [skill library](#tillers-skill-library). The agent runs in the empty `agent` directory in the profile's folder, or in the folder set in Settings > Agent > Work in. A real project folder loads that project's instructions and settings too.
 
 ### Optional built-in tools
 

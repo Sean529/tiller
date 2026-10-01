@@ -4,7 +4,7 @@ Tiller's settings, the switches it passes to Chromium, and where it stores data.
 
 ## Settings
 
-Tiller > Settings… (Cmd+,) has five panes: General, Passwords, Extensions (see [Extensions](browser.md#extensions)), Agent and Profiles (see [Profiles](browser.md#profiles)). Changes are saved as you make them, and apply to the current profile only, except the default browser, which macOS keeps for the app.
+Tiller > Settings… (Cmd+,) has six panes: General, Passwords, Extensions (see [Extensions](browser.md#extensions)), Agent, Skills (see [Skills](agent.md#tillers-skill-library)) and Profiles (see [Profiles](browser.md#profiles)). Changes are saved as you make them, and apply to the current profile only, except the default browser, which macOS keeps for the app.
 
 | Pane | Setting | Default | Takes effect |
 |---|---|---|---|
@@ -20,6 +20,7 @@ Tiller > Settings… (Cmd+,) has five panes: General, Passwords, Extensions (see
 | Agent | Show and hide shortcut: click, then press a combination with Cmd or Ctrl. Delete clears it; one already in a menu is refused | Cmd+Shift+S | right away |
 | Agent | Run: pick a CLI, then the file to run it from | empty, meaning look it up | next new chat |
 | Agent | Extra instructions, added after Tiller's system prompt | empty | next new chat |
+| Skills | Each skill in the library: on or off, added from a folder, archive or Git, or removed | none | a chat's next agent start |
 
 Settings live in the profile's own user defaults, `dev.sorrycc.tiller.profile.<id>`. Window position and size stay in `dev.sorrycc.tiller`, shared by every profile. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.
 
@@ -48,7 +49,8 @@ Tiller keeps its data in `~/Library/Application Support/Tiller`. Set `TILLER_DAT
 | Path | What it is |
 |---|---|
 | `profiles.json` | Every profile's id, name and creation date, and the id of the one used last |
-| `Profiles/<id>/` | One profile: Chromium's data, `history.sqlite`, `passwords.json`, `session.json`, `extensions.json`, `Extensions/`, `agent-chats/`, the agent's working folder and the control socket |
+| `Profiles/<id>/` | One profile: Chromium's data, `history.sqlite`, `passwords.json`, `session.json`, `extensions.json`, `Extensions/`, `agent-chats/`, `agent-skills/`, the agent's working folder and the control socket |
+| `Profiles/<id>/agent-skills/` | The [skill library](agent.md#tillers-skill-library): `skills.json` lists each skill's name, where it came from (a folder, an archive, Git or an agent) and whether it's on; `library/` holds the skills and `exposed/` links the ones that are on |
 | `Profiles/<id>/extensions.json` | The profile's extensions: each one's folder, where it came from (a folder, a CRX file or Chrome), and whether it's on and pinned |
 | `Profiles/<id>/Extensions/` | Extensions Tiller unpacked or copied, one folder each, named by id plus a random suffix so an update never overwrites files Chromium has loaded. Folders nothing uses any more are deleted at launch |
 

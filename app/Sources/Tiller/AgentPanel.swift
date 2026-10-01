@@ -425,7 +425,7 @@ final class AgentEmptyState: NSView {
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         title.alignment = .center
 
-        let subtitle = NSTextField(wrappingLabelWithString: "It can read the page, click, type and open tabs for you.")
+        let subtitle = NSTextField(wrappingLabelWithString: "It can read the page, click, type and open tabs for you. Type / for skills.")
         subtitle.font = .systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
         subtitle.alignment = .center

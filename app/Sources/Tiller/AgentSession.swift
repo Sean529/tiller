@@ -34,7 +34,9 @@ enum AgentKind: String, CaseIterable, Codable {
 
     /// Print mode with stream-json both ways, only the built-in tools in
     /// `tools`, only the `tiller` MCP server, and all of those allowed without
-    /// asking. `resume` continues that saved session.
+    /// asking. `resume` continues that saved session. `--add-dir` brings in
+    /// Tiller's skill library, whose `.claude/skills` and `.qoder/skills` the
+    /// CLIs read.
     func arguments(mcpConfig: String, systemPrompt: String, tools: [AgentTool], resume: String?) -> [String] {
         let toolNames = tools.flatMap(\.toolNames)
         let allowed = (["mcp__tiller"] + toolNames).joined(separator: ",")
@@ -46,6 +48,7 @@ enum AgentKind: String, CaseIterable, Codable {
             "--mcp-config", mcpConfig,
             "--strict-mcp-config",
             "--append-system-prompt", systemPrompt,
+            "--add-dir", AgentSkillStore.exposedFolder,
         ]
         if let resume { common += ["--resume", resume] }
         switch self {
@@ -79,6 +82,8 @@ enum AgentEvent {
     case sessionStarted(id: String)
     /// The agent named the conversation (Codex only).
     case renamed(String)
+    /// The skills the CLI loaded, which `/` can call.
+    case skills([AgentSkill])
     /// A streamed text block started (Claude Code only).
     case textStarted
     case textDelta(String)
@@ -150,6 +155,8 @@ final class AgentSession {
             }
             throw ControlError("\(kind.rawValue) not found. Install it, or set its path in Settings (Cmd+,).")
         }
+        // Creates the skill folders that --add-dir and Codex's skills root name.
+        _ = AgentSkillStore.shared
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = kind.arguments(
@@ -197,13 +204,22 @@ final class AgentSession {
     }
 
     /// Sends one user turn. `context` goes before the text, for the agent only.
-    /// Images go before both.
-    func send(_ text: String, images: [AgentAttachment] = [], context: String) throws {
+    /// Images go before both. Claude Code and Qoder CLI run a slash command
+    /// only at the very start of the message, so one goes before the context.
+    /// For Codex, `skill` is attached as its own input, and the text calls it
+    /// with `$`, as Codex writes it.
+    func send(_ text: String, images: [AgentAttachment] = [], context: String, skill: AgentSkill? = nil) throws {
         try start()
-        let prompt = text.isEmpty ? context : context + "\n\n" + text
+        var prompt = text.isEmpty ? context : context + "\n\n" + text
         if kind == .codex {
-            try startCodexTurn(images.map { ["type": "localImage", "path": $0.url.path] } + [["type": "text", "text": prompt]])
+            var input: [[String: Any]] = images.map { ["type": "localImage", "path": $0.url.path] }
+            if let skill, let path = skill.path, text.hasPrefix("/") {
+                input.append(["type": "skill", "name": skill.name, "path": path])
+                prompt = context + "\n\n$" + text.dropFirst()
+            }
+            try startCodexTurn(input + [["type": "text", "text": prompt]])
         } else {
+            if text.hasPrefix("/") { prompt = text + "\n\n" + context }
             let content: Any = images.isEmpty ? prompt : images.map { image in
                 ["type": "image", "source": ["type": "base64", "media_type": image.mediaType, "data": image.data.base64EncodedString()]]
             } + [["type": "text", "text": prompt]]
@@ -298,6 +314,13 @@ final class AgentSession {
             case "init":
                 if let id = message["session_id"] as? String, !id.isEmpty { started(id) }
                 onEvent?(.ready(model: message["model"] as? String))
+                if let names = message["skills"] as? [String] {
+                    let plugins = (message["plugins"] as? [[String: Any]] ?? []).compactMap { plugin -> (name: String, path: String)? in
+                        guard let name = plugin["name"] as? String, let path = plugin["path"] as? String else { return nil }
+                        return (name, path)
+                    }
+                    onEvent?(.skills(AgentSkillCatalog.skills(named: names, plugins: plugins, kind: kind)))
+                }
             case "api_retry": onEvent?(.retrying)
             default: break
             }
@@ -377,6 +400,8 @@ final class AgentSession {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         try request("initialize", ["clientInfo": ["name": "tiller", "title": "Tiller", "version": version]])
         try write(["method": "initialized"])
+        // Tiller's skill library, besides the skills Codex finds itself.
+        try request("skills/extraRoots/set", ["extraRoots": [AgentSkillStore.exposedSkills]])
         try requestCodexThread(cwd: cwd)
     }
 
@@ -451,12 +476,24 @@ final class AgentSession {
             if let threadID { started(threadID) }
             if let name = thread["name"] as? String, !name.isEmpty { onEvent?(.renamed(name)) }
             onEvent?(.ready(model: result["model"] as? String ?? thread["model"] as? String))
+            if let directory { try? request("skills/list", ["cwds": [directory.path]]) }
             if let input = queuedInput {
                 queuedInput = nil
                 do { try startCodexTurn(input) } catch { finishTurn(error: error.localizedDescription) }
             }
         case "turn/start":
             if let error { finishTurn(error: error) }
+        case "skills/list":
+            let entries = result["data"] as? [[String: Any]] ?? []
+            let skills = entries.flatMap { $0["skills"] as? [[String: Any]] ?? [] }.compactMap { skill -> AgentSkill? in
+                guard skill["enabled"] as? Bool != false, let name = skill["name"] as? String else { return nil }
+                let path = skill["path"] as? String
+                let inLibrary = path.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path.hasPrefix(AgentSkillStore.root) } ?? false
+                let description = (skill["interface"] as? [String: Any])?["shortDescription"] as? String
+                    ?? skill["shortDescription"] as? String ?? skill["description"] as? String ?? ""
+                return AgentSkill(name: name, description: description, argumentHint: nil, path: path, origin: inLibrary ? .library : .user)
+            }
+            onEvent?(.skills(skills))
         default:
             // An interrupt that loses the race with the end of the turn fails harmlessly.
             break
@@ -591,6 +628,11 @@ enum AgentEnvironment {
         refs it returns. Every tool works in background tabs, so pass tab_id rather than \
         selecting a tab, and open tabs of your own with new_tab background so the user's \
         tab stays in front. Keep replies short.
+
+        The user can call skills by starting a message with /name. When they ask you to create, \
+        change or improve a skill, use list_skills and read_skill to see the existing ones and \
+        save_skill to write it to Tiller's skill library, where every agent finds it from its next \
+        start. Skills outside the library are read-only.
         """
 
     /// Tiller's prompt, a line on the file and shell tools if any are on, then

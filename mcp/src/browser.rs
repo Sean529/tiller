@@ -112,6 +112,12 @@ impl Browser {
                 let expression = args["expression"].as_str().ok_or("expression is required")?;
                 json_out(self.evaluate(id, expression)?)
             }
+            "list_skills" => json_out(self.request("skills.list", json!({}))?),
+            "read_skill" => {
+                let name = args["name"].as_str().ok_or("name is required")?;
+                json_out(self.request("skills.read", json!({ "name": name }))?)
+            }
+            "save_skill" => json_out(self.request("skills.save", args.clone())?),
             _ => Err(format!("unknown tool: {name}")),
         }
     }
