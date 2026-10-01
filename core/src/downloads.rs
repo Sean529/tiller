@@ -8,6 +8,7 @@ use std::{
     collections::HashMap,
     ffi::{CString, c_char, c_void},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 /// Mirrors `TillerDownloadCallback` in tiller_core.h: the tab's browser id,
@@ -24,7 +25,14 @@ thread_local! {
     /// Paths handed to downloads still under way, which don't exist on disk
     /// yet, so a second download of the same file gets another name.
     static RESERVED: RefCell<HashMap<u32, PathBuf>> = RefCell::new(HashMap::new());
+    /// When each download's progress was last reported.
+    static REPORTED: RefCell<HashMap<u32, Instant>> = RefCell::new(HashMap::new());
 }
+
+/// Chromium reports progress for every chunk received, far more often than
+/// a progress ring can show. Progress is passed on at most this often; a
+/// change of state always is.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 pub fn set_handler(ctx: *mut c_void, handler: Option<Callback>) {
     HANDLER.set(handler.map(|h| (ctx, h)));
@@ -61,7 +69,11 @@ fn unique_path(folder: &Path, name: &str) -> PathBuf {
 }
 
 fn to_cstring(s: String) -> CString {
-    CString::new(s.replace('\0', "")).unwrap_or_default()
+    CString::new(s).unwrap_or_else(|e| {
+        let mut bytes = e.into_vec();
+        bytes.retain(|&b| b != 0);
+        CString::new(bytes).unwrap_or_default()
+    })
 }
 
 fn report(browser: Option<&mut Browser>, item: &DownloadItem) {
@@ -132,9 +144,21 @@ wrap_download_handler! {
                 if let Some(callback) = callback {
                     CALLBACKS.with_borrow_mut(|map| map.insert(id, callback.clone()));
                 }
+                let now = Instant::now();
+                let due = REPORTED.with_borrow_mut(|map| match map.get(&id) {
+                    Some(last) if now.duration_since(*last) < PROGRESS_INTERVAL => false,
+                    _ => {
+                        map.insert(id, now);
+                        true
+                    }
+                });
+                if !due {
+                    return;
+                }
             } else {
                 CALLBACKS.with_borrow_mut(|map| map.remove(&id));
                 RESERVED.with_borrow_mut(|map| map.remove(&id));
+                REPORTED.with_borrow_mut(|map| map.remove(&id));
             }
             report(browser, item);
         }

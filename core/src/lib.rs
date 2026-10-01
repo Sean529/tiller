@@ -87,6 +87,8 @@ pub unsafe extern "C" fn tiller_core_start(data_dir: *const c_char, extensions: 
 #[unsafe(no_mangle)]
 pub extern "C" fn tiller_core_run() {
     run_message_loop();
+    // No request may reach the UI thread once CEF starts coming down.
+    ipc::stop();
     shutdown();
 }
 
@@ -331,9 +333,13 @@ pub unsafe extern "C" fn tiller_ipc_start(socket_path: *const c_char, ctx: *mut 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tiller_ipc_reply(token: u64, reply_json: *const c_char) {
     let reply = unsafe { cstr(reply_json) };
-    match serde_json::from_str::<&serde_json::value::RawValue>(&reply) {
-        Ok(_) => ipc::reply_raw(token, reply),
-        Err(e) => ipc::reply_error(token, format!("bad reply from app: {e}")),
+    // The app serializes the reply itself, so only its shape is checked here,
+    // on the UI thread, rather than every byte of it.
+    let body = reply.trim();
+    if body.starts_with('{') && body.ends_with('}') {
+        ipc::reply_raw(token, reply);
+    } else {
+        ipc::reply_error(token, "bad reply from app: not a JSON object");
     }
 }
 

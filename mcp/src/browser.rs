@@ -103,9 +103,23 @@ impl Browser {
             }
             "screenshot" => {
                 let id = self.wake(tab)?;
-                let shot = self.cdp(id, "Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 }))?;
-                let data = shot["data"].as_str().ok_or("the screenshot came back empty")?;
-                Ok(Output::Image(data.to_string()))
+                // In CSS pixels, the units clicks take, rather than the
+                // display's: a Retina screenshot has four times the bytes
+                // to encode, send and read, and the model sees it no better.
+                let mut params = json!({ "format": "jpeg", "quality": 80 });
+                let viewport = self.evaluate(id, "({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio })")?;
+                if let (Some(w), Some(h), Some(dpr)) = (viewport["w"].as_f64(), viewport["h"].as_f64(), viewport["dpr"].as_f64())
+                    && dpr > 1.0
+                    && w > 0.0
+                    && h > 0.0
+                {
+                    params["clip"] = json!({ "x": 0, "y": 0, "width": w, "height": h, "scale": 1.0 / dpr });
+                }
+                let mut shot = self.cdp(id, "Page.captureScreenshot", params)?;
+                match shot["data"].take() {
+                    Value::String(data) if !data.is_empty() => Ok(Output::Image(data)),
+                    _ => Err("the screenshot came back empty".into()),
+                }
             }
             "eval_js" => {
                 let id = self.resolve(tab)?;
@@ -223,21 +237,27 @@ impl Browser {
         if self.conn.is_none() {
             let path = socket_path(self.profile.as_deref()).map_err(Failure::App)?;
             let stream = UnixStream::connect(path).map_err(|e| Failure::Connection(e.to_string()))?;
+            // The app gives up on a request after 60 seconds; this only
+            // catches an app that stopped answering altogether.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(90)));
             let reader = BufReader::new(stream.try_clone().map_err(|e| Failure::Connection(e.to_string()))?);
             self.conn = Some((stream, reader));
         }
         let (stream, reader) = self.conn.as_mut().unwrap();
         self.next_id += 1;
-        let line = json!({ "id": self.next_id, "method": method, "params": params });
-        writeln!(stream, "{line}").map_err(|e| Failure::Connection(e.to_string()))?;
+        // One write per request. Formatting straight into the socket would
+        // make a system call of every token.
+        let mut line = json!({ "id": self.next_id, "method": method, "params": params }).to_string();
+        line.push('\n');
+        stream.write_all(line.as_bytes()).map_err(|e| Failure::Connection(e.to_string()))?;
         let mut reply = String::new();
         if reader.read_line(&mut reply).map_err(|e| Failure::Connection(e.to_string()))? == 0 {
             return Err(Failure::Connection("connection closed".into()));
         }
-        let reply: Value = serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Tiller: {e}")))?;
+        let mut reply: Value = serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Tiller: {e}")))?;
         match reply.get("error") {
             Some(error) => Err(Failure::App(error.as_str().unwrap_or("error").to_string())),
-            None => Ok(reply["result"].clone()),
+            None => Ok(reply["result"].take()),
         }
     }
 }

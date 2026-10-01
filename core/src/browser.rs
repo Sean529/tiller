@@ -3,13 +3,14 @@
 
 use crate::ipc;
 use cef::*;
-use serde::Deserialize;
-use serde_json::{Value, json, value::RawValue};
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     ffi::{CString, c_char, c_void},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicI32, Ordering},
+    },
 };
 
 /// Mirrors `TillerBrowserCallbacks` in tiller_core.h.
@@ -37,6 +38,9 @@ struct Entry {
     callbacks: Option<Callbacks>,
     /// Keeps the DevTools observer attached. Added on the first DevTools call.
     devtools: Option<Registration>,
+    /// The favicon URL last fetched for the tab. Pages of one site share an
+    /// icon, so the same URL again isn't fetched and encoded again.
+    icon_url: Option<String>,
 }
 
 /// A DevTools call waiting for its result.
@@ -52,7 +56,21 @@ pub static EXTENSIONS: OnceLock<String> = OnceLock::new();
 thread_local! {
     static BROWSERS: RefCell<HashMap<i32, Entry>> = RefCell::new(HashMap::new());
     static DEVTOOLS_CALLS: RefCell<HashMap<i32, PendingCall>> = RefCell::new(HashMap::new());
-    static NEXT_MESSAGE_ID: Cell<i32> = const { Cell::new(1) };
+}
+
+/// DevTools message ids, handed out on the socket threads that frame the
+/// messages. Positive, so a reply's id can be told from an event's lack of one.
+static NEXT_MESSAGE_ID: AtomicI32 = AtomicI32::new(1);
+
+pub fn next_message_id() -> i32 {
+    let id = NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed);
+    if id > 0 {
+        id
+    } else {
+        // Wrapped around. Start over; a call from that long ago is gone.
+        NEXT_MESSAGE_ID.store(2, Ordering::Relaxed);
+        1
+    }
 }
 
 pub fn get(id: i32) -> Option<Browser> {
@@ -67,9 +85,14 @@ fn callbacks_for_id(id: i32) -> Option<Callbacks> {
     BROWSERS.with_borrow(|map| map.get(&id).and_then(|e| e.callbacks))
 }
 
+/// The string for C, without copying it again unless it holds a NUL.
 fn to_cstring(s: Option<&CefString>) -> CString {
     let s = s.map(|s| s.to_string()).unwrap_or_default();
-    CString::new(s.replace('\0', "")).unwrap_or_default()
+    CString::new(s).unwrap_or_else(|e| {
+        let mut bytes = e.into_vec();
+        bytes.retain(|&b| b != 0);
+        CString::new(bytes).unwrap_or_default()
+    })
 }
 
 pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, callbacks: Callbacks) -> i32 {
@@ -91,7 +114,9 @@ pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, call
         return -1;
     };
     let id = browser.identifier();
-    BROWSERS.with_borrow_mut(|map| map.insert(id, Entry { browser, callbacks: Some(callbacks), devtools: None }));
+    BROWSERS.with_borrow_mut(|map| {
+        map.insert(id, Entry { browser, callbacks: Some(callbacks), devtools: None, icon_url: None })
+    });
     id
 }
 
@@ -128,32 +153,38 @@ pub fn close_all() {
     }
 }
 
-/// Sends one DevTools protocol command to a tab and replies to the control
-/// socket request `token` with `{"result": ...}` or `{"error": ...}`.
-pub fn devtools_call(id: i32, method: &str, params: Value, token: u64) {
+/// Sends one DevTools protocol `message`, framed with `message_id` by the
+/// socket thread, to a tab. The reply answers the control socket request
+/// `token`, or an error does right away.
+pub fn devtools_send(id: i32, message_id: i32, message: &str, token: u64) {
     let Some(host) = get(id).and_then(|b| b.host()) else {
         return ipc::reply_error(token, format!("no tab with id {id}"));
     };
-    let attached = BROWSERS.with_borrow_mut(|map| {
-        let Some(entry) = map.get_mut(&id) else { return false };
-        if entry.devtools.is_none() {
-            let mut observer = TillerDevToolsObserver::new();
-            entry.devtools = host.add_dev_tools_message_observer(Some(&mut observer));
-        }
-        entry.devtools.is_some()
-    });
+    let attached = BROWSERS.with_borrow(|map| map.get(&id).is_some_and(|e| e.devtools.is_some()));
     if !attached {
-        return ipc::reply_error(token, "could not attach to the tab's DevTools agent");
+        // Attached outside the borrow: CEF may call back into the handlers.
+        let mut observer = TillerDevToolsObserver::new();
+        let registration = host.add_dev_tools_message_observer(Some(&mut observer));
+        let kept = BROWSERS.with_borrow_mut(|map| {
+            let Some(entry) = map.get_mut(&id) else { return false };
+            entry.devtools = registration;
+            entry.devtools.is_some()
+        });
+        if !kept {
+            return ipc::reply_error(token, "could not attach to the tab's DevTools agent");
+        }
     }
 
-    let message_id = NEXT_MESSAGE_ID.get();
-    NEXT_MESSAGE_ID.set(message_id.wrapping_add(1).max(1));
     DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.insert(message_id, PendingCall { browser_id: id, token }));
-    let message = json!({ "id": message_id, "method": method, "params": params }).to_string();
     if host.send_dev_tools_message(Some(message.as_bytes())) == 0 {
         DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&message_id));
         ipc::reply_error(token, "DevTools message was rejected");
     }
+}
+
+/// Drops the call waiting for `token`, whose requester gave up on it.
+pub fn forget_devtools_call(token: u64) {
+    DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.retain(|_, c| c.token != token));
 }
 
 /// Fails every DevTools call still waiting on a browser that is going away.
@@ -167,43 +198,38 @@ fn fail_devtools_calls(browser_id: i32) {
     }
 }
 
-/// The parts of a DevTools message that matter here. The result stays as the
-/// text it arrived as: a screenshot's reply is megabytes of base64, and this
-/// runs on the UI thread, so it is passed through rather than parsed into a
-/// tree and written out again.
-#[derive(Deserialize)]
-struct DevToolsMessage<'a> {
-    id: Option<i64>,
-    #[serde(borrow)]
-    result: Option<&'a RawValue>,
-    error: Option<DevToolsError>,
-}
-
-#[derive(Deserialize)]
-struct DevToolsError {
-    message: Option<String>,
+/// The id at the front of a DevTools reply, `{"id":12,...}`. Chromium writes
+/// the id first; events have none. Nothing else is read here, so a reply of
+/// megabytes costs the UI thread a few bytes.
+fn devtools_reply_id(message: &[u8]) -> Option<i32> {
+    if let Some(rest) = message.strip_prefix(b"{\"id\":") {
+        let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        return std::str::from_utf8(&rest[..digits]).ok()?.parse().ok();
+    }
+    // An event, which starts with its method.
+    if message.starts_with(b"{\"method\"") {
+        return None;
+    }
+    // Some other shape: read it properly.
+    #[derive(serde::Deserialize)]
+    struct WithId {
+        id: Option<i32>,
+    }
+    serde_json::from_slice::<WithId>(message).ok()?.id
 }
 
 wrap_dev_tools_message_observer! {
     struct TillerDevToolsObserver;
 
     impl DevToolsMessageObserver {
-        /// Answers the matching call. Events and replies to anyone else's calls
-        /// are left for CEF's default handling.
+        /// Hands the matching call its reply, to be read on the waiting
+        /// thread. Events and replies to anyone else's calls are left for
+        /// CEF's default handling.
         fn on_dev_tools_message(&self, _browser: Option<&mut Browser>, message: Option<&[u8]>) -> i32 {
-            let Some(text) = message.and_then(|m| std::str::from_utf8(m).ok()) else { return 0 };
-            // Events carry no id. Skipping them without a parse keeps a busy
-            // page's stream of events off the UI thread's plate.
-            if !text.contains("\"id\"") {
-                return 0;
-            }
-            let Ok(message) = serde_json::from_str::<DevToolsMessage>(text) else { return 0 };
-            let Some(id) = message.id else { return 0 };
-            let Some(call) = DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&(id as i32))) else { return 0 };
-            match message.error {
-                Some(error) => ipc::reply_error(call.token, error.message.unwrap_or_else(|| "DevTools error".into())),
-                None => ipc::reply_raw(call.token, format!("{{\"result\":{}}}", message.result.map_or("{}", |r| r.get()))),
-            }
+            let Some(message) = message else { return 0 };
+            let Some(id) = devtools_reply_id(message) else { return 0 };
+            let Some(call) = DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&id)) else { return 0 };
+            ipc::reply_devtools(call.token, message.to_vec());
             1
         }
     }
@@ -380,13 +406,20 @@ wrap_display_handler! {
 
         fn on_favicon_urlchange(&self, browser: Option<&mut Browser>, icon_urls: Option<&mut CefStringList>) {
             let Some(browser) = browser else { return };
+            let id = browser.identifier();
             let first = icon_urls.and_then(first_string);
             let Some(url) = first else {
-                send_favicon(browser.identifier(), &[]);
+                set_icon_url(id, None);
+                send_favicon(id, &[]);
                 return;
             };
+            // Every page of a site names the same icon; the tab has it already.
+            if BROWSERS.with_borrow(|map| map.get(&id).is_some_and(|e| e.icon_url.as_deref() == Some(url.as_str()))) {
+                return;
+            }
             if let Some(host) = browser.host() {
-                let mut callback = TillerFaviconCallback::new(browser.identifier(), page_origin(browser));
+                set_icon_url(id, Some(url.clone()));
+                let mut callback = TillerFaviconCallback::new(id, page_origin(browser));
                 host.download_image(Some(&CefString::from(url.as_str())), 1, 64, 0, Some(&mut callback));
             }
         }
@@ -465,6 +498,14 @@ fn send_favicon(id: i32, png: &[u8]) {
     }
 }
 
+fn set_icon_url(id: i32, url: Option<String>) {
+    BROWSERS.with_borrow_mut(|map| {
+        if let Some(entry) = map.get_mut(&id) {
+            entry.icon_url = url;
+        }
+    });
+}
+
 wrap_download_image_callback! {
     struct TillerFaviconCallback {
         browser_id: i32,
@@ -477,6 +518,8 @@ wrap_download_image_callback! {
     impl DownloadImageCallback {
         fn on_download_image_finished(&self, _image_url: Option<&CefString>, _http_status_code: i32, image: Option<&mut Image>) {
             if get(self.browser_id).is_none_or(|b| page_origin(&b) != self.origin) {
+                // Not this site's any more; the next page names its own icon.
+                set_icon_url(self.browser_id, None);
                 return;
             }
             // CEF returns nothing unless both size out-parameters are given.
@@ -487,7 +530,11 @@ wrap_download_image_callback! {
                     let bytes = unsafe { std::slice::from_raw_parts(png.raw_data().cast::<u8>(), png.size()) };
                     send_favicon(self.browser_id, bytes);
                 }
-                _ => send_favicon(self.browser_id, &[]),
+                _ => {
+                    // Nothing came, so the same URL is worth another try later.
+                    set_icon_url(self.browser_id, None);
+                    send_favicon(self.browser_id, &[]);
+                }
             }
         }
     }
@@ -575,10 +622,10 @@ wrap_life_span_handler! {
             let Some(browser) = browser else { return };
             let id = browser.identifier();
             fail_devtools_calls(id);
-            let empty = BROWSERS.with_borrow_mut(|map| {
-                map.remove(&id);
-                map.is_empty()
-            });
+            let (entry, empty) = BROWSERS.with_borrow_mut(|map| (map.remove(&id), map.is_empty()));
+            // Released outside the borrow: dropping the browser and its
+            // DevTools registration can call back into the handlers.
+            drop(entry);
             // One window for now, so the last tab closing quits the app.
             if empty {
                 quit_message_loop();

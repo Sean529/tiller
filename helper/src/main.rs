@@ -13,8 +13,15 @@ fn main() {
     };
 
     let _loader = {
-        let loader = library_loader::LibraryLoader::new(&std::env::current_exe().unwrap(), true);
-        assert!(loader.load());
+        let Ok(exe) = std::env::current_exe() else {
+            eprintln!("tiller helper: can't find its own executable");
+            std::process::exit(1);
+        };
+        let loader = library_loader::LibraryLoader::new(&exe, true);
+        if !loader.load() {
+            eprintln!("tiller helper: Chromium Embedded Framework not found next to {}", exe.display());
+            std::process::exit(1);
+        }
         loader
     };
 
