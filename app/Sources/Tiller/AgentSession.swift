@@ -588,7 +588,9 @@ enum AgentEnvironment {
         (list_tabs, new_tab, select_tab, close_tab, navigate, read_page, click, type, screenshot, \
         eval_js). Each user message starts with the selected tab's id, title and URL, which is \
         usually the page the user means. Call read_page before clicking or typing and use the \
-        refs it returns. Keep replies short.
+        refs it returns. Every tool works in background tabs, so pass tab_id rather than \
+        selecting a tab, and open tabs of your own with new_tab background so the user's \
+        tab stays in front. Keep replies short.
         """
 
     /// Tiller's prompt, a line on the file and shell tools if any are on, then

@@ -79,9 +79,10 @@ fn tools() -> Value {
         },
         {
             "name": "new_tab",
-            "description": "Opens a new tab, selects it and waits for the page to load.",
+            "description": "Opens a new tab, selects it unless background is true, and waits for the page to load.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "URL or search text. Blank page if omitted." },
+                "background": { "type": "boolean", "description": "Leave the user's tab in front. Default false." },
             } },
         },
         {
@@ -112,12 +113,12 @@ fn tools() -> Value {
         },
         {
             "name": "click",
-            "description": "Selects the tab, scrolls an element into view and clicks its center with a real mouse event, then waits for any page load it starts.",
+            "description": "Scrolls an element into view and clicks its center with a real mouse event, then waits for any page load it starts.",
             "inputSchema": { "type": "object", "properties": with(json!({})) },
         },
         {
             "name": "type",
-            "description": "Selects the tab and types text into a form field or editable element, replacing what is there unless append is true. Without ref or selector, types into whatever has focus.",
+            "description": "Types text into a form field or editable element, replacing what is there unless append is true. Without ref or selector, types into whatever has focus.",
             "inputSchema": { "type": "object", "properties": with(json!({
                 "text": { "type": "string" },
                 "append": { "type": "boolean", "description": "Keep the field's current text. Default false." },
@@ -126,7 +127,7 @@ fn tools() -> Value {
         },
         {
             "name": "screenshot",
-            "description": "Captures the visible part of a tab as a JPEG image. Selects the tab first, since only the front tab draws.",
+            "description": "Captures the visible part of a tab as a JPEG image.",
             "inputSchema": { "type": "object", "properties": { "tab_id": tab_id } },
         },
         {

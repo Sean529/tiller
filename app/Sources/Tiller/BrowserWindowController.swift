@@ -20,7 +20,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private var sidebarWidth = TabSidebarView.defaultWidth
     private lazy var sidebarMinWidth = sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 0)
     private lazy var sidebarMaxWidth = sidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 0)
-    /// Holds every tab's view. Only the selected one is visible.
+    /// Holds every tab's view. The selected one is on top, and the others are
+    /// hidden unless an agent woke them.
     private let contentView = PageCardView()
     private let agentPanel = AgentPanelView(frame: NSRect(x: 0, y: 0, width: 360, height: 600))
     /// Where the panel is going. It stays unhidden while it slides out.
@@ -77,6 +78,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// beforeunload leaves tabs open, and the next thing done with the tabs
     /// clears it.
     private var closingAll = false
+    /// Tabs an agent woke, each with the timer that hides it again.
+    private var wakeTimers: [ObjectIdentifier: DispatchWorkItem] = [:]
+    /// How long a tab stays awake after an agent's last click, type or screenshot.
+    private static let wakeDuration: TimeInterval = 30
 
     /// Opens the `restored` tabs, then `url` in a selected tab after them. With
     /// no `url`, selects the restored tab at `selected`. One of the two must
@@ -190,7 +195,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private func select(_ tab: Tab, resumeSaving: Bool = true) {
         if resumeSaving { closingAll = false }
         if tab !== selectedTab { hideFindBar(focusPage: false) }
-        selectedTab?.hostView.isHidden = true
+        if let old = selectedTab, !isAwake(old) { old.hostView.isHidden = true }
+        // Over the tabs an agent keeps awake. The find bar closed above.
+        if tab !== selectedTab { contentView.addSubview(tab.hostView, positioned: .above, relativeTo: nil) }
         selectedTab = tab
         tab.hostView.isHidden = false
         start(tab)
@@ -212,6 +219,37 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tab.startIfNeeded()
     }
 
+    /// Keeps a tab drawing behind the selected one for `wakeDuration`, so an
+    /// agent can click, type and take screenshots in it. Chromium treats a
+    /// hidden view's page as hidden: it stops drawing, and input to it stalls
+    /// for seconds or is dropped. A covered view counts as visible.
+    private func wake(_ tab: Tab) -> Bool {
+        start(tab)
+        let woke = tab.hostView.isHidden
+        if woke {
+            // Under the selected tab. Views are moved only while hidden: sorting
+            // them all made Chromium count every hidden page as visible again.
+            contentView.addSubview(tab.hostView, positioned: .below, relativeTo: nil)
+            tab.hostView.isHidden = false
+        }
+        let key = ObjectIdentifier(tab)
+        wakeTimers[key]?.cancel()
+        let sleep = DispatchWorkItem { [weak self, weak tab] in
+            MainActor.assumeIsolated {
+                guard let self, let tab else { return }
+                self.wakeTimers[ObjectIdentifier(tab)] = nil
+                if tab !== self.selectedTab { tab.hostView.isHidden = true }
+            }
+        }
+        wakeTimers[key] = sleep
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.wakeDuration, execute: sleep)
+        return woke
+    }
+
+    private func isAwake(_ tab: Tab) -> Bool {
+        wakeTimers[ObjectIdentifier(tab)] != nil
+    }
+
     /// Asks a tab to close on the user's or an agent's behalf.
     private func requestClose(_ tab: Tab) {
         closingAll = false
@@ -221,6 +259,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Takes the tab out of the window once CEF has agreed to close it.
     private func remove(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        wakeTimers.removeValue(forKey: ObjectIdentifier(tab))?.cancel()
         tab.detach()
         // Tearing down the view is what lets CEF finish closing the browser.
         tab.hostView.removeFromSuperview()
@@ -891,6 +930,13 @@ extension BrowserWindowController {
                 if panelHadFocus { window?.makeFirstResponder(agentPanel.input) }
             }
             return info(tab)
+        case "tabs.wake":
+            // Before a click, type or screenshot. `woke` says the page was hidden
+            // until now, so it may need a moment to draw.
+            let tab = try tab(for: params)
+            var reply = info(tab)
+            reply["woke"] = wake(tab)
+            return reply
         case "tabs.navigate":
             let tab = try tab(for: params)
             guard let input = params["url"] as? String, !input.isEmpty else { throw ControlError("navigate needs a url") }

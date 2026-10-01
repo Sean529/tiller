@@ -37,7 +37,7 @@ impl Browser {
         match name {
             "list_tabs" => json_out(self.request("tabs.list", json!({}))?),
             "new_tab" => {
-                let mut params = json!({});
+                let mut params = json!({ "select": !args["background"].as_bool().unwrap_or(false) });
                 if let Some(url) = args["url"].as_str() {
                     params["url"] = json!(url);
                 }
@@ -59,7 +59,7 @@ impl Browser {
                 json_out(self.evaluate(id, &format!("({READ_PAGE_JS})({max})"))?)
             }
             "click" => {
-                let id = self.front(tab)?;
+                let id = self.wake(tab)?;
                 let selector = target_selector(args)?;
                 let point = self.evaluate(id, &format!("({LOCATE_JS})({})", json!(selector)))?;
                 let (Some(x), Some(y)) = (point["x"].as_f64(), point["y"].as_f64()) else {
@@ -77,7 +77,7 @@ impl Browser {
                 json_out(info)
             }
             "type" => {
-                let id = self.front(tab)?;
+                let id = self.wake(tab)?;
                 let value = args["text"].as_str().ok_or("text is required")?;
                 if args.get("ref").is_some() || args.get("selector").is_some() {
                     let selector = target_selector(args)?;
@@ -102,7 +102,7 @@ impl Browser {
                 json_out(json!({ "typed": value.chars().count() }))
             }
             "screenshot" => {
-                let id = self.front(tab)?;
+                let id = self.wake(tab)?;
                 let shot = self.cdp(id, "Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 }))?;
                 let data = shot["data"].as_str().ok_or("the screenshot came back empty")?;
                 Ok(Output::Image(data.to_string()))
@@ -129,11 +129,18 @@ impl Browser {
             .ok_or_else(|| "no tab is open".to_string())
     }
 
-    /// Selects the tab and returns its id. Only the front tab draws, and
-    /// Chromium drops mouse and key input to tabs that don't.
-    fn front(&mut self, tab: Option<i64>) -> Result<i64, String> {
+    /// Wakes the tab and returns its id. Background tabs are hidden, and
+    /// Chromium stalls or drops mouse and key input to hidden pages, so the
+    /// app keeps a woken tab drawing behind the selected one for a while.
+    fn wake(&mut self, tab: Option<i64>) -> Result<i64, String> {
         let id = self.resolve(tab)?;
-        self.request("tabs.select", json!({ "tab_id": id }))?;
+        let info = self.request("tabs.wake", json!({ "tab_id": id }))?;
+        // Let the page become visible before input arrives. Not
+        // Emulation.setFocusEmulationEnabled: it keeps the page visible after
+        // the app hides it again.
+        if info["woke"] == true {
+            thread::sleep(Duration::from_millis(100));
+        }
         Ok(id)
     }
 

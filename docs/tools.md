@@ -9,7 +9,7 @@ Tiller exposes one set of browser tools two ways: as an MCP server for agents an
 | Tool | What it does |
 |---|---|
 | `list_tabs` | Id, URL, title, loading state and selection of every tab |
-| `new_tab` | Opens a URL or search in a new tab and waits for it to load |
+| `new_tab` | Opens a URL or search in a new tab and waits for it to load. `background` leaves the selected tab in front |
 | `select_tab` | Brings a tab to the front |
 | `close_tab` | Closes a tab (the page may still ask to confirm) |
 | `navigate` | Loads a URL or search and waits for the load |
@@ -19,11 +19,13 @@ Tiller exposes one set of browser tools two ways: as an MCP server for agents an
 | `screenshot` | JPEG of the visible part of the tab |
 | `eval_js` | Runs an expression in the page and returns the value as JSON |
 
-Tools act on the selected tab unless given `tab_id`. `click`, `type` and `screenshot` select their tab first, because background tabs don't draw and Chromium drops their input.
+Tools act on the selected tab unless given `tab_id`, and work in background tabs without bringing them to the front, so agents can each work in a tab of their own while you use another. Only `select_tab` and `new_tab` without `background` change the selected tab.
+
+Background tabs are hidden, and Chromium stops drawing hidden pages and stalls or drops their input. So `click`, `type` and `screenshot` wake their tab first: Tiller unhides it behind the selected tab, where it draws and takes input, and hides it again 30 seconds after the last of these calls. While awake, the page counts as visible, so its animations and videos run as in a front tab. `read_page` and `eval_js` don't need to wake a tab.
 
 `read_page` marks each element it lists with a `data-tiller-ref` attribute, which pages can see. Refs are renumbered on every call.
 
-How it's wired: tab operations (`tabs.*`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
+How it's wired: tab operations (`tabs.*`, including `tabs.wake`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
 
 To try it without an agent:
 
@@ -40,6 +42,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"r
 ```sh
 tiller tabs                        # * marks the selected tab
 tiller new example.com             # opens a tab and waits for the load
+tiller new --background example.com  # leaves the selected tab in front
 tiller read                        # text, then [ref] lines for links, buttons and fields
 tiller click 3
 tiller type 5 "hello" --submit
@@ -53,7 +56,7 @@ tiller --profile work tabs         # another profile's Tiller
 | Command | Tool |
 |---|---|
 | `tabs` | `list_tabs` |
-| `new [url]` | `new_tab` |
+| `new [url] [--background]` | `new_tab` |
 | `select <tab>` | `select_tab` |
 | `close <tab>` | `close_tab` |
 | `go <url>` | `navigate` |

@@ -31,6 +31,7 @@ Commands:
 Options:
   --profile <name>          Control this profile's Tiller instead of the one used last
   --tab <id>                Act on this tab instead of the selected one
+  --background              new: leave the selected tab in front
   --selector <css>          Target an element by CSS selector instead of a ref
   --append                  type: keep the field's current text
   --submit                  type: press Enter afterwards
@@ -78,6 +79,7 @@ struct Options {
     selector: Option<String>,
     append: bool,
     submit: bool,
+    background: bool,
     max_chars: Option<u64>,
     output: Option<PathBuf>,
     json: bool,
@@ -96,6 +98,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, Error> {
             "-o" | "--output" => options.output = Some(value("--output")?.into()),
             "--append" => options.append = true,
             "--submit" => options.submit = true,
+            "--background" => options.background = true,
             "--json" => options.json = true,
             // Everything after -- is positional, for text that starts with a dash.
             "--" => options.positional.extend(args.by_ref()),
@@ -176,6 +179,9 @@ fn run(args: Vec<String>) -> Result<(), Error> {
     }
     if options.submit {
         call.insert("submit".into(), json!(true));
+    }
+    if options.background {
+        call.insert("background".into(), json!(true));
     }
 
     let mut browser = Browser::default();
