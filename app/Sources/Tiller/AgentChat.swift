@@ -408,13 +408,16 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         transcript.add(UserMessageView(text: text, images: images.map(\.image)) { [weak self] index in
             self?.preview(urls, at: index)
         })
+        lastSent = (text, images)
         do {
             try session.send(text, images: images, context: context?() ?? "", skill: skill(calledBy: text))
             if session.isRunning { setStatus("Working…", busy: true) }
             setBusy(true)
             transcript.showThinking()
         } catch {
-            addError((error as? ControlError)?.message ?? error.localizedDescription)
+            let message = (error as? ControlError)?.message ?? error.localizedDescription
+            // A CLI that can't be found or run is fixed in Settings.
+            addError(message, action: message.contains("Settings") ? openSettings : tryAgain)
             endSession()
             showIdle()
         }
@@ -606,7 +609,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             keepLiveText()
             transcript.hideThinking()
             transcript.closeToolGroup()
-            if let error { addError(error) }
+            if let error { addError(error, action: tryAgain) }
             if stopped { addNote("Stopped") }
             showIdle()
             readTitle()
@@ -620,9 +623,9 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 conversation?.sessionID = nil
                 if let conversation { save(conversation) }
                 addError((message ?? "\(kind.displayName) couldn't continue this chat.")
-                    + "\nThe next message starts a new conversation, without what was said before.")
+                    + "\nThe next message starts a new conversation, without what was said before.", action: tryAgain)
             } else if let message {
-                addError(message + "\nThe next message continues the conversation.")
+                addError(message + "\nThe next message continues the conversation.", action: tryAgain)
             }
             session = nil
             resuming = false
@@ -702,10 +705,29 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         transcript.add(NoteView(text: message))
     }
 
-    private func addError(_ message: String) {
+    /// `action` offers a way out under the message, such as Try Again. It
+    /// shows only now; a saved error has none.
+    private func addError(_ message: String, action: (title: String, run: () -> Void)? = nil) {
         records.append(.error(message))
         saveRecords()
-        transcript.add(ErrorMessageView(text: message))
+        transcript.add(ErrorMessageView(text: message, action: action))
+    }
+
+    /// The last message sent, for trying again after a failure.
+    private var lastSent: (text: String, images: [AgentAttachment])?
+
+    /// Sends the last message again, unless a turn is running.
+    private var tryAgain: (title: String, run: () -> Void)? {
+        guard let lastSent else { return nil }
+        return ("Try Again", { [weak self] in
+            guard let self, !self.isBusy else { return }
+            self.send(lastSent.text, images: lastSent.images)
+        })
+    }
+
+    /// Opens the Agent pane, where a missing CLI's path is set.
+    private var openSettings: (title: String, run: () -> Void) {
+        ("Open Settings…", { (NSApp.delegate as? AppDelegate)?.showAgentSettings() })
     }
 
     /// Draws a saved row.

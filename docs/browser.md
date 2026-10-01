@@ -128,7 +128,7 @@ Chromium runs extensions in English, so Tiller shows their names from their Engl
 
 ## Downloads
 
-Files download to `~/Downloads`, under a name no file there has yet (`name-2.ext` and so on). A button appears in the toolbar with the first download of the run: while files come in, a ring around it fills with their progress, and clicking it, or Window > Downloads (Cmd+Shift+J), lists the downloads with each one's size or progress. A download under way has a button to cancel it, and a finished one opens when clicked, with a button to show it in the Finder. Clear forgets the finished ones. The list is kept only while Tiller runs.
+Files download to `~/Downloads`, under a name no file there has yet (`name-2.ext` and so on). A button appears in the toolbar with the first download of the run: while files come in, a ring around it fills with their progress, and clicking it, or Window > Downloads (Cmd+Shift+J), lists the downloads with each one's size or progress and, once the speed settles, how long is left. A download under way has a button to cancel it, and a finished one opens when clicked, with a button to show it in the Finder. Clear forgets the finished ones. The list is kept only while Tiller runs.
 
 ## Default browser
 

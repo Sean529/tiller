@@ -15,6 +15,9 @@ final class StartPageView: NSView {
     private let closedList = NSStackView()
     private let emptyHint = NSStackView()
     private let glow = CAGradientLayer()
+    /// Faint grain over the wash. A gradient this faint spans only a few
+    /// of the display's levels, which show as bands; noise breaks them up.
+    private let grain = GrainView()
     /// Bumped on every reload so a slow query can't show stale tiles.
     private var generation = 0
     /// The history the tiles were made from, so an unchanged history leaves
@@ -35,6 +38,9 @@ final class StartPageView: NSView {
         glow.startPoint = CGPoint(x: 0.5, y: 1)
         glow.endPoint = CGPoint(x: 0.5, y: 0.45)
         layer?.addSublayer(glow)
+        grain.frame = bounds
+        grain.autoresizingMask = [.width, .height]
+        addSubview(grain)
 
         grid.rowSpacing = 18
         grid.columnSpacing = 4
@@ -393,4 +399,33 @@ private extension NSFont {
     var rounded: NSFont {
         fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: pointSize) } ?? self
     }
+}
+
+/// Noise over the wash: a tile of white pixels at random, very low alphas,
+/// repeated. Lets the mouse through to what is under it.
+private final class GrainView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(patternImage: Self.tile).setFill()
+        dirtyRect.fill()
+    }
+
+    private static let tile: NSImage = {
+        let side = 96
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        var state: UInt32 = 0x9E37_79B9
+        for index in 0..<(side * side) {
+            // A small linear congruential generator; the pattern only has to look random.
+            state = state &* 1_664_525 &+ 1_013_904_223
+            let alpha = UInt8(truncatingIfNeeded: state >> 24) / 40  // up to about 0.025
+            // White, premultiplied, so every channel is the alpha.
+            for channel in 0..<4 { pixels[index * 4 + channel] = alpha }
+        }
+        guard let context = CGContext(
+            data: &pixels, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ), let image = context.makeImage() else { return NSImage() }
+        return NSImage(cgImage: image, size: NSSize(width: side, height: side))
+    }()
 }

@@ -721,9 +721,12 @@ final class NoteView: NSView {
 /// An error from the agent or its process, in a red-tinted box.
 final class ErrorMessageView: NSView, TranscriptRow {
     private let label: NSTextField
+    private let action: (() -> Void)?
 
-    init(text: String) {
+    /// `action` adds a button under the text, such as Try Again.
+    init(text: String, action: (title: String, run: () -> Void)? = nil) {
         label = NSTextField(wrappingLabelWithString: text)
+        self.action = action?.run
         super.init(frame: .zero)
         wantsLayer = true
         label.font = .systemFont(ofSize: 13)
@@ -742,11 +745,27 @@ final class ErrorMessageView: NSView, TranscriptRow {
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 32),
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+        ])
+        guard let action else {
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8).isActive = true
+            return
+        }
+        let button = NSButton(title: action.title, target: self, action: #selector(run(_:)))
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 11, weight: .medium)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(button)
+        NSLayoutConstraint.activate([
+            button.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 6),
+            button.leadingAnchor.constraint(equalTo: label.leadingAnchor),
+            button.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func run(_ sender: Any?) { action?() }
 
     func fit(width: CGFloat) {
         label.preferredMaxLayoutWidth = width - 42

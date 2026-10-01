@@ -53,6 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController?.showPane(titled: ProfilesSettingsPane.paneTitle)
     }
 
+    /// The Agent pane, from an error about the agent's command.
+    func showAgentSettings() {
+        showSettings(nil)
+        settingsController?.showPane(titled: "Agent")
+    }
+
     @objc func manageExtensions(_ sender: Any?) {
         showSettings(sender)
         settingsController?.showPane(titled: ExtensionsSettingsPane.paneTitle)

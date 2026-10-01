@@ -745,7 +745,7 @@ final class Composer: NSView {
     private func updateSendButton() {
         let empty = textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty
         sendButton.image = isBusy ? Self.stopImage : Self.sendImage
-        sendButton.toolTip = isBusy ? "Stop (Esc)" : "Send (Return)"
+        sendButton.toolTip = isBusy ? "Stop (⎋)" : "Send (↩)"
         sendButton.contentTintColor = isBusy ? .labelColor : empty ? .tertiaryLabelColor : .controlAccentColor
         sendButton.isEnabled = isBusy || !empty
     }
