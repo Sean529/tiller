@@ -173,8 +173,9 @@ private final class TabNumberButton: NSView {
             ? .controlAccentColor.withAlphaComponent(isHovered ? 0.26 : 0.18)
             : .labelColor.withAlphaComponent(isHovered ? 0.09 : 0.045)
         withEasing { layer?.backgroundColor = fill.cgColor }
-        layer?.borderWidth = isSelected ? 1 : 0
-        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.45).cgColor
+        let outlined = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        layer?.borderWidth = isSelected || outlined ? 1 : 0
+        layer?.borderColor = (isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.45) : .separatorColor).cgColor
         label.textColor = isSelected ? .labelColor : .secondaryLabelColor
         busyDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
     }

@@ -21,6 +21,8 @@ final class AddressBarView: NSView {
     private let statusIcon = NSImageView()
     /// The symbol `statusIcon` shows, so it is only made when it changes.
     private var statusSymbol = ""
+    /// Whether the user is typing, when the icon says what Return would do.
+    private var isEditing = false
     private let glass = NSGlassEffectView()
     private let progressFill = NSView()
     private var capsuleLeading: NSLayoutConstraint!
@@ -104,6 +106,11 @@ final class AddressBarView: NSView {
             buttons.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             keyButton.widthAnchor.constraint(equalToConstant: 20),
         ])
+        field.onEditingChanged = { [weak self] editing in
+            guard let self else { return }
+            self.isEditing = editing
+            self.showStatus(of: self.field.url)
+        }
         showStatus(of: "")
     }
 
@@ -164,9 +171,12 @@ final class AddressBarView: NSView {
     }
 
     /// A lock for https, a warning for http, and a magnifying glass where
-    /// there is no page yet.
+    /// there is no page yet or while typing, when Return searches or goes
+    /// to what was typed rather than the page shown before.
     private func showStatus(of url: String) {
-        let (symbol, description) = if url.hasPrefix("https://") {
+        let (symbol, description) = if isEditing {
+            ("magnifyingglass", "Search")
+        } else if url.hasPrefix("https://") {
             ("lock.fill", "Secure")
         } else if url.hasPrefix("http://") {
             ("exclamationmark.triangle", "Not Secure")
@@ -180,7 +190,7 @@ final class AddressBarView: NSView {
             statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
                 .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
         }
-        statusIcon.toolTip = url.hasPrefix("http") ? description : nil
+        statusIcon.toolTip = !isEditing && url.hasPrefix("http") ? description : nil
     }
 }
 
@@ -191,6 +201,9 @@ final class AddressField: NSTextField {
         didSet { if !isEditing { showURL() } }
     }
 
+    /// Called with true when typing starts and false when it ends.
+    var onEditingChanged: ((Bool) -> Void)?
+
     var isEditing: Bool { currentEditor() != nil }
 
     override func becomeFirstResponder() -> Bool {
@@ -200,6 +213,7 @@ final class AddressField: NSTextField {
             return false
         }
         currentEditor()?.selectAll(nil)
+        onEditingChanged?(true)
         return true
     }
 
@@ -228,6 +242,7 @@ final class AddressField: NSTextField {
             MainActor.assumeIsolated {
                 guard let self, !self.isEditing else { return }
                 self.showURL()
+                self.onEditingChanged?(false)
             }
         }
     }

@@ -478,6 +478,10 @@ final class ToolRowView: NSView, TranscriptRow {
         layer?.cornerCurve = .continuous
         let alpha = chevron != nil && isHovered ? 0.09 : 0.05
         withEasing { layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor }
+        // A fill this faint goes with Increase Contrast; an edge stays.
+        let outlined = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        layer?.borderWidth = outlined ? 1 : 0
+        layer?.borderColor = NSColor.separatorColor.cgColor
     }
 
     override func updateTrackingAreas() {
