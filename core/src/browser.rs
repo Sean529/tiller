@@ -26,6 +26,7 @@ pub struct Callbacks {
     pub loading_progress: Option<unsafe extern "C" fn(*mut c_void, f64)>,
     pub find_result: Option<unsafe extern "C" fn(*mut c_void, i32, i32, bool)>,
     pub auto_resize: Option<unsafe extern "C" fn(*mut c_void, i32, i32)>,
+    pub copy_text: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
 }
 
 struct Entry {
@@ -209,6 +210,111 @@ wrap_client! {
 
         fn download_handler(&self) -> Option<DownloadHandler> {
             Some(crate::downloads::TillerDownloadHandler::new())
+        }
+
+        fn request_handler(&self) -> Option<RequestHandler> {
+            Some(TillerRequestHandler::new())
+        }
+
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(TillerContextMenuHandler::new())
+        }
+    }
+}
+
+/// Asks the Swift side to open `url` in a new tab.
+fn open_in_tab(browser: Option<&mut Browser>, url: Option<&CefString>, background: bool) {
+    if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.open_tab {
+        let url = to_cstring(url);
+        unsafe { f(cb.ctx, url.as_ptr(), background) };
+    }
+}
+
+wrap_request_handler! {
+    struct TillerRequestHandler;
+
+    impl RequestHandler {
+        /// Cmd+click, Shift+click and middle click on a link. Chromium turns
+        /// the modifiers into a disposition before it gets here: Cmd or middle
+        /// click is a background tab, Cmd+Shift a foreground one, Shift a new
+        /// window, which becomes a selected tab since Tiller has one window.
+        fn on_open_urlfrom_tab(
+            &self,
+            browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            target_url: Option<&CefString>,
+            target_disposition: WindowOpenDisposition,
+            _user_gesture: i32,
+        ) -> i32 {
+            let background = match target_disposition {
+                WindowOpenDisposition::NEW_BACKGROUND_TAB => true,
+                WindowOpenDisposition::NEW_FOREGROUND_TAB
+                | WindowOpenDisposition::NEW_WINDOW
+                | WindowOpenDisposition::NEW_POPUP => false,
+                _ => return 0,
+            };
+            open_in_tab(browser, target_url, background);
+            1
+        }
+    }
+}
+
+const MENU_OPEN_LINK: i32 = sys::cef_menu_id_t::MENU_ID_USER_FIRST as i32;
+const MENU_OPEN_LINK_BACKGROUND: i32 = MENU_OPEN_LINK + 1;
+const MENU_COPY_LINK: i32 = MENU_OPEN_LINK + 2;
+
+wrap_context_menu_handler! {
+    struct TillerContextMenuHandler;
+
+    impl ContextMenuHandler {
+        /// Puts the link items above CEF's own when the menu is for a link.
+        fn on_before_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            params: Option<&mut ContextMenuParams>,
+            model: Option<&mut MenuModel>,
+        ) {
+            let (Some(params), Some(model)) = (params, model) else { return };
+            let link = sys::cef_context_menu_type_flags_t::CM_TYPEFLAG_LINK.0;
+            if params.type_flags().as_ref().0 & link == 0 {
+                return;
+            }
+            let items = [
+                (MENU_OPEN_LINK, "Open Link in New Tab"),
+                (MENU_OPEN_LINK_BACKGROUND, "Open Link in Background"),
+                (MENU_COPY_LINK, "Copy Link"),
+            ];
+            for (index, (id, label)) in items.iter().enumerate() {
+                model.insert_item_at(index, *id, Some(&CefString::from(*label)));
+            }
+            if model.count() > items.len() {
+                model.insert_separator_at(items.len());
+            }
+        }
+
+        fn on_context_menu_command(
+            &self,
+            browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            params: Option<&mut ContextMenuParams>,
+            command_id: i32,
+            _event_flags: EventFlags,
+        ) -> i32 {
+            let Some(params) = params else { return 0 };
+            let url = CefString::from(&params.link_url());
+            match command_id {
+                MENU_OPEN_LINK => open_in_tab(browser, Some(&url), false),
+                MENU_OPEN_LINK_BACKGROUND => open_in_tab(browser, Some(&url), true),
+                MENU_COPY_LINK => {
+                    if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.copy_text {
+                        let url = to_cstring(Some(&url));
+                        unsafe { f(cb.ctx, url.as_ptr()) };
+                    }
+                }
+                _ => return 0,
+            }
+            1
         }
     }
 }
@@ -407,11 +513,7 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut i32>,
         ) -> i32 {
-            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.open_tab {
-                let url = to_cstring(target_url);
-                let background = target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB;
-                unsafe { f(cb.ctx, url.as_ptr(), background) };
-            }
+            open_in_tab(browser, target_url, target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB);
             1
         }
 

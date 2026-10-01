@@ -12,7 +12,8 @@ typedef struct TillerBrowserCallbacks {
     void (*loading_state_changed)(void *ctx, bool is_loading, bool can_go_back, bool can_go_forward);
     // PNG bytes of the page's favicon, or len 0 when it has none.
     void (*favicon_changed)(void *ctx, const uint8_t *png, size_t len);
-    // A popup or new-window link. The URL should open in a new tab.
+    // A popup, new-window link, modifier click or link menu item. The URL
+    // should open in a new tab.
     void (*open_tab)(void *ctx, const char *url, bool background);
     // beforeunload passed. Remove the browser's view to finish closing it.
     void (*close_ready)(void *ctx);
@@ -26,6 +27,8 @@ typedef struct TillerBrowserCallbacks {
     void (*find_result)(void *ctx, int count, int active, bool final_update);
     // The page's new size in points, once auto-resize is on. May be NULL.
     void (*auto_resize)(void *ctx, int width, int height);
+    // The page's context menu asked to copy `text`, such as a link's URL.
+    void (*copy_text)(void *ctx, const char *text);
 } TillerBrowserCallbacks;
 
 // Static version string. Do not free.

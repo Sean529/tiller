@@ -27,7 +27,18 @@ The last 25 closed tabs are kept for Cmd+Shift+T, across restarts too. Tabs that
 
 Both are stored in `session.json` in the [profile's folder](settings-and-data.md#data-folder), readable only by you.
 
-Popups and `target=_blank` links open as new tabs. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.
+### Opening links in new tabs
+
+| On a link | Opens |
+|---|---|
+| Click | In the same tab |
+| Cmd+click or middle click | In a new tab behind the current one |
+| Cmd+Shift+click or Shift+click | In a new tab, selected |
+| Right-click | A menu with Open Link in New Tab, Open Link in Background and Copy Link above Chromium's own items |
+
+New tabs go right after the tab they came from. The same clicks work on the start page's tiles and the address bar's suggestions. In the address bar, Cmd+Return opens what you typed in a new selected tab and Cmd+Shift+Return opens it behind the current one.
+
+Popups and `target=_blank` links open as new tabs too. Each is a separate browser, so the new page has no `window.opener`. Sign-in flows that post a result back to the opener won't work.
 
 ## Find and zoom
 

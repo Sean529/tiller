@@ -132,6 +132,14 @@ final class Tab {
             auto_resize: { ctx, width, height in
                 guard let ctx else { return }
                 Tab.from(ctx).autoResized(NSSize(width: Int(width), height: Int(height)))
+            },
+            copy_text: { ctx, text in
+                guard ctx != nil, let text else { return }
+                let string = String(cString: text)
+                MainActor.assumeIsolated {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(string, forType: .string)
+                }
             }
         )
         let view = Unmanaged.passUnretained(hostView).toOpaque()

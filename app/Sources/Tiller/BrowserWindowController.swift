@@ -61,7 +61,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Shown over the selected tab while it is blank.
     private lazy var startPage: StartPageView = {
         let view = StartPageView()
-        view.onOpen = { [weak self] url in self?.openSuggestion(url) }
+        view.onOpen = { [weak self] url, disposition in self?.open(url, disposition) }
         return view
     }()
     /// The import sheet while it is up.
@@ -432,8 +432,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         openTab(url: Settings.newTabPage == .homepage ? Settings.homepageURL : "about:blank", select: true)
     }
 
-    /// Opens `url` in a new selected tab and brings the window forward.
-    func openInNewTab(_ url: String) {
+    /// Opens `url` in a new selected tab and brings the window forward. A
+    /// `background` tab goes after the selected one and leaves it in front.
+    func openInNewTab(_ url: String, background: Bool = false) {
+        if background {
+            openTab(url: url, select: false, at: selectedTab.flatMap { tab in tabs.firstIndex { $0 === tab } }.map { $0 + 1 })
+            return
+        }
         openTab(url: url, select: true)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -634,20 +639,26 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     /// Loads a suggestion picked from the address bar's list.
-    private func openSuggestion(_ url: String) {
+    /// Opens a URL chosen in the address bar, its suggestions or the start
+    /// page. A new tab goes right after the selected one.
+    private func open(_ url: String, _ disposition: OpenDisposition) {
         guard let tab = selectedTab else { return }
-        tab.load(url)
-        addressBar.show(url)
-        tab.focus()
+        switch disposition {
+        case .currentTab:
+            tab.load(url)
+            addressBar.show(url)
+            tab.focus()
+        case .foregroundTab, .backgroundTab:
+            let index = tabs.firstIndex { $0 === tab }.map { $0 + 1 }
+            if disposition == .backgroundTab { addressBar.show(tab.url) }
+            openTab(url: url, select: disposition == .foregroundTab, at: index)
+        }
     }
 
     @objc private func addressEntered(_ sender: NSTextField) {
         let input = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty, let tab = selectedTab else { return }
-        let url = AddressInput.url(for: input)
-        tab.load(url)
-        addressBar.show(url)
-        tab.focus()
+        guard !input.isEmpty else { return }
+        open(AddressInput.url(for: input), .returnKey(OpenDisposition.currentFlags))
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -913,7 +924,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         addressBar.keyButton.action = #selector(fillPassword(_:))
         addressBar.zoomButton.target = self
         addressBar.zoomButton.action = #selector(actualSize(_:))
-        suggestions.onOpen = { [weak self] url in self?.openSuggestion(url) }
+        suggestions.onOpen = { [weak self] url, disposition in self?.open(url, disposition) }
         extensionBar.onPopup = { [weak self] manifest, anchor in self?.showExtensionPopup(manifest, from: anchor) }
         extensionBar.onOpen = { [weak self] url in self?.openInNewTab(url) }
         extensionBar.onResize = { [weak self] in self?.fitTabStrip() }

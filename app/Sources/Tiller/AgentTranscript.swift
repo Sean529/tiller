@@ -1047,7 +1047,7 @@ final class MarkdownMessageView: NSView, TranscriptRow {
                 if let label = existing as? NSTextField {
                     if label.attributedStringValue != text { label.attributedStringValue = text }
                 } else {
-                    let label = NSTextField(wrappingLabelWithString: "")
+                    let label = TranscriptLinkLabel(wrappingLabelWithString: "")
                     label.isSelectable = true
                     // Lets links in the text be clicked.
                     label.allowsEditingTextAttributes = true
@@ -1201,7 +1201,7 @@ final class MarkdownTableContentView: NSView {
             for label in labels.joined() { label.removeFromSuperview() }
             labels = ([table.header] + table.rows).map { row in
                 row.map { text in
-                    let label = NSTextField(wrappingLabelWithString: "")
+                    let label = TranscriptLinkLabel(wrappingLabelWithString: "")
                     label.isSelectable = true
                     label.allowsEditingTextAttributes = true
                     label.attributedStringValue = text
@@ -1420,7 +1420,7 @@ final class MarkdownCodeView: NSView, TranscriptRow {
 /// A block quote: dimmed text beside a bar.
 final class MarkdownQuoteView: NSView, TranscriptRow {
     private let bar = NSView()
-    private let label = NSTextField(wrappingLabelWithString: "")
+    private let label = TranscriptLinkLabel(wrappingLabelWithString: "")
     private static let inset: CGFloat = 14
 
     var text: NSAttributedString? {
@@ -1479,5 +1479,20 @@ final class MarkdownRuleView: NSView {
 
     override func updateLayer() {
         layer?.backgroundColor = NSColor.separatorColor.cgColor
+    }
+}
+
+/// A transcript label whose web links open in Tiller tabs rather than the
+/// default browser. A click opens and selects a tab, Cmd+click opens one
+/// behind the current tab. Other links, such as mailto:, go to their apps.
+final class TranscriptLinkLabel: NSTextField {
+    /// The field editor's delegate is the label it edits, so it asks here.
+    @objc func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        let url = (link as? URL) ?? (link as? String).flatMap { URL(string: $0) }
+        guard let url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let app = NSApp.delegate as? AppDelegate else { return false }
+        let background = OpenDisposition.click(OpenDisposition.currentFlags) == .backgroundTab
+        app.openInNewTab(url.absoluteString, background: background)
+        return true
     }
 }

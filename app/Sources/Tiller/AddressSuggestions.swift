@@ -6,8 +6,8 @@ import AppKit
 /// highlighted from the start, so Return goes there instead of searching.
 @MainActor
 final class AddressSuggestions: NSObject, NSTextFieldDelegate {
-    /// Opens a suggestion's URL.
-    var onOpen: ((String) -> Void)?
+    /// Opens a suggestion's URL, in the current tab or a new one.
+    var onOpen: ((String, OpenDisposition) -> Void)?
 
     private let addressBar: AddressBarView
     private let panel = SuggestionsPanel()
@@ -95,7 +95,7 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
                 hide()
                 return false
             }
-            open(index)
+            open(index, .returnKey(OpenDisposition.currentFlags))
         default:
             return false
         }
@@ -112,7 +112,7 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
             let row = SuggestionRow(page: page)
             row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
             row.onHover = { [weak self] in self?.highlight(index) }
-            row.onClick = { [weak self] in self?.open(index) }
+            row.onClick = { [weak self] disposition in self?.open(index, disposition) }
             list.addArrangedSubview(row)
         }
         let host = HistoryStore.bare(pages[0].url).lowercased()
@@ -133,11 +133,11 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         }
     }
 
-    private func open(_ index: Int) {
+    private func open(_ index: Int, _ disposition: OpenDisposition) {
         guard pages.indices.contains(index) else { return }
         let url = pages[index].url
         hide()
-        onOpen?(url)
+        onOpen?(url, disposition)
     }
 }
 
@@ -161,7 +161,7 @@ private final class SuggestionsPanel: NSPanel {
 /// in a menu.
 private final class SuggestionRow: NSView {
     var onHover: (() -> Void)?
-    var onClick: (() -> Void)?
+    var onClick: ((OpenDisposition) -> Void)?
 
     var isHighlighted = false {
         didSet {
@@ -233,5 +233,6 @@ private final class SuggestionRow: NSView {
 
     override func mouseEntered(with event: NSEvent) { onHover?() }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func mouseDown(with event: NSEvent) { onClick?(.click(event.modifierFlags)) }
+    override func otherMouseDown(with event: NSEvent) { onClick?(.backgroundTab) }
 }

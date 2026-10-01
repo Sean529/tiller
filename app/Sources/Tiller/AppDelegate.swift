@@ -41,9 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController?.showPane(titled: ExtensionsSettingsPane.paneTitle)
     }
 
-    /// Opens `url` in a new tab of the browser window, for Settings.
-    func openInNewTab(_ url: String) {
-        windowController?.openInNewTab(url)
+    /// Opens `url` in a new tab of the browser window, for Settings and links
+    /// in the agent panel.
+    func openInNewTab(_ url: String, background: Bool = false) {
+        windowController?.openInNewTab(url, background: background)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

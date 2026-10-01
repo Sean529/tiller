@@ -4,8 +4,8 @@ import AppKit
 /// sites as tiles, or a hint to use the address bar when there is no history
 /// yet. It sits over the tab's browser view while the tab is on about:blank.
 final class StartPageView: NSView {
-    /// Opens a tile's URL.
-    var onOpen: ((String) -> Void)?
+    /// Opens a tile's URL, in the current tab or a new one.
+    var onOpen: ((String, OpenDisposition) -> Void)?
 
     private let content = NSStackView()
     private let heading = NSTextField(labelWithString: "Frequently Visited")
@@ -103,7 +103,7 @@ final class StartPageView: NSView {
         shownSites = sites
         while grid.numberOfRows > 0 { grid.removeRow(at: 0) }
         let tiles = sites.map { site in
-            SiteTile(site: site) { [weak self] in self?.onOpen?(site.url) }
+            SiteTile(site: site) { [weak self] disposition in self?.onOpen?(site.url, disposition) }
         }
         for start in stride(from: 0, to: tiles.count, by: Self.columns) {
             let row = Array(tiles[start..<min(start + Self.columns, tiles.count)])
@@ -128,13 +128,13 @@ private final class SiteTile: NSView {
     /// From a tile's edge to its square's.
     static let wellInset = (width - wellSide) / 2
 
-    private let action: () -> Void
+    private let action: (OpenDisposition) -> Void
     private let well = NSView()
     private let tint: NSColor
     private var isHovered = false { didSet { needsDisplay = true } }
     private var isPressed = false { didSet { needsDisplay = true } }
 
-    init(site: FrequentSite, action: @escaping () -> Void) {
+    init(site: FrequentSite, action: @escaping (OpenDisposition) -> Void) {
         self.action = action
         tint = Self.color(for: site.host)
         super.init(frame: .zero)
@@ -216,11 +216,18 @@ private final class SiteTile: NSView {
 
     override func mouseUp(with event: NSEvent) {
         isPressed = false
-        if bounds.contains(convert(event.locationInWindow, from: nil)) { action() }
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { action(.click(event.modifierFlags)) }
+    }
+
+    /// A middle click opens the site in a tab behind this one.
+    override func otherMouseDown(with event: NSEvent) {}
+
+    override func otherMouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { action(.backgroundTab) }
     }
 
     override func accessibilityPerformPress() -> Bool {
-        action()
+        action(.currentTab)
         return true
     }
 }
