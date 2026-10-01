@@ -75,7 +75,7 @@ A blank tab shows your most visited sites as tiles, one per site, each opening t
 
 Tiller keeps its own history in `history.sqlite` in its data folder. Chromium's History file can't be used: CEF has no API for it and holds it locked. A page is saved once it finishes loading, and again when its URL or title changes after that.
 
-- Typing in the address bar lists matching pages. Up and Down move through the list, Return opens the highlighted page, Escape closes the list. When the best match's address starts with what you typed, it is highlighted from the start, so Return goes there instead of searching.
+- Typing in the address bar lists what you typed, as a search or a site, then the matching pages, with the part of each title that matches in bold. Up and Down move through the list, Return opens the highlighted row, Escape closes the list. The typed row starts highlighted, unless the best match's address starts with what you typed, in which case that page does, so Return goes there instead of searching. While you type, the bar shows a magnifying glass in place of the page's lock.
 - The History menu lists the 15 most recent pages. History > Clear History… empties it, along with the start page's saved favicons and the recently closed tabs.
 
 ## Saved passwords

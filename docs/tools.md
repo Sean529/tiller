@@ -16,7 +16,7 @@ Tiller exposes one set of browser tools two ways: as an MCP server for agents an
 | `read_page` | Page text plus numbered links, buttons and fields |
 | `click` | Real mouse click on an element's center by `ref` or CSS `selector` |
 | `type` | Types into a field, replacing its text unless `append` is set, optionally presses Enter |
-| `screenshot` | JPEG of the visible part of the tab |
+| `screenshot` | JPEG of the visible part of the tab, in CSS pixels, the units `click` uses |
 | `eval_js` | Runs an expression in the page and returns the value as JSON |
 | `list_skills` | Every skill agents can call: the library's, marked editable and on or off, then the CLIs' own |
 | `read_skill` | A skill's `SKILL.md` and the other files in its folder |
