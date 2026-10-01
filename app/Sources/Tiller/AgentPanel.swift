@@ -14,6 +14,12 @@ protocol AgentPanelDelegate: AnyObject {
 /// surface with the toolbar.
 final class AgentPanelView: NSView {
     weak var delegate: AgentPanelDelegate?
+    /// Called when any chat starts or stops working.
+    var onBusyChange: ((Bool) -> Void)?
+    /// Whether any chat's agent is working.
+    private(set) var isBusy = false {
+        didSet { if isBusy != oldValue { onBusyChange?(isBusy) } }
+    }
 
     /// The message being written in the selected tab.
     var input: NSView { active.input }
@@ -192,6 +198,7 @@ final class AgentPanelView: NSView {
     /// The header and tab bar show the selected chat.
     private func refresh() {
         let chat = active
+        isBusy = chats.contains { $0.isBusy }
         agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: chat.kind) ?? 0)
         status.show(chat.statusText, busy: chat.statusBusy)
         tabBar.update(

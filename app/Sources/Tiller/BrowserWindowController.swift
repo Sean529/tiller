@@ -29,6 +29,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Counts toggles, so a slide's completion knows a later toggle took over.
     private var agentToggleCount = 0
     private let agentButton = NSButton()
+    /// A dot on the agent button while a chat works behind a hidden panel.
+    private let agentBadge = NSView()
     private let tabStrip = TabStripView()
     private let addressBar = AddressBarView(frame: NSRect(x: 0, y: 0, width: 800, height: 40))
     private let backButton = NSButton()
@@ -535,6 +537,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         agentPanelShown.toggle()
         Settings.defaults.set(agentPanelShown, forKey: Self.agentVisibleKey)
         agentButton.state = agentPanelShown ? .on : .off
+        updateAgentBadge()
         agentToggleCount += 1
         let count = agentToggleCount
         roundPage()
@@ -585,6 +588,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         CATransaction.setCompletionBlock { MainActor.assumeIsolated { finish() } }
         layer.add(animation, forKey: key)
         CATransaction.commit()
+    }
+
+    /// The dot shows only while the panel is hidden, where the work would
+    /// otherwise go unseen.
+    private func updateAgentBadge() {
+        let shown = agentPanel.isBusy && !agentPanelShown
+        agentBadge.isHidden = !shown
+        guard shown else { return }
+        agentBadge.effectiveAppearance.performAsCurrentDrawingAppearance {
+            agentBadge.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        }
     }
 
     private static let agentVisibleKey = "agentPanelVisible"
@@ -836,6 +850,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         profileButton.action = #selector(showProfilesMenu(_:))
         agentButton.setButtonType(.pushOnPushOff)
         agentButton.state = agentPanel.isHidden ? .off : .on
+        agentBadge.wantsLayer = true
+        agentBadge.layer?.cornerRadius = 3.5
+        agentBadge.isHidden = true
+        agentBadge.translatesAutoresizingMaskIntoConstraints = false
+        agentButton.addSubview(agentBadge)
+        NSLayoutConstraint.activate([
+            agentBadge.widthAnchor.constraint(equalToConstant: 7),
+            agentBadge.heightAnchor.constraint(equalToConstant: 7),
+            agentBadge.topAnchor.constraint(equalTo: agentButton.topAnchor, constant: 3),
+            agentBadge.trailingAnchor.constraint(equalTo: agentButton.trailingAnchor, constant: -3),
+        ])
+        agentPanel.onBusyChange = { [weak self] _ in self?.updateAgentBadge() }
 
         addressBar.field.target = self
         addressBar.field.action = #selector(addressEntered(_:))

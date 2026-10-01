@@ -2,7 +2,7 @@
 
 The side panel runs Qoder CLI, Claude Code or Codex against the browser. Each profile has its own chats, working folder and agent configuration.
 
-Click the sparkles button at the right of the toolbar, or press Cmd+Shift+S, to open the agent panel. The same keys hide it, and Settings can change them. Pick Qoder CLI (the default), Claude Code or Codex from the menu at its top, or in Settings. A new chat offers a few prompts to start from. Enter sends, Option+Enter or Shift+Enter adds a line, Escape or the button in the field stops a running turn.
+Click the sparkles button at the right of the toolbar, or press Cmd+Shift+S, to open the agent panel. The same keys hide it, and Settings can change them. While the panel is hidden, a dot on the button shows that a chat is still working. Pick Qoder CLI (the default), Claude Code or Codex from the menu at its top, or in Settings. A new chat offers a few prompts to start from. Enter sends, Option+Enter or Shift+Enter adds a line, Escape or the button in the field stops a running turn.
 
 ## Chats
 
