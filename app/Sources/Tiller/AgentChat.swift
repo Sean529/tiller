@@ -24,6 +24,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// A new chat uses the agent picked for new chats until its first message.
     var kind: AgentKind { conversation?.kind ?? .current }
     var title: String { conversation?.title ?? "New Chat" }
+    /// The built-in tools this chat allows. A new chat starts with Settings'.
+    private(set) var tools: [AgentTool]
 
     /// Where the panel puts its tab bar, between the transcript and the field.
     let tabBarHost = NSView()
@@ -55,6 +57,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     init(conversation: AgentConversation? = nil) {
         id = conversation?.id ?? UUID().uuidString
         self.conversation = conversation
+        tools = conversation?.tools ?? Settings.agentTools
         super.init(frame: .zero)
         build()
         if conversation != nil {
@@ -246,6 +249,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         var conversation = conversation ?? AgentConversation(
             id: id, kind: .current, title: AgentConversation.title(from: text), created: Date(), updated: Date()
         )
+        conversation.tools = tools
         conversation.updated = Date()
         save(conversation)
         let session = self.session ?? makeSession()
@@ -286,12 +290,31 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         if conversation.sessionID != nil, let path = conversation.directory {
             directory = URL(fileURLWithPath: path)
         }
-        let session = AgentSession(kind: conversation.kind, resuming: conversation.sessionID, in: directory)
+        let session = AgentSession(kind: conversation.kind, tools: tools, resuming: conversation.sessionID, in: directory)
         session.onEvent = { [weak self] event in self?.handle(event) }
         self.session = session
         resuming = conversation.sessionID != nil
         setStatus("Starting…", busy: true)
         return session
+    }
+
+    // MARK: Tools
+
+    /// Changes the built-in tools. The CLIs take them when they start, so a
+    /// running agent is stopped and the next message resumes its session with
+    /// the new ones. Not while a turn is running.
+    func setTools(_ tools: [AgentTool]) {
+        guard !isBusy, tools != self.tools else { return }
+        self.tools = tools
+        if var conversation {
+            conversation.tools = tools
+            save(conversation)
+        }
+        if session != nil {
+            endSession()
+            showIdle()
+        }
+        onChange?()
     }
 
     // MARK: Images

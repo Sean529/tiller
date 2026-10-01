@@ -100,6 +100,8 @@ enum AgentEvent {
 @MainActor
 final class AgentSession {
     let kind: AgentKind
+    /// The built-in tools the agent gets, fixed for the life of the process.
+    let tools: [AgentTool]
     var onEvent: ((AgentEvent) -> Void)?
 
     /// The saved conversation this session continues, then the one it is in.
@@ -131,8 +133,9 @@ final class AgentSession {
 
     /// `sessionID` resumes that saved conversation in `directory`, the folder
     /// it was started in, since the CLIs keep sessions by folder.
-    init(kind: AgentKind, resuming sessionID: String? = nil, in directory: URL? = nil) {
+    init(kind: AgentKind, tools: [AgentTool], resuming sessionID: String? = nil, in directory: URL? = nil) {
         self.kind = kind
+        self.tools = tools
         self.sessionID = sessionID
         self.directory = directory
     }
@@ -151,8 +154,8 @@ final class AgentSession {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = kind.arguments(
             mcpConfig: try AgentEnvironment.writeMCPConfig(),
-            systemPrompt: AgentEnvironment.systemPrompt,
-            tools: Settings.agentTools,
+            systemPrompt: AgentEnvironment.systemPrompt(tools: tools),
+            tools: tools,
             resume: sessionID
         )
         let directory = try self.directory ?? AgentEnvironment.workingDirectory()
@@ -378,7 +381,7 @@ final class AgentSession {
     }
 
     private func requestCodexThread(cwd: URL) throws {
-        var params = AgentEnvironment.codexThreadParams(cwd: cwd)
+        var params = AgentEnvironment.codexThreadParams(cwd: cwd, tools: tools)
         if let sessionID {
             // Tiller shows its own copy of the transcript.
             params["threadId"] = sessionID
@@ -590,9 +593,8 @@ enum AgentEnvironment {
 
     /// Tiller's prompt, a line on the file and shell tools if any are on, then
     /// the extra instructions from Settings.
-    static var systemPrompt: String {
+    static func systemPrompt(tools: [AgentTool]) -> String {
         var parts = [basePrompt]
-        let tools = Settings.agentTools
         if !tools.isEmpty {
             let can = tools.map { $0.displayName.lowercased() }.joined(separator: ", ")
             parts.append("""
@@ -696,12 +698,12 @@ enum AgentEnvironment {
     /// asks for approval. Codex has no separate read or shell tools, so only
     /// writing changes anything: it lets the shell and patches write in the
     /// working folder.
-    static func codexThreadParams(cwd: URL) -> [String: Any] {
+    static func codexThreadParams(cwd: URL, tools: [AgentTool]) -> [String: Any] {
         [
             "cwd": cwd.path,
-            "sandbox": Settings.agentToolEnabled(.write) ? "workspace-write" : "read-only",
+            "sandbox": tools.contains(.write) ? "workspace-write" : "read-only",
             "approvalPolicy": "never",
-            "developerInstructions": systemPrompt,
+            "developerInstructions": systemPrompt(tools: tools),
             "config": [
                 "mcp_servers": [
                     "tiller": [

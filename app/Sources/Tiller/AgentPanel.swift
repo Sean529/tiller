@@ -75,6 +75,7 @@ final class AgentPanelView: NSView {
         tabBar.onNewTab = { [weak self] in self?.newTab() }
         tabBar.onNewChat = { [weak self] in self?.newChat() }
         tabBar.onHistory = { [weak self] button in self?.showHistory(from: button) }
+        tabBar.onTools = { [weak self] button in self?.showTools(from: button) }
 
         for view in [agentPicker, status, chatArea] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -196,8 +197,50 @@ final class AgentPanelView: NSView {
         tabBar.update(
             tabs: chats.map { (title: $0.title, busy: $0.isBusy) },
             selected: activeIndex,
-            canAddTab: chats.count < Settings.agentTabs
+            canAddTab: chats.count < Settings.agentTabs,
+            tools: chat.tools
         )
+    }
+
+    // MARK: Tools
+
+    /// The selected chat's built-in tools, each a checkmark item. Codex can
+    /// always read and run read-only commands, so only writing changes for it.
+    /// Locked while a turn runs, since a change restarts the agent.
+    private func showTools(from button: NSView) {
+        let chat = active
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let header = NSMenuItem(title: "Also allow in this chat", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for tool in AgentTool.allCases {
+            let item = NSMenuItem(title: tool.displayName, action: #selector(toggleTool(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = tool.rawValue
+            let alwaysOn = chat.kind == .codex && tool != .write
+            item.state = alwaysOn || chat.tools.contains(tool) ? .on : .off
+            item.isEnabled = !alwaysOn && !chat.isBusy
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let note = NSMenuItem(
+            title: chat.isBusy ? "Stop the agent to change tools." : "They run without asking. Settings sets them for new chats.",
+            action: nil, keyEquivalent: ""
+        )
+        note.isEnabled = false
+        menu.addItem(note)
+        // Just below the button. The menu moves up if the screen runs out.
+        let below = button.isFlipped ? button.bounds.maxY + 4 : button.bounds.minY - 4
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: below), in: button)
+    }
+
+    @objc private func toggleTool(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let tool = AgentTool(rawValue: raw) else { return }
+        let chat = active
+        var tools = Set(chat.tools)
+        if tools.contains(tool) { tools.remove(tool) } else { tools.insert(tool) }
+        chat.setTools(AgentTool.allCases.filter(tools.contains))
     }
 
     @objc private func tabLimitChanged(_ notification: Notification) {

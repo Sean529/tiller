@@ -752,7 +752,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         let toolsNote = Self.note(
             "These run without asking, and pages can try to steer the agent. Codex can always read "
                 + "and run read-only commands, and writing lets its commands write in the folder too. "
-                + "Applies from the next new chat."
+                + "These are the defaults for new chats. Each chat can change them with the tools button above its message field."
         )
         toolsNote.lineBreakMode = .byWordWrapping
         toolsNote.preferredMaxLayoutWidth = Self.controlWidth

@@ -11,6 +11,9 @@ struct AgentConversation: Codable, Equatable {
     /// The folder the agent ran in. The CLIs keep sessions by folder, so
     /// resuming runs there again.
     var directory: String?
+    /// The built-in tools this chat allows. Nil for chats saved before chats
+    /// had their own, which use Settings'.
+    var tools: [AgentTool]?
     var created: Date
     var updated: Date
 

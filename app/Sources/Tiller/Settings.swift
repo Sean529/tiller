@@ -214,7 +214,7 @@ enum Settings {
 }
 
 /// Groups of built-in agent tools that Settings can turn on.
-enum AgentTool: String, CaseIterable {
+enum AgentTool: String, CaseIterable, Codable {
     case read
     case write
     case shell
