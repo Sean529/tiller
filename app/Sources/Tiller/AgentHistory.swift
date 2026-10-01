@@ -57,6 +57,9 @@ final class AgentHistoryStore {
     private var indexChanged = false
     /// Transcripts waiting to be written, by conversation id.
     private var pendingRecords: [String: [AgentRecord]] = [:]
+    /// The transcripts set this run, by conversation id, so a read never
+    /// gets the file from before a write still on its way to disk.
+    private var knownRecords: [String: [AgentRecord]] = [:]
     private var writeScheduled = false
 
     private init() {
@@ -89,6 +92,7 @@ final class AgentHistoryStore {
     func delete(_ id: String) {
         index.conversations.removeAll { $0.id == id }
         pendingRecords[id] = nil
+        knownRecords[id] = nil
         indexChanged = true
         scheduleWrite()
         // After any write of its transcript still on its way.
@@ -102,13 +106,14 @@ final class AgentHistoryStore {
     }
 
     func records(for id: String) -> [AgentRecord] {
-        if let pending = pendingRecords[id] { return pending }
+        if let known = knownRecords[id] { return known }
         let data = try? Data(contentsOf: folder(for: id).appendingPathComponent("transcript.json"))
         return data.flatMap { try? JSONDecoder().decode([AgentRecord].self, from: $0) } ?? []
     }
 
     func setRecords(_ records: [AgentRecord], for id: String) {
         pendingRecords[id] = records
+        knownRecords[id] = records
         scheduleWrite()
     }
 
