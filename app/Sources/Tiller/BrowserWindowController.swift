@@ -299,6 +299,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
         if tab === fullscreenTab { self.tab(tab, fullscreenChanged: false) }
         wakeTimers.removeValue(forKey: ObjectIdentifier(tab))?.cancel()
+        failLoadWaits(for: tab)
         tab.detach()
         // Tearing down the view is what lets CEF finish closing the browser.
         tab.hostView.removeFromSuperview()
@@ -397,6 +398,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         recordHistory(tab)
         saveSession()
         tabStrip.refresh(tab)
+        loadStateChanged(tab)
         if tab === selectedTab {
             showState(of: tab)
             addressBar.setProgress(tab.progress, loading: tab.isLoading)
@@ -1264,6 +1266,17 @@ extension BrowserWindowController {
             tab.load(AddressInput.url(for: input))
             tabDidChange(tab)
             return info(tab)
+        case "tabs.wait_load":
+            // Answers once the tab's load ends, or once `grace_ms` pass with
+            // none starting, or at `timeout_ms` with a note. Event-driven, so
+            // a tool call doesn't poll the tab list every few milliseconds.
+            let tab = try tab(for: params)
+            let grace = (params["grace_ms"] as? Double ?? 500) / 1000
+            let timeout = (params["timeout_ms"] as? Double ?? 30_000) / 1000
+            return ControlDeferred { [weak self] reply in
+                guard let self else { return reply(.failure(ControlError("the window closed"))) }
+                self.waitForLoad(of: tab, grace: grace, timeout: timeout, reply: reply)
+            }
         case "tabs.close":
             let tab = try tab(for: params)
             requestClose(tab)
@@ -1294,6 +1307,82 @@ extension BrowserWindowController {
             "loading": tab.isLoading,
             "selected": tab === selectedTab,
         ]
+    }
+
+    // MARK: Waiting for loads
+
+    /// A `tabs.wait_load` request in progress.
+    private final class LoadWaiter {
+        let tab: Tab
+        let reply: (Result<Any, ControlError>) -> Void
+        /// Whether the tab was seen loading since the wait began.
+        var sawLoading: Bool
+        var graceTimer: Timer?
+        var timeoutTimer: Timer?
+
+        init(tab: Tab, sawLoading: Bool, reply: @escaping (Result<Any, ControlError>) -> Void) {
+            self.tab = tab
+            self.sawLoading = sawLoading
+            self.reply = reply
+        }
+    }
+
+    private static var loadWaiters: [LoadWaiter] = []
+
+    private func waitForLoad(of tab: Tab, grace: TimeInterval, timeout: TimeInterval, reply: @escaping (Result<Any, ControlError>) -> Void) {
+        let waiter = LoadWaiter(tab: tab, sawLoading: tab.isLoading, reply: reply)
+        Self.loadWaiters.append(waiter)
+        // The timers find the waiter by id: they may fire after it is gone.
+        let id = ObjectIdentifier(waiter)
+        if !tab.isLoading {
+            // Nothing has started yet. A click's navigation starts within a
+            // moment; after that, there is nothing to wait for.
+            waiter.graceTimer = Timer.scheduledTimer(withTimeInterval: grace, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let waiter = Self.loadWaiters.first(where: { ObjectIdentifier($0) == id }), !waiter.sawLoading
+                    else { return }
+                    self.finish(waiter, note: nil)
+                }
+            }
+        }
+        waiter.timeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let waiter = Self.loadWaiters.first(where: { ObjectIdentifier($0) == id }) else { return }
+                self.finish(waiter, note: "still loading after \(Int(timeout.rounded())) seconds")
+            }
+        }
+    }
+
+    /// A tab's loading state changed: waits on it move along.
+    private func loadStateChanged(_ tab: Tab) {
+        for waiter in Self.loadWaiters where waiter.tab === tab {
+            if tab.isLoading {
+                waiter.sawLoading = true
+                waiter.graceTimer?.invalidate()
+            } else if waiter.sawLoading {
+                finish(waiter, note: nil)
+            }
+        }
+    }
+
+    private func finish(_ waiter: LoadWaiter, note: String?) {
+        guard let index = Self.loadWaiters.firstIndex(where: { $0 === waiter }) else { return }
+        Self.loadWaiters.remove(at: index)
+        waiter.graceTimer?.invalidate()
+        waiter.timeoutTimer?.invalidate()
+        var result = info(waiter.tab)
+        if let note { result["note"] = note }
+        waiter.reply(.success(result))
+    }
+
+    /// The tab closed under a wait.
+    private func failLoadWaits(for tab: Tab) {
+        for waiter in Self.loadWaiters where waiter.tab === tab {
+            Self.loadWaiters.removeAll { $0 === waiter }
+            waiter.graceTimer?.invalidate()
+            waiter.timeoutTimer?.invalidate()
+            waiter.reply(.failure(ControlError("tab \(tab.browserID) closed")))
+        }
     }
 }
 

@@ -28,7 +28,7 @@ Background tabs are hidden, and Chromium stops drawing hidden pages and stalls o
 
 `read_page` marks each element it lists with a `data-tiller-ref` attribute, which pages can see. Refs are renumbered on every call.
 
-How it's wired: tab operations (`tabs.*`, including `tabs.wake`) and skill operations (`skills.*`, in `AgentSkills.swift`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
+How it's wired: tab operations (`tabs.*`, including `tabs.wake` and `tabs.wait_load`, which answers once a tab's load ends or a moment passes with none starting) and skill operations (`skills.*`, in `AgentSkills.swift`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
 
 To try it without an agent:
 

@@ -68,8 +68,6 @@ impl Browser {
                 self.mouse(id, "mouseMoved", x, y)?;
                 self.mouse(id, "mousePressed", x, y)?;
                 self.mouse(id, "mouseReleased", x, y)?;
-                // Give a click that navigates a moment to start loading.
-                thread::sleep(Duration::from_millis(300));
                 let mut info = self.wait_for_load(id)?;
                 if point["covered"] == true {
                     info["note"] = json!("another element was on top of the target at its center and got the click");
@@ -96,7 +94,6 @@ impl Browser {
                         }
                         self.cdp(id, "Input.dispatchKeyEvent", key)?;
                     }
-                    thread::sleep(Duration::from_millis(300));
                     return json_out(self.wait_for_load(id)?);
                 }
                 json_out(json!({ "typed": value.chars().count() }))
@@ -164,9 +161,21 @@ impl Browser {
         Ok(id)
     }
 
+    /// Waits until the tab stops loading, then returns its info. The app
+    /// answers when the load ends, or once half a second passes with none
+    /// starting, as after a click that changes nothing. A Tiller from before
+    /// that request is polled instead.
+    fn wait_for_load(&mut self, id: i64) -> Result<Value, String> {
+        match self.request("tabs.wait_load", json!({ "tab_id": id, "grace_ms": 500, "timeout_ms": LOAD_TIMEOUT.as_millis() as u64 })) {
+            Err(message) if message.starts_with("unknown method") => {}
+            other => return other,
+        }
+        self.poll_for_load(id)
+    }
+
     /// Polls until the tab stops loading, then returns its info. A load that
     /// hasn't started yet gets a second to show up.
-    fn wait_for_load(&mut self, id: i64) -> Result<Value, String> {
+    fn poll_for_load(&mut self, id: i64) -> Result<Value, String> {
         let start = Instant::now();
         let mut seen_loading = false;
         loop {
