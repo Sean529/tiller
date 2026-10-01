@@ -278,7 +278,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
         if tab === selectedTab {
             selectedTab = nil
-            select(tabs[min(index, tabs.count - 1)], resumeSaving: false)
+            let next = tabs[min(index, tabs.count - 1)]
+            // While every tab closes, a tab that never loaded is left alone:
+            // selecting it would start its browser, which keeps Tiller running
+            // after the others are gone.
+            if closingAll && !next.isStarted {
+                tabStrip.update(tabs: tabs, selected: nil)
+            } else {
+                select(next, resumeSaving: false)
+            }
         } else {
             tabStrip.update(tabs: tabs, selected: selectedTab)
             saveSession()
@@ -647,9 +655,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// close. The window closes when its last tab is gone.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if tabs.isEmpty { return true }
+        closeAllTabs()
+        return false
+    }
+
+    /// Closes every tab, for the window closing or Tiller quitting. Tabs that
+    /// never loaded go right away; the others run their beforeunload first. The
+    /// window closes with the last one, and Tiller quits with the window.
+    func closeAllTabs() {
         freezeSession()
         tabs.forEach { $0.close() }
-        return false
     }
 
     func windowDidResize(_ notification: Notification) {

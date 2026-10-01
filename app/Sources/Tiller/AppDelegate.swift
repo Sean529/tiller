@@ -163,9 +163,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.showProfile(name: name)
     }
 
-    /// Cmd+Q, the Dock or logging out, before the tabs start closing.
+    /// Cmd+Q, the Dock or logging out. Closes every tab, which closes the
+    /// window, and the core quits when the last browser is gone. The core
+    /// closes only tabs that have a browser, so this can't be left to it:
+    /// a restored tab that hasn't loaded yet would be selected, start, and
+    /// keep Tiller running.
     fileprivate func quitRequested() {
-        windowController?.freezeSession()
+        windowController?.closeAllTabs()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {

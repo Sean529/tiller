@@ -90,7 +90,9 @@ pub extern "C" fn tiller_core_run() {
 }
 
 /// Sets a function run on the main thread when the app is asked to quit (Cmd+Q,
-/// the Dock, logging out), before any tab starts closing. Null clears it.
+/// the Dock, logging out). The handler is then responsible for closing every
+/// tab; the message loop quits when the last browser is gone. Without a handler
+/// the core closes every browser itself. Null clears it.
 #[unsafe(no_mangle)]
 pub extern "C" fn tiller_core_set_quit_handler(handler: Option<unsafe extern "C" fn()>) {
     app_mac::set_quit_handler(handler);
