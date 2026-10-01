@@ -18,7 +18,7 @@ Tiller > Settings… (Cmd+,) has five panes: General, Passwords, Extensions (see
 | Agent | New chats use: Qoder CLI, Claude Code or Codex | Qoder CLI | next new chat; same as the picker in the panel |
 | Agent | Chat tabs: how many chats the panel keeps open at once, 1 to 9 | 3 | right away; tabs already open stay |
 | Agent | Show and hide shortcut: click, then press a combination with Cmd or Ctrl. Delete clears it; one already in a menu is refused | Cmd+Shift+S | right away |
-| Agent | Path for each CLI | empty, meaning look it up | next new chat |
+| Agent | Run: pick a CLI, then the file to run it from | empty, meaning look it up | next new chat |
 | Agent | Extra instructions, added after Tiller's system prompt | empty | next new chat |
 
 Settings live in the profile's own user defaults, `dev.sorrycc.tiller.profile.<id>`. Window position and size stay in `dev.sorrycc.tiller`, shared by every profile. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.

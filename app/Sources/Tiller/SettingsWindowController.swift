@@ -17,7 +17,7 @@ final class SettingsWindowController: NSWindowController {
             (ProfilesSettingsPane(), "person.2"),
         ]
         for (pane, symbol) in panes {
-            let item = NSTabViewItem(viewController: pane)
+            let item = NSTabViewItem(viewController: ScrollingPaneController(pane))
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: pane.title)
             tabs.addTabViewItem(item)
         }
@@ -41,6 +41,73 @@ final class SettingsWindowController: NSWindowController {
     @objc func closeTab(_ sender: Any?) {
         window?.performClose(sender)
     }
+}
+
+/// Holds a pane in a scroll view, so a pane taller than the screen scrolls
+/// instead of pushing the window off it. The window takes the pane's own
+/// size whenever it fits.
+@MainActor
+final class ScrollingPaneController: NSViewController {
+    private let pane: NSViewController
+
+    init(_ pane: NSViewController) {
+        self.pane = pane
+        super.init(nibName: nil, bundle: nil)
+        title = pane.title
+        addChild(pane)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        // A flipped document starts scrolled to the top, not the bottom.
+        let document = FlippedView()
+        document.addSubview(pane.view)
+        scroll.documentView = document
+        pane.view.translatesAutoresizingMaskIntoConstraints = false
+        document.translatesAutoresizingMaskIntoConstraints = false
+        let clip = scroll.contentView
+        NSLayoutConstraint.activate([
+            document.topAnchor.constraint(equalTo: clip.topAnchor),
+            document.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
+            document.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
+            pane.view.topAnchor.constraint(equalTo: document.topAnchor),
+            pane.view.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            pane.view.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            pane.view.bottomAnchor.constraint(lessThanOrEqualTo: document.bottomAnchor),
+        ])
+        view = scroll
+        fit()
+    }
+
+    // The pane gets its own viewWillAppear from the containment.
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        fit()
+    }
+
+    /// The pane's size, with the height held to what the screen has room for.
+    private func fit() {
+        var size = pane.preferredContentSize
+        if size == .zero { size = pane.view.fittingSize }
+        let screen = view.window?.screen ?? NSScreen.main
+        if let screen {
+            // Room under the title bar and toolbar, with a margin.
+            let room = screen.visibleFrame.height - 140
+            size.height = min(size.height, max(300, room))
+        }
+        preferredContentSize = size
+    }
+}
+
+/// A view whose origin is its top left, for a scroll view's document.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 /// A two-column form: right-aligned labels, controls on the right, and short
@@ -116,6 +183,29 @@ class SettingsPane: NSViewController {
     static func show(_ text: String, in note: NSTextField, warning: Bool = false) {
         note.stringValue = text
         note.textColor = warning ? .systemRed : .secondaryLabelColor
+    }
+
+    /// `scroll` with a dimmed label over the middle of its rows, for a table
+    /// with no rows. Hide the label while there are rows.
+    static func withPlaceholder(_ scroll: NSScrollView, _ text: String) -> (box: NSView, label: NSTextField) {
+        let box = NSView()
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = .tertiaryLabelColor
+        for view in [scroll, label] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(view)
+        }
+        let header = scroll.documentView.flatMap { ($0 as? NSTableView)?.headerView?.frame.height } ?? 0
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: box.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+            label.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: box.centerYAnchor, constant: -header / 2),
+        ])
+        return (box, label)
     }
 
     static func fixWidth(_ view: NSView, _ width: CGFloat = controlWidth) -> NSView {
@@ -297,6 +387,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let removeAllButton = NSButton(title: "Remove All…", target: nil, action: nil)
     private let note = SettingsPane.wrappingNote(width: 560)
+    private var placeholder: NSTextField?
     private var entries: [PasswordStore.Entry] { PasswordStore.shared.entries }
 
     init() {
@@ -321,6 +412,8 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
+        let (tableBox, placeholder) = SettingsPane.withPlaceholder(scroll, "No Saved Passwords")
+        self.placeholder = placeholder
 
         copyButton.target = self
         copyButton.action = #selector(copyPassword(_:))
@@ -331,7 +424,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         let buttons = NSStackView(views: [copyButton, removeButton, NSView(), removeAllButton])
         buttons.spacing = 8
 
-        let stack = NSStackView(views: [scroll, buttons, note])
+        let stack = NSStackView(views: [tableBox, buttons, note])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -363,6 +456,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         copyButton.isEnabled = table.selectedRowIndexes.count == 1
         removeButton.isEnabled = !table.selectedRowIndexes.isEmpty
         removeAllButton.isEnabled = !entries.isEmpty
+        placeholder?.isHidden = !entries.isEmpty
         SettingsPane.show(
             entries.isEmpty
                 ? "No saved passwords. Bring them over with Tiller > Import from Chrome…"
@@ -450,6 +544,7 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
     private let optionsButton = NSButton(title: "Options", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let note = SettingsPane.wrappingNote(width: 600)
+    private var placeholder: NSTextField?
     private var store: ExtensionStore { .shared }
 
     init() {
@@ -480,6 +575,8 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
+        let (tableBox, placeholder) = SettingsPane.withPlaceholder(scroll, "No Extensions")
+        self.placeholder = placeholder
 
         for (button, action) in [
             (addFolderButton, #selector(addFolder(_:))),
@@ -493,7 +590,7 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
         let buttons = NSStackView(views: [addFolderButton, addCRXButton, optionsButton, NSView(), removeButton])
         buttons.spacing = 8
 
-        let stack = NSStackView(views: [scroll, buttons, note])
+        let stack = NSStackView(views: [tableBox, buttons, note])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -526,6 +623,7 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
     private func updateControls() {
         optionsButton.isEnabled = selectedManifest?.optionsURL != nil
         removeButton.isEnabled = !table.selectedRowIndexes.isEmpty
+        placeholder?.isHidden = !store.entries.isEmpty
         let text: String
         if store.entries.isEmpty {
             text = "No extensions. Add an unpacked folder or a CRX file, or bring Chrome's over with Tiller > Import from Chrome…"
@@ -671,10 +769,16 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
 
 final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDelegate {
     private var agentPopUp: NSPopUpButton?
-    private var pathFields: [AgentKind: NSTextField] = [:]
-    private var pathNotes: [AgentKind: NSTextField] = [:]
+    /// Picks which CLI's path `pathField` shows.
+    private var pathKindPopUp: NSPopUpButton?
+    private let pathField = NSTextField()
+    private let pathNote = SettingsPane.note()
     /// What the lookup found, for kinds whose lookup has finished. Nil values mean not found.
     private var detected: [AgentKind: String?] = [:]
+    /// The CLI whose path is being edited.
+    private var pathKind: AgentKind {
+        (pathKindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentKind.init) ?? .current
+    }
     private var instructionsView: NSTextView?
     private let folderField = NSTextField()
     private let folderNote = SettingsPane.note()
@@ -683,6 +787,9 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         title: "Restore Default", target: self, action: #selector(restoreShortcut(_:))
     )
     private let shortcutNote = SettingsPane.note()
+
+    /// Paths need more room than General's controls.
+    private static let wideControlWidth: CGFloat = 460
 
     init() { super.init(title: "Agent") }
 
@@ -720,21 +827,20 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         addNote(shortcutNote)
         showShortcutState()
 
-        for (index, kind) in AgentKind.allCases.enumerated() {
-            let field = NSTextField()
-            field.stringValue = Settings.defaults.string(forKey: kind.pathDefaultsKey) ?? ""
-            field.delegate = self
-            let choose = NSButton(title: "Choose…", target: self, action: #selector(choosePath(_:)))
-            choose.tag = index
-            let row = NSStackView(views: [Self.fixWidth(field, Self.controlWidth - 90), choose])
-            row.spacing = 8
-            addRow("\(kind.displayName) path:", row)
-            let note = Self.note()
-            addNote(note)
-            pathFields[kind] = field
-            pathNotes[kind] = note
-            showPathState(kind)
-        }
+        // One row serves every CLI: the popup picks whose path the field shows.
+        let kindPopUp = Self.popUp(
+            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
+            target: self, action: #selector(pathKindChanged(_:))
+        )
+        pathKindPopUp = kindPopUp
+        pathField.delegate = self
+        let choosePath = NSButton(title: "Choose…", target: self, action: #selector(choosePath(_:)))
+        let pathRow = NSStackView(views: [kindPopUp, pathField, choosePath])
+        pathRow.spacing = 8
+        pathField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addRow("Run:", Self.fixWidth(pathRow, Self.wideControlWidth))
+        addNote(pathNote)
+        loadPathField()
 
         let checkboxes = AgentTool.allCases.enumerated().map { index, tool in
             let checkbox = NSButton(checkboxWithTitle: tool.displayName, target: self, action: #selector(toolChanged(_:)))
@@ -750,19 +856,18 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         toolsRow.rowAlignment = .none
         toolsRow.cell(at: 0).yPlacement = .top
         let toolsNote = Self.note(
-            "These run without asking, and pages can try to steer the agent. Codex can always read "
-                + "and run read-only commands, and writing lets its commands write in the folder too. "
-                + "These are the defaults for new chats. Each chat can change them with the tools button above its message field."
+            "They run without asking, and pages can try to steer the agent. Codex always reads and runs "
+                + "read-only commands. Defaults for new chats; each chat can change its own from the tools button."
         )
         toolsNote.lineBreakMode = .byWordWrapping
-        toolsNote.preferredMaxLayoutWidth = Self.controlWidth
+        toolsNote.preferredMaxLayoutWidth = Self.wideControlWidth
         addNote(toolsNote)
 
         folderField.stringValue = Settings.agentFolder
         folderField.placeholderString = "An empty folder"
         folderField.delegate = self
         let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseFolder(_:)))
-        let folderRow = NSStackView(views: [Self.fixWidth(folderField, Self.controlWidth - 90), choose])
+        let folderRow = NSStackView(views: [Self.fixWidth(folderField, Self.wideControlWidth - 90), choose])
         folderRow.spacing = 8
         addRow("Work in:", folderRow)
         addNote(folderNote)
@@ -780,7 +885,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         box.fillColor = .labelColor.withAlphaComponent(0.04)
         box.contentViewMargins = NSSize(width: 1, height: 1)
         box.contentView = scroll
-        box.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        box.heightAnchor.constraint(equalToConstant: 96).isActive = true
         let textView = scroll.documentView as! NSTextView
         textView.drawsBackground = false
         textView.string = Settings.agentInstructions
@@ -791,7 +896,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         textView.textContainerInset = NSSize(width: 2, height: 4)
         textView.delegate = self
         instructionsView = textView
-        let row = addRow("Extra instructions:", Self.fixWidth(box))
+        let row = addRow("Extra instructions:", Self.fixWidth(box, Self.wideControlWidth))
         row.rowAlignment = .none
         row.cell(at: 0).yPlacement = .top
         addNote(Self.note("Added after Tiller's prompt. Applies from the next new chat."))
@@ -799,6 +904,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     override func viewWillAppear() {
         super.viewWillAppear()
+        loadPathField()
         detectPaths()
     }
 
@@ -809,29 +915,39 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
                 let path = await Task.detached { AgentEnvironment.detectedExecutable(for: kind) }.value
                 guard let self else { return }
                 self.detected[kind] = .some(path)
-                self.showPathState(kind)
+                self.showPathState()
             }
         }
     }
 
-    private func showPathState(_ kind: AgentKind) {
-        guard let field = pathFields[kind], let note = pathNotes[kind] else { return }
+    /// Shows the picked CLI's path in the field.
+    private func loadPathField() {
+        pathField.stringValue = Settings.defaults.string(forKey: pathKind.pathDefaultsKey) ?? ""
+        showPathState()
+    }
+
+    @objc private func pathKindChanged(_ sender: NSPopUpButton) {
+        loadPathField()
+    }
+
+    private func showPathState() {
+        let kind = pathKind
         let found = detected[kind]
-        field.placeholderString = switch found {
+        pathField.placeholderString = switch found {
         case .none: "Looking for \(kind.rawValue)…"
         case .some(let path?): path
         case .some(nil): "\(kind.rawValue) not found"
         }
         if let path = Settings.agentPath(for: kind) {
             if FileManager.default.isExecutableFile(atPath: path) {
-                Self.show("Tiller runs this file.", in: note)
+                Self.show("Tiller runs this file for \(kind.displayName).", in: pathNote)
             } else {
-                Self.show("Not an executable file.", in: note, warning: true)
+                Self.show("Not an executable file.", in: pathNote, warning: true)
             }
         } else if case .some(nil) = found {
-            Self.show("Not found. Install it, or choose its file.", in: note, warning: true)
+            Self.show("Not found. Install \(kind.displayName), or choose its file.", in: pathNote, warning: true)
         } else {
-            Self.show("Leave empty to find it automatically.", in: note)
+            Self.show("Leave empty to find it automatically.", in: pathNote)
         }
     }
 
@@ -878,11 +994,9 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             showFolderState()
             return
         }
-        guard let field = notification.object as? NSTextField,
-            let kind = pathFields.first(where: { $0.value === field })?.key
-        else { return }
-        Settings.setAgentPath(field.stringValue, for: kind)
-        showPathState(kind)
+        guard notification.object as? NSTextField === pathField else { return }
+        Settings.setAgentPath(pathField.stringValue, for: pathKind)
+        showPathState()
     }
 
     func textDidChange(_ notification: Notification) {
@@ -936,8 +1050,8 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     }
 
     @objc private func choosePath(_ sender: NSButton) {
-        guard let window = view.window, AgentKind.allCases.indices.contains(sender.tag) else { return }
-        let kind = AgentKind.allCases[sender.tag]
+        guard let window = view.window else { return }
+        let kind = pathKind
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -951,9 +1065,8 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             guard response == .OK, let url = panel.url else { return }
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.pathFields[kind]?.stringValue = url.path
                 Settings.setAgentPath(url.path, for: kind)
-                self.showPathState(kind)
+                if self.pathKind == kind { self.loadPathField() }
             }
         }
     }
