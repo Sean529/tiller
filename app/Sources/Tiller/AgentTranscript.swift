@@ -10,8 +10,11 @@ protocol TranscriptRow: NSView {
 /// The scrolling column of messages. Flipped so rows stack from the top.
 final class TranscriptView: NSView {
     private let stack = NSStackView()
-    private static let inset: CGFloat = 14
+    /// The same as the composer's, so messages line up with it.
+    private static let inset: CGFloat = 12
     private var lastWidth: CGFloat = 0
+    /// The "Thinking…" row while the agent has nothing to show yet.
+    private var thinking: ThinkingRowView?
 
     override var isFlipped: Bool { true }
 
@@ -32,7 +35,7 @@ final class TranscriptView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    var isEmpty: Bool { stack.arrangedSubviews.isEmpty }
+    var isEmpty: Bool { stack.arrangedSubviews.allSatisfy { $0 is ThinkingRowView } }
 
     /// The group taking tool calls until any other row, or `closeToolGroup()`.
     private var openGroup: ToolGroupView?
@@ -40,6 +43,7 @@ final class TranscriptView: NSView {
     /// Tool calls that follow one another go into one group; any other row
     /// ends the group.
     func add(_ row: NSView) {
+        hideThinking()
         if let call = row as? ToolRowView {
             if let openGroup {
                 openGroup.add(call)
@@ -67,7 +71,25 @@ final class TranscriptView: NSView {
     func clear() {
         for view in stack.arrangedSubviews { view.removeFromSuperview() }
         openGroup = nil
+        thinking = nil
     }
+
+    /// Puts a "Thinking…" row after the last row, until something else
+    /// comes. It leaves a run of tool calls open: the next call joins it.
+    func showThinking() {
+        guard thinking == nil else { return }
+        let row = ThinkingRowView()
+        thinking = row
+        stack.addArrangedSubview(row)
+        needsLayout = true
+    }
+
+    func hideThinking() {
+        thinking?.removeFromSuperview()
+        thinking = nil
+    }
+
+    var isThinking: Bool { thinking != nil }
 
     /// Whether the bottom of the transcript is in view, give or take a line.
     func isNearBottom(of scrollView: NSScrollView) -> Bool {
@@ -397,9 +419,12 @@ final class ToolRowView: NSView, TranscriptRow {
     func finish(isError: Bool?, summary: String) {
         spinner.stopAnimation(nil)
         icon.isHidden = false
+        isHovered = false
+        // Only a failure gets a color: a long run would otherwise be a
+        // column of green.
         let (symbol, description, color): (String, String, NSColor) = switch isError {
         case true?: ("xmark.circle.fill", "Failed", .systemRed)
-        case false?: ("checkmark.circle.fill", "Done", .systemGreen)
+        case false?: ("checkmark.circle.fill", "Done", .tertiaryLabelColor)
         case nil: ("minus.circle.fill", "Didn't finish", .tertiaryLabelColor)
         }
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
@@ -443,11 +468,27 @@ final class ToolRowView: NSView, TranscriptRow {
 
     override var wantsUpdateLayer: Bool { true }
 
+    /// A clickable header darkens a little under the mouse.
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
+
     override func updateLayer() {
         layer?.cornerRadius = 8
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
+        let alpha = chevron != nil && isHovered ? 0.09 : 0.05
+        withEasing { layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor }
     }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        guard chevron != nil else { return }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
 
     private static func tool(_ name: String) -> String {
         // Chats saved before the rename from Mini carry the old server name.
@@ -455,9 +496,39 @@ final class ToolRowView: NSView, TranscriptRow {
         return prefix.map { String(name.dropFirst($0.count)) } ?? name
     }
 
+    /// What a tool is called in the transcript: Tiller's and the CLIs'
+    /// built-in tools by what they do, anything else as named.
+    static func displayName(of tool: String) -> String {
+        switch tool {
+        case "read_page": "Read page"
+        case "click": "Click"
+        case "type": "Type"
+        case "navigate": "Open page"
+        case "new_tab": "New tab"
+        case "select_tab": "Select tab"
+        case "close_tab": "Close tab"
+        case "list_tabs": "List tabs"
+        case "screenshot": "Screenshot"
+        case "eval_js": "Run script"
+        case "list_skills": "List skills"
+        case "read_skill": "Read skill"
+        case "save_skill": "Save skill"
+        case "Read": "Read file"
+        case "Write": "Write file"
+        case "Edit", "MultiEdit": "Edit file"
+        case "Bash": "Run command"
+        case "Grep", "Glob": "Search files"
+        case "WebFetch": "Fetch"
+        case "WebSearch": "Search the web"
+        case "TodoWrite": "Plan"
+        case "Task": "Subtask"
+        default: tool
+        }
+    }
+
     private static func heading(tool: String, detail: String) -> NSAttributedString {
-        let text = NSMutableAttributedString(string: tool, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+        let text = NSMutableAttributedString(string: displayName(of: tool), attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
             .foregroundColor: NSColor.labelColor,
         ])
         if !detail.isEmpty {
@@ -583,7 +654,10 @@ final class ToolGroupView: NSView, TranscriptRow {
         header.isHidden = calls.count < 2
         rows.isHidden = !header.isExpanded && calls.count > 1
         var names: [String] = []
-        for call in calls where !names.contains(call.tool) { names.append(call.tool) }
+        for call in calls {
+            let name = ToolRowView.displayName(of: call.tool).lowercased()
+            if !names.contains(name) { names.append(name) }
+        }
         let failed = calls.filter { $0.outcome == .failed }.count
         header.update(
             name: "\(calls.count) steps" + (failed > 0 ? " · \(failed) failed" : ""),
@@ -593,6 +667,36 @@ final class ToolGroupView: NSView, TranscriptRow {
         let settled = calls.allSatisfy { $0.outcome == .done || $0.outcome == .failed }
         header.finish(isError: failed > 0 ? true : settled ? false : nil, summary: "")
     }
+}
+
+/// What shows between sending a message and the agent's first words or
+/// step: a small spinner and "Thinking…", where the answer will start.
+final class ThinkingRowView: NSView {
+    init() {
+        super.init(frame: .zero)
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.startAnimation(nil)
+        let label = NSTextField(labelWithString: "Thinking…")
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        let row = NSStackView(views: [spinner, label])
+        row.spacing = 7
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            spinner.widthAnchor.constraint(equalToConstant: 14),
+            spinner.heightAnchor.constraint(equalToConstant: 14),
+        ])
+        setAccessibilityLabel("Thinking")
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 /// A quiet line in the middle, such as "Stopped".
@@ -1363,19 +1467,26 @@ final class MarkdownTableContentView: NSView {
     }
 }
 
-/// A fenced code block: monospaced text on a rounded plate, with the language
-/// and a copy button in its top corner. Long lines wrap at any character so
-/// the block never runs wider than the transcript.
+/// A fenced code block: a header strip naming the language, with a copy
+/// button that shows under the mouse, over monospaced text on a rounded
+/// plate. Long lines don't wrap; the text scrolls sideways under a fade at
+/// the edge where more of it lies, as tables do.
 final class MarkdownCodeView: NSView, TranscriptRow {
-    private let label = NSTextField(wrappingLabelWithString: "")
+    private let header = NSView()
     private let languageLabel = NSTextField(labelWithString: "")
     private let copyButton = NSButton()
+    private let rule = NSView()
+    private let scroll = NSScrollView()
+    /// Holds the text with the padding around it, at the text's own width.
+    private let document = NSView()
+    private let label = NSTextField(labelWithString: "")
     private var code = ""
     private var width: CGFloat = 0
-    private var labelTrailing: NSLayoutConstraint!
+    private lazy var height = heightAnchor.constraint(equalToConstant: 0)
     private var copiedReset: DispatchWorkItem?
     private var isHovered = false { didSet { updateButtons() } }
 
+    private static let headerHeight: CGFloat = 24
     private static let padding = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
     private static let font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
     private static let copyImage = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy Code")?
@@ -1388,38 +1499,68 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         wantsLayer = true
         label.font = Self.font
         label.isSelectable = true
-        label.lineBreakMode = .byCharWrapping
-        label.cell?.wraps = true
+        label.lineBreakMode = .byClipping
+        label.cell?.wraps = false
+        label.cell?.isScrollable = false
+        label.maximumNumberOfLines = 0
 
-        languageLabel.font = .systemFont(ofSize: 10, weight: .medium)
-        languageLabel.textColor = .tertiaryLabelColor
+        languageLabel.font = .systemFont(ofSize: 10.5, weight: .medium)
+        languageLabel.textColor = .secondaryLabelColor
 
         copyButton.image = Self.copyImage
         copyButton.isBordered = false
         copyButton.bezelStyle = .accessoryBarAction
         copyButton.imagePosition = .imageOnly
-        copyButton.contentTintColor = .tertiaryLabelColor
+        copyButton.contentTintColor = .secondaryLabelColor
         copyButton.toolTip = "Copy Code"
         copyButton.target = self
         copyButton.action = #selector(copyCode(_:))
+        copyButton.alphaValue = 0
 
-        for view in [label, languageLabel, copyButton] as [NSView] {
+        rule.wantsLayer = true
+
+        scroll.hasHorizontalScroller = true
+        scroll.hasVerticalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = false
+        scroll.verticalScrollElasticity = .none
+        scroll.horizontalScrollElasticity = .automatic
+        document.addSubview(label)
+        scroll.documentView = document
+        scroll.wantsLayer = true
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(scrolled(_:)), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+
+        for view in [header, rule, scroll] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        let p = Self.padding
-        labelTrailing = label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -p.right)
+        for view in [languageLabel, copyButton] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            header.addSubview(view)
+        }
         NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: topAnchor, constant: p.top),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: p.left),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -p.bottom),
-            labelTrailing,
-            copyButton.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-            copyButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            header.topAnchor.constraint(equalTo: topAnchor),
+            header.leadingAnchor.constraint(equalTo: leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: trailingAnchor),
+            header.heightAnchor.constraint(equalToConstant: Self.headerHeight),
+            languageLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: Self.padding.left),
+            languageLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            copyButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -3),
+            copyButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             copyButton.widthAnchor.constraint(equalToConstant: 22),
-            copyButton.heightAnchor.constraint(equalToConstant: 22),
-            languageLabel.centerYAnchor.constraint(equalTo: copyButton.centerYAnchor),
-            languageLabel.trailingAnchor.constraint(equalTo: copyButton.leadingAnchor, constant: -2),
+            copyButton.heightAnchor.constraint(equalToConstant: 20),
+            rule.topAnchor.constraint(equalTo: header.bottomAnchor),
+            rule.leadingAnchor.constraint(equalTo: leadingAnchor),
+            rule.trailingAnchor.constraint(equalTo: trailingAnchor),
+            rule.heightAnchor.constraint(equalToConstant: 1),
+            scroll.topAnchor.constraint(equalTo: rule.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            height,
         ])
         updateButtons()
     }
@@ -1428,21 +1569,65 @@ final class MarkdownCodeView: NSView, TranscriptRow {
 
     func set(language: String, code: String) {
         if languageLabel.stringValue != language {
-            languageLabel.stringValue = language
-            languageLabel.isHidden = language.isEmpty
+            languageLabel.stringValue = language.isEmpty ? "Code" : language
         }
         guard code != self.code else { return }
         self.code = code
         label.stringValue = code.isEmpty ? " " : code
-        // The first line keeps clear of the language and the copy button.
-        let reserved = 22 + (language.isEmpty ? 0 : languageLabel.fittingSize.width + 6)
-        labelTrailing.constant = -(Self.padding.right + reserved)
-        if width > 0 { fit(width: width) }
+        relayout()
     }
 
     func fit(width: CGFloat) {
+        guard width != self.width else { return }
         self.width = width
-        label.preferredMaxLayoutWidth = width - Self.padding.left + labelTrailing.constant
+        relayout()
+    }
+
+    /// The text sits at its own size inside the scrolling view, with the
+    /// padding around it, and the block is as tall as the text.
+    private func relayout() {
+        let p = Self.padding
+        let size = label.intrinsicContentSize
+        let documentWidth = max(size.width + p.left + p.right, width)
+        document.frame = NSRect(x: 0, y: 0, width: documentWidth, height: size.height + p.top + p.bottom)
+        // The document isn't flipped, so the bottom padding is the origin.
+        label.frame = NSRect(x: p.left, y: p.bottom, width: size.width, height: size.height)
+        let total = Self.headerHeight + 1 + size.height + p.top + p.bottom
+        if height.constant != total { height.constant = total }
+        updateFade()
+    }
+
+    @objc private func scrolled(_ notification: Notification) {
+        updateFade()
+    }
+
+    /// Fades the edges where more of the text lies.
+    private func updateFade() {
+        let visible = scroll.contentView.bounds
+        let documentWidth = scroll.documentView?.frame.width ?? 0
+        let hiddenLeft = visible.minX > 1
+        let hiddenRight = documentWidth - visible.maxX > 1
+        guard hiddenLeft || hiddenRight else {
+            scroll.layer?.mask = nil
+            return
+        }
+        let mask = (scroll.layer?.mask as? CAGradientLayer) ?? CAGradientLayer()
+        mask.startPoint = CGPoint(x: 0, y: 0.5)
+        mask.endPoint = CGPoint(x: 1, y: 0.5)
+        let fade = min(0.2, 28 / max(1, visible.width))
+        let clear = NSColor.clear.cgColor, opaque = NSColor.black.cgColor
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mask.frame = scroll.bounds
+        mask.colors = [hiddenLeft ? clear : opaque, opaque, opaque, hiddenRight ? clear : opaque]
+        mask.locations = [0, NSNumber(value: fade), NSNumber(value: 1 - fade), 1]
+        scroll.layer?.mask = mask
+        CATransaction.commit()
+    }
+
+    override func layout() {
+        super.layout()
+        updateFade()
     }
 
     @objc private func copyCode(_ sender: Any?) {
@@ -1463,11 +1648,18 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         }
         copiedReset = reset
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: reset)
+        updateButtons()
     }
 
+    /// The copy button shows under the mouse, and while it says "Copied".
     private func updateButtons() {
-        guard copiedReset == nil else { return }
-        copyButton.contentTintColor = isHovered ? .secondaryLabelColor : .tertiaryLabelColor
+        let shown = isHovered || copiedReset != nil
+        if copiedReset == nil { copyButton.contentTintColor = .secondaryLabelColor }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduceMotion ? 0 : 0.12
+            copyButton.animator().alphaValue = shown ? 1 : 0
+        }
     }
 
     override var wantsUpdateLayer: Bool { true }
@@ -1478,6 +1670,7 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
         layer?.borderWidth = 1
         layer?.borderColor = NSColor.separatorColor.cgColor
+        rule.layer?.backgroundColor = NSColor.separatorColor.cgColor
     }
 
     override func updateTrackingAreas() {

@@ -20,7 +20,15 @@ enum MainMenu {
         // Goes to the key window's BrowserWindowController, like File's items.
         appMenu.addItem(withTitle: "Import from Chrome…", action: #selector(BrowserWindowController.importFromChrome(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
+        let services = NSMenu(title: "Services")
+        add(services, titled: "Services", to: appMenu)
+        NSApp.servicesMenu = services
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Tiller", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Tiller", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         add(appMenu, titled: "Tiller", to: main)
 
@@ -44,6 +52,9 @@ enum MainMenu {
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let pasteMatching = edit.addItem(withTitle: "Paste and Match Style", action: #selector(NSTextView.pasteAsPlainText(_:)), keyEquivalent: "V")
+        pasteMatching.keyEquivalentModifierMask = [.command, .option, .shift]
+        edit.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
         let find = NSMenu(title: findTitle)
@@ -91,6 +102,7 @@ enum MainMenu {
 
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        window.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         window.addItem(.separator())
         window.addItem(withTitle: "Show Previous Tab", action: #selector(BrowserWindowController.selectPreviousTab(_:)), keyEquivalent: "{")
         window.addItem(withTitle: "Show Next Tab", action: #selector(BrowserWindowController.selectNextTab(_:)), keyEquivalent: "}")
@@ -106,6 +118,8 @@ enum MainMenu {
         }
         window.addItem(.separator())
         window.addItem(withTitle: "Downloads", action: #selector(BrowserWindowController.showDownloads(_:)), keyEquivalent: "J")
+        window.addItem(.separator())
+        window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         window.addItem(.separator())
         add(window, titled: "Window", to: main)
         NSApp.windowsMenu = window

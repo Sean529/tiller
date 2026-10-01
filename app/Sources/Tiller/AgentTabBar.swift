@@ -16,7 +16,7 @@ final class AgentTabBar: NSView {
 
     private let tabStack = NSStackView()
     private let toolsButton = AgentTabBar.iconButton("wrench.and.screwdriver", "Tools")
-    private let newTabButton = AgentTabBar.iconButton("plus.square", "New Tab")
+    private let newTabButton = AgentTabBar.iconButton("plus", "New Tab")
     private let newChatButton = AgentTabBar.iconButton("square.and.pencil", "New Chat")
     private let historyButton = AgentTabBar.iconButton("clock.arrow.circlepath", "Chat History")
 
@@ -93,7 +93,9 @@ final class AgentTabBar: NSView {
 }
 
 /// A tab's number in a rounded square, tinted with the accent color when
-/// selected, with a dot while its agent works. Right-click to close it.
+/// selected, with a dot while its agent works. The selected tab's number
+/// gives way to a cross under the mouse, which closes it; right-click closes
+/// any tab.
 private final class TabNumberButton: NSView {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
@@ -103,13 +105,32 @@ private final class TabNumberButton: NSView {
             setAccessibilityLabel("Tab \(number): \(title)")
         }
     }
-    var isSelected = false { didSet { if isSelected != oldValue { needsDisplay = true } } }
+    var isSelected = false {
+        didSet {
+            guard isSelected != oldValue else { return }
+            updateLabel()
+            needsDisplay = true
+        }
+    }
     var isBusy = false { didSet { busyDot.isHidden = !isBusy } }
 
     private let number: Int
     private let label: NSTextField
     private let busyDot = NSView()
-    private var isHovered = false { didSet { needsDisplay = true } }
+    private var isHovered = false {
+        didSet {
+            updateLabel()
+            needsDisplay = true
+        }
+    }
+
+    /// Whether a click closes the tab rather than selecting it.
+    private var offersClose: Bool { isSelected && isHovered }
+
+    private func updateLabel() {
+        label.stringValue = offersClose ? "×" : "\(number)"
+        toolTip = offersClose ? "Close Tab" : title
+    }
 
     init(number: Int) {
         self.number = number
@@ -118,6 +139,8 @@ private final class TabNumberButton: NSView {
         wantsLayer = true
         label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         label.alignment = .center
+        // Wide enough for the cross, so the square doesn't change size.
+        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 12).isActive = true
         busyDot.wantsLayer = true
         busyDot.layer?.cornerRadius = 3
         busyDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
@@ -167,7 +190,8 @@ private final class TabNumberButton: NSView {
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {
-        if bounds.contains(convert(event.locationInWindow, from: nil)) { onSelect?() }
+        guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        if offersClose { onClose?() } else { onSelect?() }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

@@ -56,6 +56,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// Running tool calls: their rows and where they are in `records`.
     private var toolRows: [String: (row: ToolRowView, record: Int)] = [:]
     private let quickLook = QuickLookItems()
+    /// Brings the newest message back into view after scrolling up.
+    private let scrollDownButton = ScrollDownButton()
 
     private var folder: URL { AgentHistoryStore.shared.folder(for: id) }
     /// A saved chat opens at its newest message once it has a size.
@@ -104,6 +106,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             addNote("Stopped")
         }
         finishToolRows()
+        transcript.hideThinking()
         transcript.closeToolGroup()
         endSession()
         for attachment in composer.attachments { try? FileManager.default.removeItem(at: attachment.url) }
@@ -151,7 +154,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         skillPicker.isHidden = true
         skillPicker.onPick = { [weak self] skill in self?.complete(skill) }
 
-        for view in [scrollView, separator, emptyState, tabBarHost, composer, skillPicker] as [NSView] {
+        scrollDownButton.target = self
+        scrollDownButton.action = #selector(scrollDown(_:))
+
+        for view in [scrollView, separator, emptyState, scrollDownButton, tabBarHost, composer, skillPicker] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -177,6 +183,9 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             emptyState.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor, constant: -10),
             emptyState.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             emptyState.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+
+            scrollDownButton.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            scrollDownButton.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: -10),
 
             tabBarHost.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             tabBarHost.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -211,6 +220,31 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     @objc private func transcriptScrolled(_ notification: Notification) {
         let scrolled = scrollView.contentView.bounds.minY > 1
         if (separator.alphaValue > 0) != scrolled { separator.alphaValue = scrolled ? 1 : 0 }
+        updateScrollDownButton()
+    }
+
+    /// The button shows once the newest message is more than a screen's
+    /// worth out of view.
+    private func updateScrollDownButton() {
+        let clip = scrollView.contentView.bounds
+        let away = transcript.frame.height - clip.maxY
+        scrollDownButton.setShown(away > max(80, clip.height * 0.5))
+    }
+
+    @objc private func scrollDown(_ sender: Any?) {
+        layoutSubtreeIfNeeded()
+        let clip = scrollView.contentView
+        let y = max(0, transcript.frame.height - clip.bounds.height)
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            clip.scroll(to: NSPoint(x: 0, y: y))
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.25
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                clip.animator().setBoundsOrigin(NSPoint(x: 0, y: y))
+            }
+        }
+        scrollView.reflectScrolledClipView(clip)
     }
 
     /// Settings or the picker changed the agent for new chats.
@@ -378,6 +412,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             try session.send(text, images: images, context: context?() ?? "", skill: skill(calledBy: text))
             if session.isRunning { setStatus("Working…", busy: true) }
             setBusy(true)
+            transcript.showThinking()
         } catch {
             addError((error as? ControlError)?.message ?? error.localizedDescription)
             endSession()
@@ -545,12 +580,15 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 records[index] = .tool(name: name, detail: detail, isError: isError, summary: summary)
                 saveRecords()
             }
+            // The agent is deciding what to do with the result.
+            if toolRows.isEmpty, isBusy { transcript.showThinking() }
         case .retrying:
             setStatus("Retrying…", busy: true)
         case .error(let message):
             addError(message)
         case .turnFinished(let error, let stopped):
             keepLiveText()
+            transcript.hideThinking()
             transcript.closeToolGroup()
             if let error { addError(error) }
             if stopped { addNote("Stopped") }
@@ -559,6 +597,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         case .exited(let message):
             keepLiveText()
             finishToolRows()
+            transcript.hideThinking()
             transcript.closeToolGroup()
             if resuming {
                 // The saved session couldn't be continued, so start over.
@@ -686,5 +725,63 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         let y = max(0, transcript.frame.height - clip.bounds.height)
         clip.scroll(to: NSPoint(x: 0, y: y))
         scrollView.reflectScrolledClipView(clip)
+    }
+}
+
+/// A round button with a down arrow that floats over the transcript while
+/// the newest message is out of view. It fades in and out.
+final class ScrollDownButton: NSButton {
+    private var shown = false
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        image = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: "Scroll to Newest")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
+        imagePosition = .imageOnly
+        isBordered = false
+        bezelStyle = .accessoryBarAction
+        contentTintColor = .labelColor
+        toolTip = "Scroll to Newest"
+        alphaValue = 0
+        isHidden = true
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 30),
+            heightAnchor.constraint(equalToConstant: 30),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setShown(_ show: Bool) {
+        guard show != shown else { return }
+        shown = show
+        if show { isHidden = false }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduceMotion ? 0 : 0.15
+            animator().alphaValue = show ? 1 : 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.shown else { return }
+                self.isHidden = true
+            }
+        }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        guard let layer else { return }
+        layer.cornerRadius = 15
+        layer.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer.borderWidth = 1
+        layer.borderColor = NSColor.separatorColor.cgColor
+        layer.shadowColor = NSColor.black.cgColor
+        layer.shadowOpacity = 0.18
+        layer.shadowRadius = 4
+        layer.shadowOffset = CGSize(width: 0, height: -1)
+        layer.shadowPath = CGPath(ellipseIn: bounds, transform: nil)
     }
 }

@@ -403,7 +403,7 @@ private final class StatusPill: NSView {
         self.busy = busy
         needsDisplay = true
         dot.layer?.removeAnimation(forKey: "pulse")
-        if busy {
+        if busy, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             let pulse = CABasicAnimation(keyPath: "opacity")
             pulse.fromValue = 1
             pulse.toValue = 0.25
