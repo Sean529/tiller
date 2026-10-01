@@ -101,6 +101,10 @@ What works: content scripts, background service workers, messaging, storage, `sc
 
 Chromium runs extensions in English, so Tiller shows their names from their English messages. Extensions have the same access to pages as in Chrome, and like the agent's tools, one that reads pages can read a password you fill.
 
+## Downloads
+
+Files download to `~/Downloads`, under a name no file there has yet (`name-2.ext` and so on). A button appears in the toolbar with the first download of the run: while files come in, a ring around it fills with their progress, and clicking it lists the downloads with each one's size or progress. A download under way has a button to cancel it, and a finished one opens when clicked, with a button to show it in the Finder. Clear forgets the finished ones. The list is kept only while Tiller runs.
+
 ## Default browser
 
 Tiller can be the Mac's default browser, for web links and HTML files opened from other apps. The first launch asks once, and Settings > General has a Make Default button, replaced by "Tiller is the default browser." once it is. macOS confirms the change with its own dialog. There is no way to stop being the default from Tiller: choose another browser in System Settings > Desktop & Dock, or in that browser.

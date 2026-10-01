@@ -206,6 +206,10 @@ wrap_client! {
         fn find_handler(&self) -> Option<FindHandler> {
             Some(TillerFindHandler::new())
         }
+
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(crate::downloads::TillerDownloadHandler::new())
+        }
     }
 }
 

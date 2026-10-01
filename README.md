@@ -12,6 +12,7 @@ https://github.com/user-attachments/assets/1960eca0-6cb0-460b-bb6f-b292b739a147
 
 - **Chromium engine, native shell.** Pages render with Chromium through CEF; the window, tabs and menus are AppKit.
 - **Tabs and session restore.** Open tabs and recently closed tabs survive restarts and crashes.
+- **Downloads.** Files go to `~/Downloads`, with progress in the toolbar.
 - **Import from Chrome.** Cookies, saved passwords, history, extensions, search engine and homepage.
 - **Chrome extensions.** Add unpacked folders or CRX files, or bring Chrome's over. Content scripts, background workers and popups run; Chrome's tab and window APIs don't see Tiller's tabs.
 - **Profiles.** Each profile has its own site data, history, passwords, settings and chats, and runs as its own app instance.

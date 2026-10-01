@@ -42,6 +42,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private var profileItem: NSToolbarItem?
     /// Extension buttons. Hidden when no extension is loaded.
     private let extensionBar = ExtensionBarView()
+    /// Hidden until the first download of the run.
+    private let downloadsButton = DownloadsButton()
+    private var downloadsItem: NSToolbarItem?
+    private var downloadsPopover: NSPopover?
     /// The extension popup while one is open.
     private var extensionPopover: ExtensionPopover?
     /// Nil while there is only one profile.
@@ -695,8 +699,39 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard let width = window?.frame.width else { return }
         let profileWidth = profileName == nil ? 0 : profileButton.fittingSize.width + 12
         let extensionsWidth = extensionBar.isEmpty ? 0 : extensionBar.fittingSize.width + 12
-        tabStripWidth.constant = max(200, width - 370 - profileWidth - extensionsWidth)
-        addressWidth.constant = max(200, width - 330 - profileWidth - extensionsWidth)
+        let downloadsWidth: CGFloat = downloadsItem?.isHidden == false ? 40 : 0
+        tabStripWidth.constant = max(200, width - 370 - profileWidth - extensionsWidth - downloadsWidth)
+        addressWidth.constant = max(200, width - 330 - profileWidth - extensionsWidth - downloadsWidth)
+    }
+
+    // MARK: Downloads
+
+    /// Shows the button with the first download and keeps its ring current.
+    private func downloadsChanged() {
+        downloadsButton.refresh()
+        let hidden = DownloadStore.shared.downloads.isEmpty
+        if downloadsItem?.isHidden != hidden {
+            downloadsItem?.isHidden = hidden
+            fitTabStrip()
+        }
+        (downloadsPopover?.contentViewController as? DownloadsController)?.reload()
+    }
+
+    /// A load that became a download leaves the tab on its page, so the tab
+    /// shouldn't keep the download's URL, or the session would fetch the file
+    /// again at the next launch.
+    private func downloadStarted(_ download: Download) {
+        guard let tab = tabs.first(where: { $0.browserID == download.tabID }) else { return }
+        tab.dropPendingLoad(of: [download.url, download.originalURL])
+    }
+
+    @objc private func showDownloads(_ sender: Any?) {
+        if let downloadsPopover, downloadsPopover.isShown { return downloadsPopover.close() }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = DownloadsController()
+        downloadsPopover = popover
+        popover.show(relativeTo: downloadsButton.bounds, of: downloadsButton, preferredEdge: .maxY)
     }
 
     // MARK: Tab layout
@@ -826,6 +861,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         static let agent = NSToolbarItem.Identifier("agent")
         static let profile = NSToolbarItem.Identifier("profile")
         static let extensions = NSToolbarItem.Identifier("extensions")
+        static let downloads = NSToolbarItem.Identifier("downloads")
     }
 
     private func configureControls() {
@@ -864,6 +900,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             agentBadge.trailingAnchor.constraint(equalTo: agentButton.trailingAnchor, constant: -3),
         ])
         agentPanel.onBusyChange = { [weak self] _ in self?.updateAgentBadge() }
+        downloadsButton.target = self
+        downloadsButton.action = #selector(showDownloads(_:))
+        DownloadStore.shared.onChange = { [weak self] in self?.downloadsChanged() }
+        DownloadStore.shared.onStart = { [weak self] download in self?.downloadStarted(download) }
 
         addressBar.field.target = self
         addressBar.field.action = #selector(addressEntered(_:))
@@ -902,10 +942,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         tabLayout == .vertical
-            ? [Item.back, Item.forward, Item.reload, Item.address, .flexibleSpace, Item.extensions, Item.profile, Item.agent]
+            ? [
+                Item.back, Item.forward, Item.reload, Item.address, .flexibleSpace, Item.extensions, Item.downloads,
+                Item.profile, Item.agent,
+            ]
             : [
                 Item.back, Item.forward, Item.reload, Item.tabs, Item.newTab, .flexibleSpace, Item.extensions,
-                Item.profile, Item.agent,
+                Item.downloads, Item.profile, Item.agent,
             ]
     }
 
@@ -929,6 +972,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             item.view = extensionBar
             item.label = "Extensions"
             item.isHidden = extensionBar.isEmpty
+        case Item.downloads:
+            item.view = downloadsButton
+            item.label = "Downloads"
+            item.isHidden = DownloadStore.shared.downloads.isEmpty
+            downloadsItem = item
         case Item.profile:
             item.view = profileButton
             item.label = "Profile"

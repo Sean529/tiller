@@ -76,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(profilesChanged(_:)), name: .profilesDidChange, object: nil
         )
         showProfile()
+        DownloadStore.shared.start()
         controlServer.browser = controller
         if !controlServer.start() {
             NSLog("Tiller: control socket unavailable, agent tools will not work")

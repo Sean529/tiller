@@ -4,6 +4,7 @@
 mod app_mac;
 mod browser;
 mod cookies;
+mod downloads;
 mod ipc;
 
 use cef::*;
@@ -96,6 +97,22 @@ pub extern "C" fn tiller_core_run() {
 #[unsafe(no_mangle)]
 pub extern "C" fn tiller_core_set_quit_handler(handler: Option<unsafe extern "C" fn()>) {
     app_mac::set_quit_handler(handler);
+}
+
+/// Sets the function told about every download's progress, on the main
+/// thread. Null clears it. See `TillerDownloadCallback` in tiller_core.h.
+///
+/// # Safety
+/// `ctx` must stay valid for as long as the handler is set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tiller_core_set_download_handler(ctx: *mut c_void, handler: Option<downloads::Callback>) {
+    downloads::set_handler(ctx, handler);
+}
+
+/// Cancels a download still under way. Its callback reports the change.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_download_cancel(id: u32) {
+    downloads::cancel(id);
 }
 
 /// Creates a browser filling `parent_view` (an `NSView *`). Returns the browser

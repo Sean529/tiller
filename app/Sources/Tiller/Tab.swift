@@ -33,6 +33,9 @@ final class Tab {
     /// for its first selection, so a launch with many tabs loads only one page.
     private(set) var isStarted = false
     private(set) var url = ""
+    /// The last URL the page actually went to. `url` runs ahead of it while
+    /// a load requested here is still on its way.
+    private(set) var committedURL = ""
     private(set) var title = ""
     private(set) var isLoading = false
     private(set) var canGoBack = false
@@ -84,6 +87,7 @@ final class Tab {
     func start(url: String, title: String = "") {
         isStarted = true
         self.url = url
+        committedURL = url
         self.title = title
         let size = hostView.bounds.size
         let callbacks = TillerBrowserCallbacks(
@@ -139,6 +143,15 @@ final class Tab {
     func load(_ url: String) {
         self.url = url
         tiller_browser_load_url(browserID, url)
+    }
+
+    /// Puts `url` back to the page the tab is on, for a requested load of one
+    /// of `urls` that turned out to be a download, which leaves the page
+    /// where it was.
+    func dropPendingLoad(of urls: [String]) {
+        guard urls.contains(url), committedURL != url else { return }
+        url = committedURL
+        delegate?.tabDidChange(self)
     }
 
     func goBack() { tiller_browser_go_back(browserID) }
@@ -198,6 +211,7 @@ final class Tab {
     nonisolated private func addressChanged(_ url: String) {
         MainActor.assumeIsolated {
             self.url = url
+            committedURL = url
             delegate?.tabDidChange(self)
         }
     }
