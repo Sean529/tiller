@@ -16,7 +16,7 @@ struct HistoryPage: Sendable {
 }
 
 /// A site on the start page.
-struct FrequentSite: Sendable {
+struct FrequentSite: Sendable, Equatable {
     let host: String
     /// The site's most visited page, which the tile opens.
     let url: String

@@ -93,16 +93,29 @@ final class StartPageView: NSView {
         }
     }
 
+    /// The sites shown now, so the same ones again leave the tiles alone.
+    private var shownSites: [FrequentSite] = []
+
     private func show(_ sites: [FrequentSite]) {
-        while grid.numberOfRows > 0 { grid.removeRow(at: 0) }
         content.isHidden = sites.isEmpty
         emptyHint.isHidden = !sites.isEmpty
+        guard sites != shownSites else { return }
+        shownSites = sites
+        while grid.numberOfRows > 0 { grid.removeRow(at: 0) }
         let tiles = sites.map { site in
             SiteTile(site: site) { [weak self] in self?.onOpen?(site.url) }
         }
         for start in stride(from: 0, to: tiles.count, by: Self.columns) {
             let row = Array(tiles[start..<min(start + Self.columns, tiles.count)])
             grid.addRow(with: row + Array(repeating: NSGridCell.emptyContentView, count: Self.columns - row.count))
+        }
+        // Tiles arrive a moment after the page, so they fade in rather than pop.
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        grid.alphaValue = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            grid.animator().alphaValue = 1
         }
     }
 }

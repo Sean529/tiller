@@ -34,7 +34,7 @@ final class TabStripView: NSView {
 
     private static let maxTabWidth: CGFloat = 240
     /// Below this, tabs show only their icon.
-    private static let titleMinWidth: CGFloat = 64
+    private static let titleMinWidth: CGFloat = 104
     private static let minTabWidth: CGFloat = 34
     private static let rowHeight: CGFloat = 34
     private static let animationDuration = 0.18

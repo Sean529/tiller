@@ -658,7 +658,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case #selector(fillPassword(_:)): selectedTab.map { !savedLogins(for: $0).isEmpty } ?? false
         case #selector(findNext(_:)), #selector(findPrevious(_:)): !findBar.text.isEmpty
         case #selector(actualSize(_:)): selectedTab.map { abs($0.zoomFactor - 1) > 0.001 } ?? false
-        case #selector(zoomIn(_:)), #selector(zoomOut(_:)), #selector(showFindBar(_:)): selectedTab != nil
+        case #selector(zoomIn(_:)), #selector(zoomOut(_:)): selectedTab != nil
+        // A blank tab has nothing to find in.
+        case #selector(showFindBar(_:)): selectedTab.map { !$0.isBlank } ?? false
         default: true
         }
     }
