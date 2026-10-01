@@ -1,9 +1,23 @@
 import AppKit
 import UniformTypeIdentifiers
 
+/// A bitmap on its way to becoming an attachment, handed to a background
+/// task. CGImage is immutable, which is what makes that safe.
+struct AttachmentSource: @unchecked Sendable {
+    let image: CGImage
+
+    /// The image's bitmap, which may decode it, so it is taken on the main
+    /// thread before the scaling and encoding leave it.
+    init?(_ image: NSImage) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        self.image = cgImage
+    }
+}
+
 /// An image attached to an agent message, scaled down and saved to a file.
 /// Claude Code and Qoder CLI get its bytes; Codex and Quick Look read the file.
-struct AgentAttachment {
+/// Made off the main thread; nothing changes it after.
+struct AgentAttachment: @unchecked Sendable {
     let url: URL
     let data: Data
     let mediaType: String
@@ -15,9 +29,10 @@ struct AgentAttachment {
     /// PNGs larger than this are sent as JPEG, to stay under the APIs' image size limits.
     private static let maxPNGBytes = 3_500_000
 
-    init?(image: NSImage, in directory: URL) {
-        guard let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-            let scaled = Self.scaled(source),
+    /// Scales, encodes and writes the image. Slow for a screenshot, so it
+    /// runs off the main thread.
+    nonisolated init?(source: AttachmentSource, in directory: URL) {
+        guard let scaled = Self.scaled(source.image),
             var data = NSBitmapImageRep(cgImage: scaled).representation(using: .png, properties: [:])
         else { return nil }
         var mediaType = "image/png", ext = "png"
@@ -51,7 +66,7 @@ struct AgentAttachment {
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
-    private static func scaled(_ image: CGImage) -> CGImage? {
+    nonisolated private static func scaled(_ image: CGImage) -> CGImage? {
         let longEdge = max(image.width, image.height)
         guard longEdge > maxPixels else { return image }
         let scale = CGFloat(maxPixels) / CGFloat(longEdge)

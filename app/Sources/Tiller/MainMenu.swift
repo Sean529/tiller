@@ -134,6 +134,7 @@ enum MainMenu {
     }
 
     @MainActor private static let historyMenu = HistoryMenuDelegate()
+    @MainActor fileprivate static var historyDelegate: HistoryMenuDelegate? { historyMenu }
     @MainActor private static let profilesMenu = ProfilesMenuDelegate()
 
     /// The Profiles menu, which the toolbar's profile button shows too.
@@ -194,6 +195,13 @@ enum MainMenu {
 private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
     private static let recentTag = 1001
     private static let limit = 15
+    /// The pages shown last time, and the history they came from. The menu
+    /// opens with these rather than waiting on the database, which an
+    /// import or a search may be holding, and asks for fresh ones.
+    private var pages: [HistoryPage] = []
+    private var pagesVersion = -1
+    /// The menu, for filling once fresh pages arrive.
+    private weak var menu: NSMenu?
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         // AppKit also asks while it looks for a shortcut's menu item, on every
@@ -203,12 +211,33 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
         {
             return
         }
+        self.menu = menu
+        let store = HistoryStore.shared
+        if store.version != pagesVersion {
+            let version = store.version
+            store.recent(limit: Self.limit) { pages in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self = MainMenu.historyDelegate else { return }
+                        self.pages = pages
+                        self.pagesVersion = version
+                        // Usually back before the menu has drawn; else the
+                        // items change under the mouse, which is fine.
+                        if let menu = self.menu { self.fill(menu) }
+                    }
+                }
+            }
+        }
+        fill(menu)
+    }
+
+    private func fill(_ menu: NSMenu) {
         for item in menu.items where item.tag == Self.recentTag {
             menu.removeItem(item)
         }
         // After Back, Forward and the separator.
         var index = 3
-        for page in HistoryStore.shared.recent(limit: Self.limit) {
+        for page in pages {
             var title = page.displayTitle
             if title.count > 60 { title = title.prefix(59) + "…" }
             let item = NSMenuItem(title: title, action: #selector(BrowserWindowController.openHistoryItem(_:)), keyEquivalent: "")

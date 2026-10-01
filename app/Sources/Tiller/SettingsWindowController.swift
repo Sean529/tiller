@@ -516,6 +516,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         alert.messageText = "Remove all saved passwords?"
         alert.informativeText = "Removes \(entries.count) passwords from Tiller. Chrome keeps its own."
         alert.addButton(withTitle: "Remove All")
+        alert.buttons[0].hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
@@ -558,7 +559,7 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
     override func loadView() {
         for (id, title, width) in [
             ("on", "On", 30.0), ("name", "Extension", 250.0), ("version", "Version", 80.0),
-            ("pinned", "Toolbar", 56.0), ("status", "Status", 140.0),
+            ("pinned", "Pinned", 56.0), ("status", "Status", 140.0),
         ] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = title
@@ -760,9 +761,26 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
         (NSApp.delegate as? AppDelegate)?.openInNewTab(url)
     }
 
+    /// Asks first: an extension Tiller copied or unpacked is deleted with it.
     @objc private func remove(_ sender: Any?) {
-        store.remove(at: table.selectedRowIndexes)
-        table.deselectAll(nil)
+        let indexes = table.selectedRowIndexes
+        let names = indexes.compactMap { store.entries.indices.contains($0) ? store.entries[$0] : nil }
+            .map { (try? store.manifest(for: $0).get())?.name ?? ($0.path as NSString).lastPathComponent }
+        guard !names.isEmpty, let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = names.count == 1 ? "Remove “\(names[0])”?" : "Remove \(names.count) extensions?"
+        alert.informativeText = "Its files are deleted from Tiller. The folder or file it was added from stays."
+        alert.addButton(withTitle: "Remove")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.store.remove(at: indexes)
+                self.table.deselectAll(nil)
+            }
+        }
     }
 }
 
@@ -839,7 +857,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         let pathRow = NSStackView(views: [kindPopUp, pathField, choosePath])
         pathRow.spacing = 8
         pathField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        addRow("Run:", Self.fixWidth(pathRow, Self.wideControlWidth))
+        addRow("Command:", Self.fixWidth(pathRow, Self.wideControlWidth))
         addNote(pathNote)
         loadPathField()
 
@@ -853,7 +871,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         tools.orientation = .vertical
         tools.alignment = .leading
         tools.spacing = 6
-        let toolsRow = addRow("Also allow:", tools)
+        let toolsRow = addRow("Allowed tools:", tools)
         toolsRow.rowAlignment = .none
         toolsRow.cell(at: 0).yPlacement = .top
         let toolsNote = Self.note(
@@ -870,7 +888,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseFolder(_:)))
         let folderRow = NSStackView(views: [Self.fixWidth(folderField, Self.wideControlWidth - 90), choose])
         folderRow.spacing = 8
-        addRow("Work in:", folderRow)
+        addRow("Working folder:", folderRow)
         addNote(folderNote)
         showFolderState()
 
@@ -1299,10 +1317,26 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder + "/SKILL.md")])
     }
 
+    /// Asks first: the skill's files leave the library.
     @objc private func remove(_ sender: Any?) {
-        store.remove(at: table.selectedRowIndexes)
-        table.deselectAll(nil)
-        showDefaultNote()
+        let indexes = table.selectedRowIndexes
+        let names = indexes.compactMap { store.entries.indices.contains($0) ? store.entries[$0].name : nil }
+        guard !names.isEmpty, let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = names.count == 1 ? "Remove “\(names[0])”?" : "Remove \(names.count) skills?"
+        alert.informativeText = "The skill is deleted from Tiller's library. Agents stop seeing it when they next start."
+        alert.addButton(withTitle: "Remove")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.store.remove(at: indexes)
+                self.table.deselectAll(nil)
+                self.showDefaultNote()
+            }
+        }
     }
 }
 

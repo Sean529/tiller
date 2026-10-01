@@ -117,7 +117,7 @@ Settings > Extensions lists the profile's extensions, with each one's status:
 - **Add Folder…** adds a folder with `manifest.json` in it. It is loaded from where it is, so edits to it apply at the next launch, and its id is the one Chrome's Load unpacked gives the same folder.
 - **Add CRX File…** unpacks a Chrome extension package into the profile. Its key goes into the manifest, so it keeps its Web Store id and adding a newer package updates it.
 - Tiller > Import from Chrome… brings over Chrome's (see [Import from Chrome](#import-from-chrome)).
-- **On** turns an extension on or off, **Toolbar** pins its button to the toolbar, **Options** opens its options page in a new tab, and **Remove** takes it out. Removing a folder leaves the folder alone; removing a package deletes Tiller's copy.
+- **On** turns an extension on or off, **Pinned** keeps its button in the toolbar, **Options** opens its options page in a new tab, and **Remove** takes it out. Removing a folder leaves the folder alone; removing a package deletes Tiller's copy.
 - Status is Running, Off, Starts or Stops at next launch, or an error: a manifest Tiller can't read, or one Chromium refused at launch, whose reason shows when you hover over it.
 
 The toolbar has an Extensions button with a menu of the running extensions, and a button for each pinned one. Choosing one opens its popup under the button, sized to the page from 25×25 up to 800×600 points; Cmd+W or a click elsewhere closes it. An extension without a popup opens its options page instead, and holding Option in the menu shows Options for the others. Right-click a pinned button to open its options or unpin it. Links a popup opens go to new tabs.

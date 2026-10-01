@@ -227,7 +227,7 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
     /// The selected tab's chat.
     private let current: String
     private let table = NSTableView()
-    private let emptyLabel = NSTextField(labelWithString: "No chats yet")
+    private let emptyLabel = NSTextField(labelWithString: "No Chats")
     private var scrollHeight: NSLayoutConstraint!
     private static let rowHeight: CGFloat = 48
     private static let width: CGFloat = 300

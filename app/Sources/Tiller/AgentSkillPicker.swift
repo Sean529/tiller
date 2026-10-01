@@ -2,8 +2,9 @@ import AppKit
 
 /// The list that opens above the message field while it holds a `/` and the
 /// start of a skill's name: matching skills with what they do. Arrow keys
-/// move the selection, and Tab, Return or a click completes the name.
-final class SkillPicker: NSView {
+/// move the selection, and Tab, Return or a click completes the name. It
+/// sits on the same material as the address bar's suggestions.
+final class SkillPicker: NSVisualEffectView {
     var onPick: ((AgentSkill) -> Void)?
 
     private let stack = NSStackView()
@@ -15,6 +16,9 @@ final class SkillPicker: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        material = .popover
+        blendingMode = .withinWindow
+        state = .active
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
@@ -70,19 +74,13 @@ final class SkillPicker: NSView {
         for (i, row) in rows.enumerated() { row.isSelected = i == index }
     }
 
-    override var wantsUpdateLayer: Bool { true }
-
     override func updateLayer() {
+        super.updateLayer()
         layer?.cornerRadius = 12
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.masksToBounds = true
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = 0.12
-        layer?.shadowRadius = 8
-        layer?.shadowOffset = CGSize(width: 0, height: -2)
-        layer?.masksToBounds = false
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.6).cgColor
     }
 }
 

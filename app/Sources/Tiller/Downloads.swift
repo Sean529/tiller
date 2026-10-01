@@ -172,12 +172,18 @@ final class DownloadsButton: NSButton {
 
 /// The list the downloads button shows: each file with its progress or
 /// outcome, a button to cancel or to show it in the Finder, and a button
-/// to clear the finished ones.
+/// to clear the finished ones. Rows are kept by download and updated in
+/// place, so progress ticks don't rebuild the list under the mouse.
 final class DownloadsController: NSViewController {
     private let rows = NSStackView()
+    private let scroll = NSScrollView()
     private let clearButton = NSButton(title: "Clear", target: nil, action: nil)
-    private let emptyLabel = NSTextField(labelWithString: "No downloads")
+    private let emptyLabel = NSTextField(labelWithString: "No Downloads")
+    private var rowViews: [UInt32: DownloadRowView] = [:]
+    private lazy var scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 0)
     private static let width: CGFloat = 320
+    /// The list scrolls past this many rows' worth of height.
+    private static let maxListHeight: CGFloat = 400
 
     override func loadView() {
         let header = NSTextField(labelWithString: "")
@@ -195,12 +201,23 @@ final class DownloadsController: NSViewController {
         rows.alignment = .width
         rows.spacing = 0
 
+        // The document view follows the clip view's width and its rows' height.
+        let document = DownloadListDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(rows)
+        scroll.documentView = document
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.automaticallyAdjustsContentInsets = false
+
         emptyLabel.font = .systemFont(ofSize: 12)
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
 
         let view = NSView()
-        for subview in [header, clearButton, rows, emptyLabel] {
+        for subview in [header, clearButton, scroll, emptyLabel] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(subview)
         }
@@ -210,31 +227,50 @@ final class DownloadsController: NSViewController {
             header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
             clearButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             clearButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
-            rows.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
-            rows.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
-            rows.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
-            rows.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -6),
-            emptyLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            emptyLabel.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 24),
-            emptyLabel.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -24),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -6),
+            scrollHeight,
+            rows.topAnchor.constraint(equalTo: document.topAnchor),
+            rows.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 6),
+            rows.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -6),
+            rows.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            emptyLabel.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
         ])
         self.view = view
         reload()
     }
 
-    /// Rebuilds the rows from the store.
+    /// Brings the rows up to date with the store: new downloads get rows,
+    /// gone ones lose them, and the rest update what they show.
     func reload() {
         let downloads = DownloadStore.shared.downloads
-        for row in rows.arrangedSubviews { row.removeFromSuperview() }
-        for download in downloads.prefix(12) {
-            let row = DownloadRowView(download: download)
-            rows.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+        var kept: [UInt32: DownloadRowView] = [:]
+        for (index, download) in downloads.enumerated() {
+            let row = rowViews[download.id] ?? DownloadRowView(download: download)
+            row.update(download)
+            if rows.arrangedSubviews.count <= index || rows.arrangedSubviews[index] !== row {
+                rows.insertArrangedSubview(row, at: min(index, rows.arrangedSubviews.count))
+                row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+            }
+            kept[download.id] = row
         }
+        for view in rows.arrangedSubviews where !(view is DownloadRowView && kept.values.contains { $0 === view }) {
+            view.removeFromSuperview()
+        }
+        rowViews = kept
         emptyLabel.isHidden = !downloads.isEmpty
         clearButton.isHidden = !downloads.contains { $0.state != .inProgress }
-        // Room for the hint when the list is empty.
-        rows.isHidden = downloads.isEmpty
+        // The list's place holds the hint while it is empty.
+        scroll.isHidden = downloads.isEmpty
+        rows.layoutSubtreeIfNeeded()
+        let listHeight = rows.fittingSize.height
+        scrollHeight.constant = downloads.isEmpty ? 56 : min(listHeight, Self.maxListHeight)
         preferredContentSize = view.fittingSize
     }
 
@@ -243,63 +279,55 @@ final class DownloadsController: NSViewController {
     }
 }
 
+/// A view whose origin is at the top, so a list in it starts there.
+private final class DownloadListDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 /// One download: the file's icon, name and state, with a cancel button
-/// while it is under way and a Finder button once it is on disk. Clicking
-/// a finished download opens the file.
+/// while it is under way and a Finder button once it is on disk. A download
+/// under way says how fast it is coming and how long is left. Clicking a
+/// finished download opens the file.
 private final class DownloadRowView: NSView {
-    private let download: Download
+    private var download: Download
     private var isHovered = false { didSet { needsDisplay = true } }
+    private let icon = NSImageView()
+    private let name = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private let progress = NSProgressIndicator()
+    private let action = NSButton()
+    /// The path the icon was loaded for. Asking the Finder for an icon
+    /// costs a trip to LaunchServices, so it happens once per file.
+    private var iconPath: String?
+    /// Recent (time, bytes) readings, for the speed.
+    private var readings: [(time: TimeInterval, bytes: Int64)] = []
 
     init(download: Download) {
         self.download = download
         super.init(frame: .zero)
         wantsLayer = true
 
-        let icon = NSImageView()
-        icon.image = download.path.isEmpty
-            ? NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
-            : NSWorkspace.shared.icon(forFile: download.path)
         icon.imageScaling = .scaleProportionallyUpOrDown
 
-        let name = NSTextField(labelWithString: download.name)
         name.font = .systemFont(ofSize: 13, weight: .medium)
         name.lineBreakMode = .byTruncatingMiddle
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let detail = NSTextField(labelWithString: Self.detail(for: download))
         detail.font = .systemFont(ofSize: 11)
-        detail.textColor = download.state == .failed ? .systemRed : .secondaryLabelColor
+        detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingTail
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let progress = NSProgressIndicator()
         progress.style = .bar
         progress.controlSize = .small
         progress.minValue = 0
         progress.maxValue = 1
-        progress.isIndeterminate = download.fraction == nil
-        progress.doubleValue = download.fraction ?? 0
-        progress.isHidden = download.state != .inProgress
-        if download.state == .inProgress && download.fraction == nil { progress.startAnimation(nil) }
 
-        let action = NSButton()
         action.isBordered = false
         action.bezelStyle = .accessoryBarAction
         action.imagePosition = .imageOnly
         action.contentTintColor = .secondaryLabelColor
         action.target = self
-        switch download.state {
-        case .inProgress:
-            action.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Cancel")
-            action.toolTip = "Cancel"
-            action.action = #selector(cancel(_:))
-        case .complete:
-            action.image = NSImage(systemSymbolName: "magnifyingglass.circle.fill", accessibilityDescription: "Show in Finder")
-            action.toolTip = "Show in Finder"
-            action.action = #selector(reveal(_:))
-        case .canceled, .failed:
-            action.isHidden = true
-        }
 
         let text = NSStackView(views: [name, detail, progress])
         text.orientation = .vertical
@@ -326,26 +354,101 @@ private final class DownloadRowView: NSView {
             action.centerYAnchor.constraint(equalTo: centerYAnchor),
             action.widthAnchor.constraint(equalToConstant: 22),
         ])
-        toolTip = download.url
         setAccessibilityRole(.button)
-        setAccessibilityLabel("\(download.name), \(Self.detail(for: download))")
+        update(download, force: true)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private static func detail(for download: Download) -> String {
+    /// Shows the download as it stands now.
+    func update(_ download: Download, force: Bool = false) {
+        let stateChanged = force || download.state != self.download.state
+        self.download = download
+        if download.state == .inProgress {
+            let now = Date().timeIntervalSinceReferenceDate
+            readings.append((now, download.received))
+            readings.removeAll { now - $0.time > 5 }
+        }
+        if iconPath != download.path || force {
+            iconPath = download.path
+            icon.image = download.path.isEmpty
+                ? NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
+                : NSWorkspace.shared.icon(forFile: download.path)
+        }
+        if name.stringValue != download.name { name.stringValue = download.name }
+        let text = detailText()
+        if detail.stringValue != text { detail.stringValue = text }
+        detail.textColor = download.state == .failed ? .systemRed : .secondaryLabelColor
+        let indeterminate = download.fraction == nil
+        if progress.isIndeterminate != indeterminate {
+            progress.isIndeterminate = indeterminate
+            if indeterminate && download.state == .inProgress { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+        }
+        progress.doubleValue = download.fraction ?? 0
+        progress.isHidden = download.state != .inProgress
+        if stateChanged {
+            if download.state != .inProgress { progress.stopAnimation(nil) } else if indeterminate { progress.startAnimation(nil) }
+            action.isHidden = false
+            switch download.state {
+            case .inProgress:
+                action.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Cancel")
+                action.toolTip = "Cancel"
+                action.action = #selector(cancel(_:))
+            case .complete:
+                action.image = NSImage(systemSymbolName: "magnifyingglass.circle.fill", accessibilityDescription: "Show in Finder")
+                action.toolTip = "Show in Finder"
+                action.action = #selector(reveal(_:))
+            case .canceled, .failed:
+                action.isHidden = true
+            }
+            toolTip = download.url
+            needsDisplay = true
+        }
+        setAccessibilityLabel("\(download.name), \(text)")
+    }
+
+    private static let bytes: ByteCountFormatter = {
         let format = ByteCountFormatter()
         format.countStyle = .file
+        return format
+    }()
+
+    /// Bytes a second over the last few seconds, or nil before two readings.
+    private var speed: Double? {
+        guard let first = readings.first, let last = readings.last, last.time - first.time > 0.5 else { return nil }
+        return Double(last.bytes - first.bytes) / (last.time - first.time)
+    }
+
+    private func detailText() -> String {
+        let format = Self.bytes
         switch download.state {
         case .inProgress:
             let received = format.string(fromByteCount: download.received)
-            return download.total > 0 ? "\(received) of \(format.string(fromByteCount: download.total))" : received
+            var text = download.total > 0 ? "\(received) of \(format.string(fromByteCount: download.total))" : received
+            if let speed, speed > 0 {
+                if download.total > 0 {
+                    let left = Double(download.total - download.received) / speed
+                    text += " · " + Self.timeLeft(left)
+                } else {
+                    text += " · \(format.string(fromByteCount: Int64(speed)))/s"
+                }
+            }
+            return text
         case .complete:
             return format.string(fromByteCount: max(download.received, download.total))
         case .canceled:
             return "Canceled"
         case .failed:
             return "Failed"
+        }
+    }
+
+    private static func timeLeft(_ seconds: Double) -> String {
+        switch seconds {
+        case ..<5: "A few seconds left"
+        case ..<60: "\(Int(seconds.rounded())) seconds left"
+        case ..<3600: "\(Int((seconds / 60).rounded())) min left"
+        default: "\(Int((seconds / 3600).rounded())) hr left"
         }
     }
 

@@ -473,11 +473,27 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// Adds pasted, dropped or chosen images to the message, up to the limit.
     /// Beeps for any that don't fit or can't be read.
     private func attach(_ images: [NSImage]) {
-        let room = max(0, AgentAttachment.maxCount - composer.attachments.count)
-        let added = images.prefix(room).compactMap { AgentAttachment(image: $0, in: folder) }
-        if added.count < images.count { NSSound.beep() }
-        composer.attachments += added
+        let room = max(0, AgentAttachment.maxCount - composer.attachments.count - pendingAttachments)
+        let sources = images.prefix(room).compactMap(AttachmentSource.init)
+        if sources.count < images.count { NSSound.beep() }
+        guard !sources.isEmpty else { return }
+        // Scaling and encoding a screenshot takes a moment, so it happens
+        // off the main thread and the thumbnails follow.
+        pendingAttachments += sources.count
+        let folder = folder
+        Task { [weak self] in
+            let added = await Task.detached(priority: .userInitiated) {
+                sources.compactMap { AgentAttachment(source: $0, in: folder) }
+            }.value
+            guard let self else { return }
+            self.pendingAttachments -= sources.count
+            if added.count < sources.count { NSSound.beep() }
+            self.composer.attachments += added
+        }
     }
+
+    /// Images still being encoded, which count against the limit.
+    private var pendingAttachments = 0
 
     @objc private func chooseImages(_ sender: Any?) {
         guard let window else { return }

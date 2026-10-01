@@ -726,7 +726,7 @@ final class ErrorMessageView: NSView, TranscriptRow {
         label = NSTextField(wrappingLabelWithString: text)
         super.init(frame: .zero)
         wantsLayer = true
-        label.font = .systemFont(ofSize: 12)
+        label.font = .systemFont(ofSize: 13)
         label.textColor = .labelColor
         label.isSelectable = true
         let icon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Error")!

@@ -80,7 +80,10 @@ enum Profiles {
     }
 
     /// Makes the current profile the one a plain launch and the CLI pick.
+    /// Called on every activation, so the lock is only taken when the list
+    /// says another profile.
     static func markUsed() {
+        guard read().lastUsed != current.id else { return }
         update { $0.lastUsed = current.id }
     }
 

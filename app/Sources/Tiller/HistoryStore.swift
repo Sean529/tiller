@@ -130,14 +130,13 @@ final class HistoryStore: @unchecked Sendable {
         }
     }
 
-    /// Most recently visited first. Blocks until the query finishes, which is
-    /// quick for a small `limit`.
-    func recent(limit: Int) -> [HistoryPage] {
-        queue.sync {
-            (try? db?.query(
+    /// Most recently visited first. `completion` runs on the store's queue.
+    func recent(limit: Int, completion: @escaping @Sendable ([HistoryPage]) -> Void) {
+        queue.async { [db] in
+            completion((try? db?.query(
                 "SELECT url, title, visit_count, last_visit FROM pages ORDER BY last_visit DESC LIMIT ?",
                 [limit], row: Self.page
-            )) ?? []
+            )) ?? [])
         }
     }
 

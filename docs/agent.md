@@ -46,11 +46,11 @@ By default the agent gets Tiller's [browser and skill tools](tools.md) and, apar
 | Only Tiller's MCP server | `--mcp-config <file> --strict-mcp-config` | same | `mcp_servers.tiller` in `config`, with Tiller's own `CODEX_HOME` so your `config.toml` servers don't load |
 | Tiller's tools allowed without asking | `--allowed-tools mcp__tiller --permission-mode dont_ask` | `--allowedTools mcp__tiller --permission-mode dontAsk` | `default_tools_approval_mode = "approve"` on the server, `approvalPolicy: "never"` for everything else |
 
-The MCP config is written to `agent-mcp.json` in the profile's folder and points at the `tiller_mcp` inside the running app. Claude Code and Qoder CLI also get `--add-dir` with the [skill library](#tillers-skill-library). The agent runs in the empty `agent` directory in the profile's folder, or in the folder set in Settings > Agent > Work in. A real project folder loads that project's instructions and settings too.
+The MCP config is written to `agent-mcp.json` in the profile's folder and points at the `tiller_mcp` inside the running app. Claude Code and Qoder CLI also get `--add-dir` with the [skill library](#tillers-skill-library). The agent runs in the empty `agent` directory in the profile's folder, or in the folder set in Settings > Agent > Working folder. A real project folder loads that project's instructions and settings too.
 
 ### Optional built-in tools
 
-Settings > Agent > Also allow turns on built-in tools, all off by default. They run without asking, and pages the agent reads can try to steer it, so turn on only what you need. Settings sets the tools a new chat starts with.
+Settings > Agent > Allowed tools turns on built-in tools, all off by default. They run without asking, and pages the agent reads can try to steer it, so turn on only what you need. Settings sets the tools a new chat starts with.
 
 Each chat can change its own with the wrench button in the row above the message field, which turns blue when any is on. Its menu has the same three choices and applies only to that chat. The choice is saved with the chat, so it comes back with the open tabs and when the chat is opened from the list. The CLIs take their tools when they start, so a change stops the chat's agent and the next message resumes its session with the new tools. The menu is locked while a turn runs. For Codex, reading and running commands show as always on. Chats saved before this use the tools in Settings.
 

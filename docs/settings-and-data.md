@@ -18,7 +18,7 @@ Tiller > Settings… (Cmd+,) has six panes: General, Passwords, Extensions (see 
 | Agent | New chats use: Qoder CLI, Claude Code or Codex | Qoder CLI | next new chat; same as the picker in the panel |
 | Agent | Chat tabs: how many chats the panel keeps open at once, 1 to 9 | 3 | right away; tabs already open stay |
 | Agent | Show and hide shortcut: click, then press a combination with Cmd or Ctrl. Delete clears it; one already in a menu is refused | Cmd+Shift+S | right away |
-| Agent | Run: pick a CLI, then the file to run it from | empty, meaning look it up | next new chat |
+| Agent | Command: pick a CLI, then the file to run it from | empty, meaning look it up | next new chat |
 | Agent | Extra instructions, added after Tiller's system prompt | empty | next new chat |
 | Skills | Each skill in the library: on or off, added from a folder, archive or Git, or removed | none | a chat's next agent start |
 
