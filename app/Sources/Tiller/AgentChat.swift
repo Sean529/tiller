@@ -52,6 +52,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private let quickLook = QuickLookItems()
 
     private var folder: URL { AgentHistoryStore.shared.folder(for: id) }
+    /// A saved chat opens at its newest message once it has a size.
+    private var pendingScrollToBottom = false
 
     /// A new chat, or a saved one with its transcript.
     init(conversation: AgentConversation? = nil) {
@@ -64,6 +66,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             records = AgentHistoryStore.shared.records(for: id)
             records.forEach(show)
             transcript.closeToolGroup()
+            pendingScrollToBottom = !records.isEmpty
         }
         showIdle()
         NotificationCenter.default.addObserver(
@@ -163,6 +166,13 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             composer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
+    }
+
+    override func layout() {
+        super.layout()
+        guard pendingScrollToBottom, bounds.height > 0, !isHidden else { return }
+        pendingScrollToBottom = false
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.scrollToBottom() } }
     }
 
     @objc private func transcriptScrolled(_ notification: Notification) {

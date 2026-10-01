@@ -660,6 +660,12 @@ enum AgentMarkdown {
     enum Block {
         case text(NSAttributedString)
         case table(Table)
+        /// A fenced code block, with the language named after the opening fence.
+        case code(language: String, text: String)
+        /// Lines quoted with `>`, already rendered.
+        case quote(NSAttributedString)
+        /// A horizontal rule.
+        case rule
     }
 
     static func label(_ text: String) -> MarkdownMessageView {
@@ -668,12 +674,13 @@ enum AgentMarkdown {
         return view
     }
 
-    /// The message as runs of text with the tables between them.
+    /// The message as runs of text with the code blocks, tables, quotes and
+    /// rules between them. A fence still open at the end, as while an answer
+    /// streams, is a code block too.
     static func blocks(_ text: String) -> [Block] {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var blocks: [Block] = []
         var pending: [String] = []
-        var inFence = false
         func flush() {
             let text = render(pending.joined(separator: "\n"))
             pending.removeAll()
@@ -682,12 +689,59 @@ enum AgentMarkdown {
         var index = 0
         while index < lines.count {
             let line = lines[index]
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                inFence.toggle()
-            } else if !inFence, let (table, end) = table(in: lines, at: index) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                flush()
+                let language = trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                var end = index + 1
+                while end < lines.count, !lines[end].trimmingCharacters(in: .whitespaces).hasPrefix("```") { end += 1 }
+                blocks.append(.code(language: language, text: lines[(index + 1)..<end].joined(separator: "\n")))
+                index = end + 1
+                continue
+            }
+            if let (table, end) = table(in: lines, at: index) {
                 flush()
                 blocks.append(.table(table))
                 index = end
+                continue
+            }
+            if trimmed.hasPrefix(">") {
+                flush()
+                var end = index
+                var quoted: [String] = []
+                while end < lines.count {
+                    let inner = lines[end].trimmingCharacters(in: .whitespaces)
+                    guard inner.hasPrefix(">") else { break }
+                    var content = inner.dropFirst()
+                    if content.hasPrefix(" ") { content = content.dropFirst() }
+                    quoted.append(String(content))
+                    end += 1
+                }
+                let text = NSMutableAttributedString(attributedString: render(quoted.joined(separator: "\n")))
+                text.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: text.length))
+                blocks.append(.quote(text))
+                index = end
+                continue
+            }
+            // A line of dashes under a paragraph underlines a heading; on its
+            // own, like a line of stars or underscores, it is a rule.
+            if let last = pending.last, !last.trimmingCharacters(in: .whitespaces).isEmpty, !isBlockStart(last),
+                let level = setextLevel(trimmed)
+            {
+                // The whole paragraph is the heading, not just its last line.
+                var start = pending.count - 1
+                while start > 0, !pending[start - 1].trimmingCharacters(in: .whitespaces).isEmpty, !isBlockStart(pending[start - 1]) {
+                    start -= 1
+                }
+                let heading = pending[start...].map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " ")
+                pending.replaceSubrange(start..., with: [String(repeating: "#", count: level) + " " + heading])
+                index += 1
+                continue
+            }
+            if isRule(trimmed) {
+                flush()
+                blocks.append(.rule)
+                index += 1
                 continue
             }
             pending.append(line)
@@ -695,6 +749,27 @@ enum AgentMarkdown {
         }
         flush()
         return blocks
+    }
+
+    /// Three or more of the same of `-`, `*` or `_`, spaces allowed between.
+    private static func isRule(_ line: String) -> Bool {
+        let marks = line.filter { $0 != " " }
+        guard marks.count >= 3, let first = marks.first, "-*_".contains(first) else { return false }
+        return marks.allSatisfy { $0 == first }
+    }
+
+    /// 1 for a line of `=`, 2 for a line of `-`, else nil.
+    private static func setextLevel(_ line: String) -> Int? {
+        guard line.count >= 3, let first = line.first, "=-".contains(first), line.allSatisfy({ $0 == first }) else { return nil }
+        return first == "=" ? 1 : 2
+    }
+
+    /// Whether a line already starts a heading or list item, which a line of
+    /// dashes after it doesn't turn into a heading.
+    private static func isBlockStart(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("#") || trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") { return true }
+        return trimmed.first?.isNumber == true && trimmed.contains(". ")
     }
 
     /// The table whose header is the line at `start`, and the line after its
@@ -954,8 +1029,8 @@ final class MarkdownMessageView: NSView, TranscriptRow {
 
     private func fit(_ view: NSView) {
         guard width > 0 else { return }
-        if let table = view as? MarkdownTableView {
-            table.fit(width: width)
+        if let row = view as? TranscriptRow {
+            row.fit(width: width)
         } else if let label = view as? NSTextField {
             label.preferredMaxLayoutWidth = width
         }
@@ -970,7 +1045,7 @@ final class MarkdownMessageView: NSView, TranscriptRow {
             switch block {
             case .text(let text):
                 if let label = existing as? NSTextField {
-                    label.attributedStringValue = text
+                    if label.attributedStringValue != text { label.attributedStringValue = text }
                 } else {
                     let label = NSTextField(wrappingLabelWithString: "")
                     label.isSelectable = true
@@ -987,6 +1062,24 @@ final class MarkdownMessageView: NSView, TranscriptRow {
                     view.table = table
                     place(view, at: index, replacing: existing)
                 }
+            case .code(let language, let code):
+                if let view = existing as? MarkdownCodeView {
+                    view.set(language: language, code: code)
+                } else {
+                    let view = MarkdownCodeView()
+                    view.set(language: language, code: code)
+                    place(view, at: index, replacing: existing)
+                }
+            case .quote(let text):
+                if let view = existing as? MarkdownQuoteView {
+                    view.text = text
+                } else {
+                    let view = MarkdownQuoteView()
+                    view.text = text
+                    place(view, at: index, replacing: existing)
+                }
+            case .rule:
+                if !(existing is MarkdownRuleView) { place(MarkdownRuleView(), at: index, replacing: existing) }
             }
         }
         for view in stack.arrangedSubviews.dropFirst(blocks.count) { view.removeFromSuperview() }
@@ -1001,14 +1094,104 @@ final class MarkdownMessageView: NSView, TranscriptRow {
 }
 
 /// A markdown table: a bold header, a rule between rows, and cells that wrap
-/// so the table never runs wider than the transcript.
-final class MarkdownTableView: NSView {
+/// to the transcript's width. One whose columns can't wrap that narrow and
+/// stay readable keeps them wider and scrolls sideways instead.
+final class MarkdownTableView: NSView, TranscriptRow {
+    private let scroll = NSScrollView()
+    private let content = MarkdownTableContentView()
+    private var width: CGFloat = 0
+    private lazy var height = heightAnchor.constraint(equalToConstant: 0)
+
+    var table: AgentMarkdown.Table? {
+        didSet {
+            content.table = table
+            relayout()
+        }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        scroll.hasHorizontalScroller = true
+        scroll.hasVerticalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = false
+        scroll.verticalScrollElasticity = .none
+        scroll.documentView = content
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.wantsLayer = true
+        addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            height,
+        ])
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(scrolled(_:)), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func fit(width: CGFloat) {
+        guard width != self.width else { return }
+        self.width = width
+        relayout()
+    }
+
+    private func relayout() {
+        guard width > 0 else { return }
+        content.arrange(width: width)
+        content.frame = NSRect(origin: .zero, size: content.tableSize)
+        if height.constant != content.tableSize.height { height.constant = content.tableSize.height }
+        updateFade()
+    }
+
+    @objc private func scrolled(_ notification: Notification) {
+        updateFade()
+    }
+
+    /// Fades the edges where more of the table lies, so a clipped table reads
+    /// as one that scrolls.
+    private func updateFade() {
+        let visible = scroll.contentView.bounds
+        let hiddenLeft = visible.minX > 1
+        let hiddenRight = content.tableSize.width - visible.maxX > 1
+        guard hiddenLeft || hiddenRight else {
+            scroll.layer?.mask = nil
+            return
+        }
+        let mask = (scroll.layer?.mask as? CAGradientLayer) ?? CAGradientLayer()
+        mask.startPoint = CGPoint(x: 0, y: 0.5)
+        mask.endPoint = CGPoint(x: 1, y: 0.5)
+        let fade = min(0.2, 28 / max(1, visible.width))
+        let clear = NSColor.clear.cgColor, opaque = NSColor.black.cgColor
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mask.frame = scroll.bounds
+        mask.colors = [hiddenLeft ? clear : opaque, opaque, opaque, hiddenRight ? clear : opaque]
+        mask.locations = [0, NSNumber(value: fade), NSNumber(value: 1 - fade), 1]
+        scroll.layer?.mask = mask
+        CATransaction.commit()
+    }
+
+    override func layout() {
+        super.layout()
+        updateFade()
+    }
+}
+
+/// The table itself, laid out for a width and drawn at its own size.
+final class MarkdownTableContentView: NSView {
     private static let padding = NSSize(width: 8, height: 5)
-    private static let minimumColumn: CGFloat = 36
+    /// Narrower than this, a column's words would break mid-word.
+    private static let minimumColumn: CGFloat = 72
 
     private var labels: [[NSTextField]] = []
     private var width: CGFloat = 0
-    private var tableSize = NSSize.zero
+    private(set) var tableSize = NSSize.zero
     /// Where each row starts, and the bottom of the last.
     private var rowEdges: [CGFloat] = []
 
@@ -1026,15 +1209,16 @@ final class MarkdownTableView: NSView {
                     return label
                 }
             }
-            arrange()
+            if width > 0 { arrange(width: width) }
         }
     }
 
     override var isFlipped: Bool { true }
-    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: tableSize.height) }
 
-    func fit(width: CGFloat) {
-        guard width != self.width else { return }
+    /// Lays the cells out for `width`: narrow columns keep their natural
+    /// width, the wide ones share what is left, and none goes under the
+    /// minimum, so `tableSize` may come out wider than asked.
+    func arrange(width: CGFloat) {
         self.width = width
         arrange()
     }
@@ -1084,7 +1268,6 @@ final class MarkdownTableView: NSView {
             rowEdges.append(y)
         }
         tableSize = NSSize(width: widths.reduce(0, +) + CGFloat(columns) * 2 * padding.width, height: y)
-        invalidateIntrinsicContentSize()
         needsDisplay = true
     }
 
@@ -1104,5 +1287,197 @@ final class MarkdownTableView: NSView {
         NSColor.separatorColor.setStroke()
         outline.lineWidth = 1
         outline.stroke()
+    }
+}
+
+/// A fenced code block: monospaced text on a rounded plate, with the language
+/// and a copy button in its top corner. Long lines wrap at any character so
+/// the block never runs wider than the transcript.
+final class MarkdownCodeView: NSView, TranscriptRow {
+    private let label = NSTextField(wrappingLabelWithString: "")
+    private let languageLabel = NSTextField(labelWithString: "")
+    private let copyButton = NSButton()
+    private var code = ""
+    private var width: CGFloat = 0
+    private var labelTrailing: NSLayoutConstraint!
+    private var copiedReset: DispatchWorkItem?
+    private var isHovered = false { didSet { updateButtons() } }
+
+    private static let padding = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+    private static let font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+    private static let copyImage = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy Code")?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+    private static let copiedImage = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Copied")?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        label.font = Self.font
+        label.isSelectable = true
+        label.lineBreakMode = .byCharWrapping
+        label.cell?.wraps = true
+
+        languageLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        languageLabel.textColor = .tertiaryLabelColor
+
+        copyButton.image = Self.copyImage
+        copyButton.isBordered = false
+        copyButton.bezelStyle = .accessoryBarAction
+        copyButton.imagePosition = .imageOnly
+        copyButton.contentTintColor = .tertiaryLabelColor
+        copyButton.toolTip = "Copy Code"
+        copyButton.target = self
+        copyButton.action = #selector(copyCode(_:))
+
+        for view in [label, languageLabel, copyButton] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        let p = Self.padding
+        labelTrailing = label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -p.right)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: topAnchor, constant: p.top),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: p.left),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -p.bottom),
+            labelTrailing,
+            copyButton.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            copyButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            copyButton.widthAnchor.constraint(equalToConstant: 22),
+            copyButton.heightAnchor.constraint(equalToConstant: 22),
+            languageLabel.centerYAnchor.constraint(equalTo: copyButton.centerYAnchor),
+            languageLabel.trailingAnchor.constraint(equalTo: copyButton.leadingAnchor, constant: -2),
+        ])
+        updateButtons()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func set(language: String, code: String) {
+        if languageLabel.stringValue != language {
+            languageLabel.stringValue = language
+            languageLabel.isHidden = language.isEmpty
+        }
+        guard code != self.code else { return }
+        self.code = code
+        label.stringValue = code.isEmpty ? " " : code
+        // The first line keeps clear of the language and the copy button.
+        let reserved = 22 + (language.isEmpty ? 0 : languageLabel.fittingSize.width + 6)
+        labelTrailing.constant = -(Self.padding.right + reserved)
+        if width > 0 { fit(width: width) }
+    }
+
+    func fit(width: CGFloat) {
+        self.width = width
+        label.preferredMaxLayoutWidth = width - Self.padding.left + labelTrailing.constant
+    }
+
+    @objc private func copyCode(_ sender: Any?) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(code, forType: .string)
+        copyButton.image = Self.copiedImage
+        copyButton.contentTintColor = .systemGreen
+        copyButton.toolTip = "Copied"
+        copiedReset?.cancel()
+        let reset = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.copyButton.image = Self.copyImage
+                self.copyButton.toolTip = "Copy Code"
+                self.copiedReset = nil
+                self.updateButtons()
+            }
+        }
+        copiedReset = reset
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: reset)
+    }
+
+    private func updateButtons() {
+        guard copiedReset == nil else { return }
+        copyButton.contentTintColor = isHovered ? .secondaryLabelColor : .tertiaryLabelColor
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.cgColor
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+}
+
+/// A block quote: dimmed text beside a bar.
+final class MarkdownQuoteView: NSView, TranscriptRow {
+    private let bar = NSView()
+    private let label = NSTextField(wrappingLabelWithString: "")
+    private static let inset: CGFloat = 14
+
+    var text: NSAttributedString? {
+        didSet {
+            guard let text, text != oldValue else { return }
+            label.attributedStringValue = text
+        }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        bar.wantsLayer = true
+        bar.layer?.cornerRadius = 1.5
+        label.isSelectable = true
+        label.allowsEditingTextAttributes = true
+        for view in [bar, label] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            bar.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            bar.widthAnchor.constraint(equalToConstant: 3),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor),
+            label.topAnchor.constraint(equalTo: topAnchor),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func fit(width: CGFloat) {
+        label.preferredMaxLayoutWidth = width - Self.inset
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        bar.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.18).cgColor
+    }
+}
+
+/// A horizontal rule.
+final class MarkdownRuleView: NSView {
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        heightAnchor.constraint(equalToConstant: 1).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.separatorColor.cgColor
     }
 }
