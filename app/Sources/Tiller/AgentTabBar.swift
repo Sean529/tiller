@@ -227,7 +227,7 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
     private var items: [Item]
     /// The selected tab's chat.
     private let current: String
-    private let table = NSTableView()
+    private let table = HistoryTableView()
     private let emptyLabel = NSTextField(labelWithString: "No Chats")
     private var scrollHeight: NSLayoutConstraint!
     private static let rowHeight: CGFloat = 48
@@ -262,6 +262,9 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked(_:))
+        // Arrow keys move the selection, Return opens it and Delete removes it.
+        table.onReturn = { [weak self] in self?.openSelected() }
+        table.onDelete = { [weak self] in self?.deleteSelected() }
         let menu = NSMenu()
         menu.addItem(withTitle: "Delete", action: #selector(deleteClicked(_:)), keyEquivalent: "").target = self
         table.menu = menu
@@ -298,6 +301,12 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
         ])
         self.view = view
         reload(items)
+    }
+
+    /// The keyboard goes to the list, so the arrow keys work at once.
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(table)
     }
 
     /// Up to about seven chats show before the list scrolls.
@@ -341,6 +350,20 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
         onDelete?(items[row].conversation.id)
     }
 
+    private func openSelected() {
+        let row = table.selectedRow
+        guard items.indices.contains(row) else { return }
+        onOpen?(items[row].conversation.id)
+    }
+
+    private func deleteSelected() {
+        let row = table.selectedRow
+        guard items.indices.contains(row) else { return }
+        onDelete?(items[row].conversation.id)
+        // Keep a row under the keyboard.
+        if !items.isEmpty { table.selectRowIndexes([min(row, items.count - 1)], byExtendingSelection: false) }
+    }
+
     /// The time today, "Yesterday", then the date, with the year if not this one.
     private static func dateText(_ date: Date) -> String {
         let calendar = Calendar.current
@@ -353,15 +376,31 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
     }
 }
 
-/// A row of the history list: highlighted on hover, and marked with an
-/// accent bar at its edge for the selected tab's chat.
+/// The list of chats, which answers Return and Delete for the row selected
+/// with the arrow keys.
+private final class HistoryTableView: NSTableView {
+    var onReturn: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76: onReturn?()  // Return, Enter
+        case 51, 117: onDelete?()  // Delete, forward delete
+        default: super.keyDown(with: event)
+        }
+    }
+}
+
+/// A row of the history list: highlighted on hover or when selected with
+/// the keyboard, and marked with an accent bar at its edge for the selected
+/// tab's chat.
 private final class HistoryRowView: NSTableRowView {
     var isCurrent = false
     private var isHovered = false { didSet { needsDisplay = true } }
 
     override func drawBackground(in dirtyRect: NSRect) {
-        if isCurrent || isHovered {
-            NSColor.labelColor.withAlphaComponent(isHovered ? 0.08 : 0.05).setFill()
+        if isCurrent || isHovered || isSelected {
+            NSColor.labelColor.withAlphaComponent(isHovered || isSelected ? 0.08 : 0.05).setFill()
             bounds.fill()
         }
         if isCurrent {
