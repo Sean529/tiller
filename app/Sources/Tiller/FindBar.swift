@@ -13,49 +13,43 @@ final class FindBar: NSView, NSTextFieldDelegate {
     let field = NSTextField()
     private let glass = NSGlassEffectView()
     private let countLabel = NSTextField(labelWithString: "")
-    private let previousButton = NSButton()
-    private let nextButton = NSButton()
+    private let previousButton = FindBar.button("chevron.up", "Previous Match (Shift+Return)")
+    private let nextButton = FindBar.button("chevron.down", "Next Match (Return)")
 
     var text: String { field.stringValue }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
 
-        let icon = NSImageView(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)!
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!)
+        let icon = NSImageView(image: Theme.symbol("magnifyingglass", size: Theme.Symbol.inline) ?? NSImage())
         icon.contentTintColor = .secondaryLabelColor
 
         field.placeholderString = "Find in page"
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 13)
+        field.font = .systemFont(ofSize: Theme.FontSize.body)
         field.usesSingleLineMode = true
         field.lineBreakMode = .byTruncatingTail
         field.cell?.isScrollable = true
         field.delegate = self
 
-        countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        countLabel.font = .monospacedDigitSystemFont(ofSize: Theme.FontSize.caption, weight: .regular)
         countLabel.textColor = .secondaryLabelColor
         countLabel.alignment = .right
         countLabel.setContentHuggingPriority(.required, for: .horizontal)
         countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let closeButton = NSButton()
-        for (button, symbol, tip, action) in [
-            (previousButton, "chevron.up", "Previous Match (Shift+Return)", #selector(previous(_:))),
-            (nextButton, "chevron.down", "Next Match (Return)", #selector(next(_:))),
-            (closeButton, "xmark", "Done (Escape)", #selector(close(_:))),
+        // The same close glyph as a tab's.
+        let closeButton = Self.button("xmark", "Done (Escape)")
+        closeButton.image = Theme.closeImage(size: 9, label: "Done (Escape)")
+        for (button, action) in [
+            (previousButton, #selector(previous(_:))),
+            (nextButton, #selector(next(_:))),
+            (closeButton, #selector(close(_:))),
         ] {
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
-                .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
-            button.toolTip = tip
-            button.isBordered = false
-            button.bezelStyle = .accessoryBarAction
-            button.contentTintColor = .secondaryLabelColor
             button.target = self
             button.action = action
-            button.widthAnchor.constraint(equalToConstant: 22).isActive = true
         }
 
         let row = NSStackView(views: [icon, field, countLabel, previousButton, nextButton, closeButton])
@@ -64,7 +58,11 @@ final class FindBar: NSView, NSTextFieldDelegate {
         row.setCustomSpacing(8, after: countLabel)
         row.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 8)
         glass.contentView = row
-        glass.cornerRadius = 17
+        // As tall and as round as the address bar.
+        glass.cornerRadius = 15
+        // A faint wash of the window color, so the capsule still shows on a
+        // white page, where clear glass all but disappears.
+        glass.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(0.5)
         glass.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glass)
         NSLayoutConstraint.activate([
@@ -72,13 +70,17 @@ final class FindBar: NSView, NSTextFieldDelegate {
             glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor),
             glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            glass.heightAnchor.constraint(equalToConstant: 34),
+            glass.heightAnchor.constraint(equalToConstant: 30),
             glass.widthAnchor.constraint(equalToConstant: 340),
         ])
         showCount(nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private static func button(_ symbol: String, _ label: String) -> NSButton {
+        Theme.iconButton(symbol, label: label, size: Theme.Symbol.inline, frame: Theme.ButtonSize.inline)
+    }
 
     /// Shows "3 of 12" or "No matches", or nothing while there's no search.
     func showCount(_ result: (count: Int, active: Int)?) {

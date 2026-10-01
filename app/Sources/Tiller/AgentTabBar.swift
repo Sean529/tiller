@@ -15,10 +15,10 @@ final class AgentTabBar: NSView {
     var onTools: ((NSView) -> Void)?
 
     private let tabStack = NSStackView()
-    private let toolsButton = AgentTabBar.iconButton("wrench.and.screwdriver", "Tools")
-    private let newTabButton = AgentTabBar.iconButton("plus", "New Tab")
-    private let newChatButton = AgentTabBar.iconButton("square.and.pencil", "New Chat")
-    private let historyButton = AgentTabBar.iconButton("clock.arrow.circlepath", "Chat History")
+    private let toolsButton = Theme.iconButton("wrench.and.screwdriver", label: "Tools")
+    private let newTabButton = Theme.iconButton("plus", label: "New Tab")
+    private let newChatButton = Theme.iconButton("square.and.pencil", label: "New Chat")
+    private let historyButton = Theme.iconButton("clock.arrow.circlepath", label: "Chat History")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -76,20 +76,6 @@ final class AgentTabBar: NSView {
     @objc private func newChat(_ sender: Any?) { onNewChat?() }
     @objc private func history(_ sender: Any?) { onHistory?(historyButton) }
     @objc private func tools(_ sender: Any?) { onTools?(toolsButton) }
-
-    private static func iconButton(_ symbol: String, _ title: String) -> NSButton {
-        let button = NSButton()
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
-        button.toolTip = title
-        button.bezelStyle = .accessoryBarAction
-        button.isBordered = false
-        button.imagePosition = .imageOnly
-        button.contentTintColor = .secondaryLabelColor
-        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 26).isActive = true
-        return button
-    }
 }
 
 /// A tab's number in a rounded square, tinted with the accent color when
@@ -108,6 +94,8 @@ private final class TabNumberButton: NSView {
     var isSelected = false {
         didSet {
             guard isSelected != oldValue else { return }
+            setAccessibilityValue(isSelected)
+            setAccessibilitySelected(isSelected)
             updateLabel()
             needsDisplay = true
         }
@@ -121,6 +109,8 @@ private final class TabNumberButton: NSView {
 
     private let number: Int
     private let label: NSTextField
+    /// Stands in for the number while a click would close the tab.
+    private let closeIcon = NSImageView()
     private let busyDot = NSView()
     private var isHovered = false {
         didSet {
@@ -128,13 +118,15 @@ private final class TabNumberButton: NSView {
             needsDisplay = true
         }
     }
+    private var isPressed = false { didSet { needsDisplay = true } }
 
     /// Whether a click closes the tab rather than selecting it. Not while
     /// its agent works: closing would end the turn, so that takes the menu.
     private var offersClose: Bool { isSelected && isHovered && !isBusy }
 
     private func updateLabel() {
-        label.stringValue = offersClose ? "×" : "\(number)"
+        label.isHidden = offersClose
+        closeIcon.isHidden = !offersClose
         toolTip = offersClose ? "Close Tab" : title
     }
 
@@ -143,15 +135,16 @@ private final class TabNumberButton: NSView {
         label = NSTextField(labelWithString: "\(number)")
         super.init(frame: .zero)
         wantsLayer = true
-        label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        label.font = .monospacedDigitSystemFont(ofSize: Theme.FontSize.secondary, weight: .medium)
         label.alignment = .center
-        // Wide enough for the cross, so the square doesn't change size.
-        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 12).isActive = true
+        closeIcon.image = Theme.closeImage(size: 9, label: "Close Chat")
+        closeIcon.contentTintColor = .labelColor
+        closeIcon.isHidden = true
         busyDot.wantsLayer = true
-        busyDot.layer?.cornerRadius = 3
+        busyDot.layer?.cornerRadius = Theme.busyDot / 2
         busyDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
         busyDot.isHidden = true
-        for view in [label, busyDot] {
+        for view in [label, closeIcon, busyDot] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -160,12 +153,22 @@ private final class TabNumberButton: NSView {
             heightAnchor.constraint(equalToConstant: AgentTabBar.height),
             label.centerXAnchor.constraint(equalTo: centerXAnchor),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            busyDot.widthAnchor.constraint(equalToConstant: 6),
-            busyDot.heightAnchor.constraint(equalToConstant: 6),
+            closeIcon.centerXAnchor.constraint(equalTo: centerXAnchor),
+            closeIcon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            busyDot.widthAnchor.constraint(equalToConstant: Theme.busyDot),
+            busyDot.heightAnchor.constraint(equalToConstant: Theme.busyDot),
             busyDot.topAnchor.constraint(equalTo: topAnchor, constant: 3),
             busyDot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
         ])
-        setAccessibilityRole(.button)
+        // One of a set, like the tab strip's tabs, so VoiceOver says which
+        // chat is showing; closing is an action rather than a hover.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.radioButton)
+        setAccessibilityValue(false)
+        setAccessibilitySelected(false)
+        setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: "Close Chat", target: self, selector: #selector(accessibilityClose)),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -173,15 +176,16 @@ private final class TabNumberButton: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.cornerRadius = 7
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
         let fill: NSColor = isSelected
-            ? .controlAccentColor.withAlphaComponent(isHovered ? 0.26 : 0.18)
-            : .labelColor.withAlphaComponent(isHovered ? 0.09 : 0.045)
-        withEasing { layer?.backgroundColor = fill.cgColor }
-        let outlined = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-        layer?.borderWidth = isSelected || outlined ? 1 : 0
-        layer?.borderColor = (isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.45) : .separatorColor).cgColor
+            ? Theme.accent(isHovered || isPressed ? Theme.Accent.selectedHover : Theme.Accent.selected)
+            : Theme.fill(isPressed ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : Theme.Fill.rest)
+        withEasing(Theme.Duration.quick) { layer?.backgroundColor = fill.cgColor }
+        // The selected tab always has its accent edge; under Increase
+        // Contrast the others get a hairline, as a faint fill alone won't show.
+        layer?.borderWidth = isSelected || Theme.increaseContrast ? Theme.hairlineWidth : 0
+        layer?.borderColor = (isSelected ? Theme.accent(Theme.Accent.outline) : Theme.hairline).cgColor
         label.textColor = isSelected ? .labelColor : .secondaryLabelColor
         busyDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
     }
@@ -193,10 +197,16 @@ private final class TabNumberButton: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
-    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseDown(with event: NSEvent) { isPressed = true }
 
     override func mouseUp(with event: NSEvent) {
+        isPressed = false
         guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
         if offersClose { onClose?() } else { onSelect?() }
     }
@@ -211,6 +221,11 @@ private final class TabNumberButton: NSView {
 
     override func accessibilityPerformPress() -> Bool {
         onSelect?()
+        return true
+    }
+
+    @objc private func accessibilityClose() -> Bool {
+        onClose?()
         return true
     }
 }
@@ -236,8 +251,9 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
     private let table = HistoryTableView()
     private let emptyLabel = NSTextField(labelWithString: "No Chats")
     private var scrollHeight: NSLayoutConstraint!
-    private static let rowHeight: CGFloat = 48
-    private static let width: CGFloat = 300
+    private static let rowHeight = Theme.RowHeight.twoLine
+    /// How far the rows sit in from the popover's edges, as in Downloads.
+    private static let inset: CGFloat = 6
 
     init(items: [Item], current: String) {
         self.items = items
@@ -249,13 +265,7 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
 
     override func loadView() {
         let header = NSTextField(labelWithString: "")
-        header.attributedStringValue = NSAttributedString(string: "CHATS", attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .kern: 0.6,
-        ])
-        let rule = NSBox()
-        rule.boxType = .separator
+        header.attributedStringValue = Theme.sectionHeader("Chats")
 
         table.addTableColumn(NSTableColumn(identifier: .init("chat")))
         table.headerView = nil
@@ -281,26 +291,23 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
 
-        emptyLabel.font = .systemFont(ofSize: 12)
+        emptyLabel.font = .systemFont(ofSize: Theme.FontSize.secondary)
         emptyLabel.textColor = .secondaryLabelColor
 
         let view = NSView()
-        for subview in [header, rule, scroll, emptyLabel] {
+        for subview in [header, scroll, emptyLabel] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(subview)
         }
         scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            view.widthAnchor.constraint(equalToConstant: Self.width),
+            view.widthAnchor.constraint(equalToConstant: Theme.popoverWidth),
             header.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-            rule.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
-            rule.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            rule.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: rule.bottomAnchor),
-            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Padding.section),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.inset),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.inset),
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -Self.inset),
             scrollHeight,
             emptyLabel.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
@@ -320,7 +327,7 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
         self.items = items
         table.reloadData()
         emptyLabel.isHidden = !items.isEmpty
-        scrollHeight.constant = items.isEmpty ? 56 : min(CGFloat(items.count), 7.5) * Self.rowHeight
+        scrollHeight.constant = items.isEmpty ? Theme.emptyListHeight : min(CGFloat(items.count), 7.5) * Self.rowHeight
         preferredContentSize = view.fittingSize
     }
 
@@ -388,6 +395,16 @@ private final class HistoryTableView: NSTableView {
     var onReturn: (() -> Void)?
     var onDelete: (() -> Void)?
 
+    /// The table tracks the click itself, so the row under it is told it
+    /// is pressed until the mouse comes up.
+    override func mouseDown(with event: NSEvent) {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        let pressed = row >= 0 ? rowView(atRow: row, makeIfNecessary: false) as? HistoryRowView : nil
+        pressed?.isPressed = true
+        super.mouseDown(with: event)
+        pressed?.isPressed = false
+    }
+
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 36, 76: onReturn?()  // Return, Enter
@@ -397,24 +414,53 @@ private final class HistoryTableView: NSTableView {
     }
 }
 
-/// A row of the history list: highlighted on hover or when selected with
-/// the keyboard, and marked with an accent bar at its edge for the selected
-/// tab's chat.
+/// A row of the history list, a rounded plate like a download's: filled on
+/// hover, when pressed or when selected with the keyboard, and tinted with
+/// the accent color for the selected tab's chat.
 private final class HistoryRowView: NSTableRowView {
-    var isCurrent = false
-    private var isHovered = false { didSet { needsDisplay = true } }
+    var isCurrent = false { didSet { updateFill() } }
+    var isPressed = false { didSet { updateFill() } }
+    private var isHovered = false { didSet { updateFill() } }
+    /// A layer of its own under the cell, so the fill can ease.
+    private let fill = NSView()
 
-    override func drawBackground(in dirtyRect: NSRect) {
-        if isCurrent || isHovered || isSelected {
-            NSColor.labelColor.withAlphaComponent(isHovered || isSelected ? 0.08 : 0.05).setFill()
-            bounds.fill()
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        fill.wantsLayer = true
+        fill.layer?.cornerRadius = Theme.Radius.row
+        fill.layer?.cornerCurve = .continuous
+        fill.frame = bounds
+        fill.autoresizingMask = [.width, .height]
+        addSubview(fill)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isSelected: Bool {
+        didSet { updateFill() }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateFill(animated: false)
+    }
+
+    /// Hover and the keyboard's selection share a fill, as before.
+    private func updateFill(animated: Bool = true) {
+        let lit = isHovered || isSelected
+        let color = isCurrent
+            ? Theme.accent(lit || isPressed ? Theme.Accent.selectedHover : Theme.Accent.selected)
+            : Theme.fill(hovered: lit, pressed: isPressed)
+        let filled = isCurrent || lit || isPressed
+        let apply = { [fill] in
+            // Resolved here, so the colors follow light and dark mode.
+            fill.effectiveAppearance.performAsCurrentDrawingAppearance {
+                fill.layer?.backgroundColor = color.cgColor
+                fill.layer?.borderColor = Theme.selectionOutline(selected: filled).cgColor
+            }
+            fill.layer?.borderWidth = Theme.hairlineWidth
         }
-        if isCurrent {
-            NSColor.controlAccentColor.setFill()
-            NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
-        }
-        NSColor.separatorColor.setFill()
-        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        if animated { withEasing(Theme.Duration.quick, apply) } else { apply() }
     }
 
     override func updateTrackingAreas() {
@@ -424,7 +470,11 @@ private final class HistoryRowView: NSTableRowView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
 }
 
 /// The agent's logo, or a chat bubble icon without one, beside the chat's
@@ -436,11 +486,11 @@ private final class HistoryCellView: NSView {
             .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))!)
         if logo == nil { icon.contentTintColor = isCurrent ? .controlAccentColor : .secondaryLabelColor }
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: Theme.FontSize.body, weight: .medium)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let subtitleLabel = NSTextField(labelWithString: subtitle)
-        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.font = .systemFont(ofSize: Theme.FontSize.caption)
         subtitleLabel.textColor = isCurrent ? .secondaryLabelColor : .tertiaryLabelColor
         subtitleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -449,14 +499,15 @@ private final class HistoryCellView: NSView {
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            // With the row's inset, the icon lines up under the header.
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Padding.tight),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 18),
             titleLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -14),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Theme.Padding.tight),
             titleLabel.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
             subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -14),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Theme.Padding.tight),
             subtitleLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: 3),
         ])
         toolTip = title

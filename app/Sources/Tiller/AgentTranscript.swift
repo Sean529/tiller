@@ -134,7 +134,7 @@ final class UserMessageView: NSView, TranscriptRow {
         label.textColor = .labelColor
         label.isSelectable = true
         bubble.wantsLayer = true
-        bubble.layer?.cornerRadius = 14
+        bubble.layer?.cornerRadius = Theme.Radius.plate
         bubble.layer?.cornerCurve = .continuous
         let grid = ThumbnailGrid(side: 64, alignment: .trailing)
         grid.images = images
@@ -173,7 +173,7 @@ final class UserMessageView: NSView, TranscriptRow {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        bubble.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.2).cgColor
+        bubble.layer?.backgroundColor = Theme.accent(Theme.Accent.bubble).cgColor
     }
 }
 
@@ -209,7 +209,9 @@ final class ThumbnailGrid: NSView {
     private func rebuild(with images: [NSImage]) {
         thumbnails.forEach { $0.removeFromSuperview() }
         thumbnails = images.enumerated().map { index, image in
-            let thumbnail = ThumbnailView(image: image, removable: onRemove != nil)
+            // VoiceOver tells the images apart by name, or else by place.
+            let label = image.name() ?? "Image \(index + 1)"
+            let thumbnail = ThumbnailView(image: image, label: label, removable: onRemove != nil)
             thumbnail.onOpen = { [weak self] in self?.onOpen?(index) }
             thumbnail.onRemove = { [weak self] in self?.onRemove?(index) }
             addSubview(thumbnail)
@@ -257,20 +259,19 @@ private final class ThumbnailView: NSView {
     var onRemove: (() -> Void)?
     private let image: NSImage
 
-    init(image: NSImage, removable: Bool) {
+    init(image: NSImage, label: String, removable: Bool) {
         self.image = Self.thumbnail(of: image, side: 128)
         super.init(frame: .zero)
         wantsLayer = true
         toolTip = "Click to preview"
         setAccessibilityRole(.button)
-        setAccessibilityLabel("Image")
+        setAccessibilityLabel(label)
         guard removable else { return }
-        let remove = NSButton()
-        remove.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove Image")?
-            .withSymbolConfiguration(.init(paletteColors: [.white, NSColor.black.withAlphaComponent(0.6)]))
+        let remove = ThumbnailRemoveButton()
         remove.isBordered = false
         remove.imagePosition = .imageOnly
         remove.toolTip = "Remove"
+        remove.setAccessibilityLabel("Remove Image")
         remove.target = self
         remove.action = #selector(removeClicked(_:))
         remove.translatesAutoresizingMaskIntoConstraints = false
@@ -307,10 +308,10 @@ private final class ThumbnailView: NSView {
         layer.contents = image.layerContents(forContentsScale: window?.backingScaleFactor ?? 2)
         layer.contentsGravity = .resizeAspectFill
         layer.masksToBounds = true
-        layer.cornerRadius = 8
+        layer.cornerRadius = Theme.Radius.row
         layer.cornerCurve = .continuous
         layer.borderWidth = 1
-        layer.borderColor = NSColor.separatorColor.cgColor
+        layer.borderColor = Theme.hairline.cgColor
     }
 
     override func mouseDown(with event: NSEvent) {}
@@ -323,6 +324,37 @@ private final class ThumbnailView: NSView {
         onOpen?()
         return true
     }
+}
+
+/// The cross in a thumbnail's corner. It stays in view, since the image
+/// under it can be any color, and its plate darkens under the mouse so it
+/// reads as the thing a click will hit.
+private final class ThumbnailRemoveButton: NSButton {
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { updateImage() } }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        updateImage()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func updateImage() {
+        let plate = NSColor.black.withAlphaComponent(isHovered ? 0.8 : 0.6)
+        image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove Image")?
+            .withSymbolConfiguration(.init(paletteColors: [.white, plate]))
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
 }
 
 /// One tool call: a spinner, then a check or a cross, beside the tool and
@@ -474,14 +506,13 @@ final class ToolRowView: NSView, TranscriptRow {
     }
 
     override func updateLayer() {
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
-        let alpha = chevron != nil && isHovered ? 0.09 : 0.05
-        withEasing { layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor }
+        let alpha = chevron != nil && isHovered ? Theme.Fill.hover : Theme.Fill.rest
+        withEasing { layer?.backgroundColor = Theme.fill(alpha).cgColor }
         // A fill this faint goes with Increase Contrast; an edge stays.
-        let outlined = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-        layer?.borderWidth = outlined ? 1 : 0
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.borderWidth = Theme.increaseContrast ? 1 : 0
+        layer?.borderColor = Theme.hairline.cgColor
     }
 
     override func updateTrackingAreas() {
@@ -680,7 +711,9 @@ final class ThinkingRowView: NSView {
         super.init(frame: .zero)
         let spinner = NSProgressIndicator()
         spinner.style = .spinning
-        spinner.controlSize = .small
+        // Mini is the spinner's own 16-point size; squeezing a small one
+        // into less room blurs it.
+        spinner.controlSize = .mini
         spinner.isDisplayedWhenStopped = false
         spinner.startAnimation(nil)
         let label = NSTextField(labelWithString: "Thinking…")
@@ -694,8 +727,8 @@ final class ThinkingRowView: NSView {
             row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             row.topAnchor.constraint(equalTo: topAnchor, constant: 2),
             row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
-            spinner.widthAnchor.constraint(equalToConstant: 14),
-            spinner.heightAnchor.constraint(equalToConstant: 14),
+            spinner.widthAnchor.constraint(equalToConstant: 16),
+            spinner.heightAnchor.constraint(equalToConstant: 16),
         ])
         setAccessibilityLabel("Thinking")
     }
@@ -778,7 +811,7 @@ final class ErrorMessageView: NSView, TranscriptRow {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.cornerRadius = 10
+        layer?.cornerRadius = Theme.Radius.card
         layer?.cornerCurve = .continuous
         layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.1).cgColor
         layer?.borderWidth = 1
@@ -1124,9 +1157,9 @@ enum AgentMarkdown {
         let style = paragraph(indent: 10)
         style.lineSpacing = 1
         return NSAttributedString(string: line.isEmpty ? " " : line, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: Theme.FontSize.secondary, weight: .regular),
             .foregroundColor: NSColor.labelColor,
-            .backgroundColor: NSColor.labelColor.withAlphaComponent(0.06),
+            .backgroundColor: Theme.fill(Theme.Fill.rest),
             .paragraphStyle: style,
         ])
     }
@@ -1144,7 +1177,7 @@ enum AgentMarkdown {
             let intent = InlinePresentationIntent(rawValue: raw)
             if intent.contains(.code) {
                 result.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: font.pointSize - 1, weight: .regular), range: range)
-                result.addAttribute(.backgroundColor, value: NSColor.labelColor.withAlphaComponent(0.08), range: range)
+                result.addAttribute(.backgroundColor, value: Theme.fill(Theme.Fill.rest), range: range)
             } else {
                 var traits: NSFontDescriptor.SymbolicTraits = []
                 if intent.contains(.stronglyEmphasized) { traits.insert(.bold) }
@@ -1474,17 +1507,17 @@ final class MarkdownTableContentView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard rowEdges.count > 1 else { return }
         let frame = NSRect(origin: .zero, size: tableSize).insetBy(dx: 0.5, dy: 0.5)
-        let outline = NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6)
+        let outline = NSBezierPath(roundedRect: frame, xRadius: Theme.Radius.small, yRadius: Theme.Radius.small)
         NSGraphicsContext.saveGraphicsState()
         outline.addClip()
-        NSColor.labelColor.withAlphaComponent(0.05).setFill()
+        Theme.fill(Theme.Fill.rest).setFill()
         NSRect(x: 0, y: 0, width: tableSize.width, height: rowEdges[1]).fill()
-        NSColor.separatorColor.setFill()
+        Theme.hairline.setFill()
         for edge in rowEdges.dropFirst().dropLast() {
             NSRect(x: 0, y: edge - 0.5, width: tableSize.width, height: 1).fill()
         }
         NSGraphicsContext.restoreGraphicsState()
-        NSColor.separatorColor.setStroke()
+        Theme.hairline.setStroke()
         outline.lineWidth = 1
         outline.stroke()
     }
@@ -1497,7 +1530,7 @@ final class MarkdownTableContentView: NSView {
 final class MarkdownCodeView: NSView, TranscriptRow {
     private let header = NSView()
     private let languageLabel = NSTextField(labelWithString: "")
-    private let copyButton = NSButton()
+    private let copyButton = FocusReportingButton()
     private let rule = NSView()
     private let scroll = NSScrollView()
     /// Holds the text with the padding around it, at the text's own width.
@@ -1508,10 +1541,11 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     private lazy var height = heightAnchor.constraint(equalToConstant: 0)
     private var copiedReset: DispatchWorkItem?
     private var isHovered = false { didSet { updateButtons() } }
+    private var isCopyFocused = false { didSet { updateButtons() } }
 
     private static let headerHeight: CGFloat = 24
     private static let padding = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-    private static let font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+    private static let font = NSFont.monospacedSystemFont(ofSize: Theme.FontSize.secondary, weight: .regular)
     private static let copyImage = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy Code")?
         .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
     private static let copiedImage = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Copied")?
@@ -1527,7 +1561,7 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         label.cell?.isScrollable = false
         label.maximumNumberOfLines = 0
 
-        languageLabel.font = .systemFont(ofSize: 10.5, weight: .medium)
+        languageLabel.font = .systemFont(ofSize: Theme.FontSize.caption, weight: .medium)
         languageLabel.textColor = .secondaryLabelColor
 
         copyButton.image = Self.copyImage
@@ -1536,9 +1570,12 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         copyButton.imagePosition = .imageOnly
         copyButton.contentTintColor = .secondaryLabelColor
         copyButton.toolTip = "Copy Code"
+        copyButton.setAccessibilityLabel("Copy Code")
         copyButton.target = self
         copyButton.action = #selector(copyCode(_:))
         copyButton.alphaValue = 0
+        // Tabbing to the button shows it, so it isn't focused unseen.
+        copyButton.onFocusChange = { [weak self] focused in self?.isCopyFocused = focused }
 
         rule.wantsLayer = true
 
@@ -1674,13 +1711,13 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         updateButtons()
     }
 
-    /// The copy button shows under the mouse, and while it says "Copied".
+    /// The copy button shows under the mouse, with keyboard focus, and
+    /// while it says "Copied".
     private func updateButtons() {
-        let shown = isHovered || copiedReset != nil
+        let shown = isHovered || isCopyFocused || copiedReset != nil
         if copiedReset == nil { copyButton.contentTintColor = .secondaryLabelColor }
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = reduceMotion ? 0 : 0.12
+            context.duration = Theme.reduceMotion ? 0 : Theme.Duration.quick
             copyButton.animator().alphaValue = shown ? 1 : 0
         }
     }
@@ -1688,12 +1725,12 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
+        layer?.backgroundColor = Theme.fill(Theme.Fill.rest).cgColor
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        rule.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        layer?.borderColor = Theme.hairline.cgColor
+        rule.layer?.backgroundColor = Theme.hairline.cgColor
     }
 
     override func updateTrackingAreas() {
@@ -1704,6 +1741,24 @@ final class MarkdownCodeView: NSView, TranscriptRow {
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
     override func mouseExited(with event: NSEvent) { isHovered = false }
+}
+
+/// A button that says when it gains or loses keyboard focus, for one that
+/// hides until it is wanted.
+private final class FocusReportingButton: NSButton {
+    var onFocusChange: ((Bool) -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onFocusChange?(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onFocusChange?(false) }
+        return resigned
+    }
 }
 
 /// A block quote: dimmed text beside a bar.
@@ -1751,7 +1806,7 @@ final class MarkdownQuoteView: NSView, TranscriptRow {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        bar.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.18).cgColor
+        bar.layer?.backgroundColor = Theme.fill(0.18).cgColor
     }
 }
 
@@ -1768,7 +1823,7 @@ final class MarkdownRuleView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = NSColor.separatorColor.cgColor
+        layer?.backgroundColor = Theme.hairline.cgColor
     }
 }
 

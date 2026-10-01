@@ -19,7 +19,7 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
     private var generation = 0
 
     private static let limit = 7
-    private static let rowHeight: CGFloat = 30
+    private static let rowHeight = Theme.RowHeight.compact
     private static let inset: CGFloat = 6
 
     enum Suggestion {
@@ -45,7 +45,7 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         background.material = .popover
         background.state = .active
         background.wantsLayer = true
-        background.layer?.cornerRadius = 14
+        background.layer?.cornerRadius = Theme.Radius.plate
         background.layer?.cornerCurve = .continuous
         background.layer?.masksToBounds = true
         list.translatesAutoresizingMaskIntoConstraints = false
@@ -172,8 +172,8 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
 private final class SuggestionsBackground: NSVisualEffectView {
     override func updateLayer() {
         super.updateLayer()
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.6).cgColor
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.hairline.cgColor
     }
 }
 
@@ -211,6 +211,10 @@ private final class SuggestionRow: NSView {
         }
     }
 
+    private var isPressed = false {
+        didSet { if isPressed != oldValue { needsDisplay = true } }
+    }
+
     private let icon = FaviconView()
     private let showsFavicon: Bool
     private let title = NSTextField(labelWithString: "")
@@ -219,8 +223,7 @@ private final class SuggestionRow: NSView {
     private let typed: String
 
     private static func symbol(_ name: String, _ description: String) -> NSImage? {
-        NSImage(systemSymbolName: name, accessibilityDescription: description)?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+        Theme.symbol(name, size: Theme.Symbol.row, weight: .regular, label: description)
     }
 
     init(_ suggestion: AddressSuggestions.Suggestion, typed: String) {
@@ -248,6 +251,9 @@ private final class SuggestionRow: NSView {
         showsFavicon = favicon != nil
         super.init(frame: .zero)
         toolTip = tip
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(address.isEmpty ? titleText : "\(titleText), \(address)")
         if let favicon {
             favicon.size = NSSize(width: 16, height: 16)
             icon.image = favicon
@@ -262,7 +268,7 @@ private final class SuggestionRow: NSView {
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
         url.stringValue = address
-        url.font = .systemFont(ofSize: 12)
+        url.font = .systemFont(ofSize: Theme.FontSize.secondary)
         url.textColor = .secondaryLabelColor
         url.lineBreakMode = .byTruncatingTail
         url.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -283,18 +289,24 @@ private final class SuggestionRow: NSView {
     /// `text` with the first run matching `typed` in bold, case aside.
     private static func highlighting(_ text: String, _ typed: String, color: NSColor) -> NSAttributedString {
         let result = NSMutableAttributedString(string: text, attributes: [
-            .font: NSFont.systemFont(ofSize: 13), .foregroundColor: color,
+            .font: NSFont.systemFont(ofSize: Theme.FontSize.body), .foregroundColor: color,
         ])
         if !typed.isEmpty, let range = text.range(of: typed, options: [.caseInsensitive, .diacriticInsensitive]) {
-            result.addAttribute(.font, value: NSFont.systemFont(ofSize: 13, weight: .semibold), range: NSRange(range, in: text))
+            result.addAttribute(.font, value: NSFont.systemFont(ofSize: Theme.FontSize.body, weight: .semibold), range: NSRange(range, in: text))
         }
         return result
     }
 
     override func draw(_ dirtyRect: NSRect) {
         guard isHighlighted else { return }
+        let path = NSBezierPath(roundedRect: bounds, xRadius: Theme.Radius.row, yRadius: Theme.Radius.row)
         NSColor.selectedContentBackgroundColor.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        path.fill()
+        // A press shades the highlight, as it does a tile or a row elsewhere.
+        if isPressed {
+            Theme.fill(Theme.Fill.pressed).setFill()
+            path.fill()
+        }
     }
 
     override func updateTrackingAreas() {
@@ -304,15 +316,22 @@ private final class SuggestionRow: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { onHover?() }
+    override func mouseExited(with event: NSEvent) { isPressed = false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) {}
+    override func mouseDown(with event: NSEvent) { isPressed = true }
 
     // On release, as buttons do, so a slip of the mouse can be taken back.
     override func mouseUp(with event: NSEvent) {
+        isPressed = false
         if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?(.click(event.modifierFlags)) }
     }
 
     override func otherMouseUp(with event: NSEvent) {
         if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?(.backgroundTab) }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?(.currentTab)
+        return true
     }
 }

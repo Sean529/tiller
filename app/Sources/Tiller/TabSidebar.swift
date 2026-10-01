@@ -11,7 +11,10 @@ final class TabSidebarView: NSView {
     let collapseButton = NSButton()
     var isCollapsed = false {
         didSet {
-            collapseButton.toolTip = isCollapsed ? "Expand Tabs" : "Collapse Tabs"
+            let label = isCollapsed ? "Expand Tabs" : "Collapse Tabs"
+            collapseButton.toolTip = label
+            // VoiceOver reads what a press does now, not what it did at launch.
+            collapseButton.setAccessibilityLabel(label)
             needsLayout = true
         }
     }
@@ -30,6 +33,7 @@ final class TabSidebarView: NSView {
         collapseButton.imagePosition = .imageOnly
         collapseButton.contentTintColor = .secondaryLabelColor
         collapseButton.toolTip = "Collapse Tabs"
+        collapseButton.setAccessibilityLabel("Collapse Tabs")
         addSubview(collapseButton)
     }
 

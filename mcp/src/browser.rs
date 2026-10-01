@@ -249,11 +249,17 @@ impl Browser {
                 self.conn = None;
                 self.try_request(method, &params)
             }
+            // The reply may still come, and the next request must not read
+            // it as its own: the connection goes, without a retry.
+            Err(Failure::Timeout(message)) => {
+                self.conn = None;
+                Err(Failure::Timeout(message))
+            }
             other => other,
         }
         .map_err(|f| match f {
             Failure::Connection(e) => format!("Tiller is not running or its control socket is unavailable ({e})"),
-            Failure::App(message) => message,
+            Failure::App(message) | Failure::Timeout(message) => message,
         })
     }
 
@@ -274,22 +280,29 @@ impl Browser {
         let mut line = json!({ "id": self.next_id, "method": method, "params": params }).to_string();
         line.push('\n');
         stream.write_all(line.as_bytes()).map_err(|e| Failure::Connection(e.to_string()))?;
-        let mut reply = String::new();
-        // A timeout is the app not answering, not a connection to retry on:
-        // sending a click or keystroke again could apply it twice.
-        let read = reader.read_line(&mut reply).map_err(|e| match e.kind() {
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                Failure::App("Tiller did not answer within 90 seconds".into())
+        loop {
+            let mut reply = String::new();
+            // A timeout is the app not answering, not a connection to retry
+            // on: sending a click or keystroke again could apply it twice.
+            let read = reader.read_line(&mut reply).map_err(|e| match e.kind() {
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                    Failure::Timeout("Tiller did not answer within 90 seconds".into())
+                }
+                _ => Failure::Connection(e.to_string()),
+            })?;
+            if read == 0 {
+                return Err(Failure::Connection("connection closed".into()));
             }
-            _ => Failure::Connection(e.to_string()),
-        })?;
-        if read == 0 {
-            return Err(Failure::Connection("connection closed".into()));
-        }
-        let mut reply: Value = serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Tiller: {e}")))?;
-        match reply.get("error") {
-            Some(error) => Err(Failure::App(error.as_str().unwrap_or("error").to_string())),
-            None => Ok(reply["result"].take()),
+            let mut reply: Value =
+                serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Tiller: {e}")))?;
+            // A reply to an earlier request isn't this one's answer.
+            if reply.get("id").and_then(Value::as_u64).is_some_and(|id| id != self.next_id) {
+                continue;
+            }
+            return match reply.get("error") {
+                Some(error) => Err(Failure::App(error.as_str().unwrap_or("error").to_string())),
+                None => Ok(reply["result"].take()),
+            };
         }
     }
 }
@@ -297,6 +310,8 @@ impl Browser {
 enum Failure {
     Connection(String),
     App(String),
+    /// The app took too long; its reply may still be on its way.
+    Timeout(String),
 }
 
 /// TILLER_SOCKET, or `control.sock` in the folder of the profile named by

@@ -24,7 +24,7 @@ final class AddressBarView: NSView {
     /// Whether the user is typing, when the icon says what Return would do.
     private var isEditing = false
     private let glass = NSGlassEffectView()
-    private let progressFill = NSView()
+    private let progressFill = ProgressTintView()
     private var capsuleLeading: NSLayoutConstraint!
     private var capsuleTrailing: NSLayoutConstraint!
     /// Whether the tint is tracking a load, as opposed to finishing or hidden.
@@ -39,7 +39,7 @@ final class AddressBarView: NSView {
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 13)
+        field.font = .systemFont(ofSize: Theme.FontSize.body)
         field.lineBreakMode = .byTruncatingTail
         field.usesSingleLineMode = true
         field.cell?.isScrollable = true
@@ -53,15 +53,14 @@ final class AddressBarView: NSView {
         keyButton.bezelStyle = .accessoryBarAction
         keyButton.isBordered = false
         keyButton.imagePosition = .imageOnly
-        keyButton.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: "Fill Password")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        keyButton.image = Theme.symbol("key.fill", size: Theme.Symbol.inline, label: "Fill Password")
         keyButton.contentTintColor = .secondaryLabelColor
         keyButton.toolTip = "Fill Saved Password"
         keyButton.isHidden = true
 
         zoomButton.bezelStyle = .accessoryBarAction
         zoomButton.isBordered = false
-        zoomButton.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        zoomButton.font = .monospacedDigitSystemFont(ofSize: Theme.FontSize.caption, weight: .medium)
         zoomButton.contentTintColor = .secondaryLabelColor
         zoomButton.toolTip = "Actual Size"
         zoomButton.isHidden = true
@@ -76,7 +75,6 @@ final class AddressBarView: NSView {
         content.layer?.cornerRadius = 15
         content.layer?.cornerCurve = .continuous
         content.layer?.masksToBounds = true
-        progressFill.wantsLayer = true
         progressFill.alphaValue = 0
         content.addSubview(progressFill)
         for view in [statusIcon, field, buttons] as [NSView] {
@@ -128,9 +126,10 @@ final class AddressBarView: NSView {
     /// switching tabs, it jumps straight to the new state.
     func setProgress(_ progress: Double, loading: Bool, animated: Bool = true) {
         guard let content = progressFill.superview else { return }
+        // Under Reduce Motion the tint jumps to each state instead of sweeping.
+        let animated = animated && !Theme.reduceMotion
         let bounds = content.bounds
         let target = NSRect(x: 0, y: 0, width: bounds.width * min(1, max(0.08, progress)), height: bounds.height)
-        progressFill.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
         let started = loading && !showsLoad
         showsLoad = loading
         if !animated {
@@ -144,19 +143,19 @@ final class AddressBarView: NSView {
             }
             guard target.width > progressFill.frame.width else { return }
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.25
+                context.duration = Theme.Duration.panel
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 progressFill.animator().frame = target
             }
         } else if progressFill.alphaValue > 0 {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
+                context.duration = Theme.Duration.slide
                 progressFill.animator().frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
             } completionHandler: { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self, !self.showsLoad else { return }
                     NSAnimationContext.runAnimationGroup { context in
-                        context.duration = 0.25
+                        context.duration = Theme.Duration.panel
                         self.progressFill.animator().alphaValue = 0
                     }
                 }
@@ -187,10 +186,27 @@ final class AddressBarView: NSView {
         }
         if statusSymbol != symbol {
             statusSymbol = symbol
-            statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
-                .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+            statusIcon.image = Theme.symbol(symbol, size: Theme.Symbol.inline, label: description)
         }
         statusIcon.toolTip = !isEditing && url.hasPrefix("http") ? description : nil
+    }
+}
+
+/// The load tint inside the capsule. Its color is set in `updateLayer`, so it
+/// follows light and dark mode and the accent color, which a layer color set
+/// once would not.
+private final class ProgressTintView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = Theme.accent(Theme.Accent.soft).cgColor
     }
 }
 
@@ -258,7 +274,7 @@ final class AddressField: NSTextField {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         let text = NSMutableAttributedString(string: shown, attributes: [
-            .font: font ?? .systemFont(ofSize: 13),
+            .font: font ?? .systemFont(ofSize: Theme.FontSize.body),
             .foregroundColor: NSColor.secondaryLabelColor,
             .paragraphStyle: paragraph,
         ])

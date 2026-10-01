@@ -191,8 +191,8 @@ class SettingsPane: NSViewController {
     static func withPlaceholder(_ scroll: NSScrollView, _ text: String) -> (box: NSView, label: NSTextField) {
         let box = NSView()
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = .tertiaryLabelColor
+        label.font = .systemFont(ofSize: Theme.FontSize.secondary)
+        label.textColor = .secondaryLabelColor
         for view in [scroll, label] {
             view.translatesAutoresizingMaskIntoConstraints = false
             box.addSubview(view)
@@ -658,6 +658,9 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
                 checkboxWithTitle: "", target: self, action: isOn ? #selector(toggleEnabled(_:)) : #selector(togglePinned(_:)))
             checkbox.tag = row
             checkbox.state = (isOn ? entry.enabled : entry.pinned) ? .on : .off
+            // The box has no title of its own, so VoiceOver gets the extension's name.
+            let name = (try? manifest.get().name) ?? (entry.path as NSString).lastPathComponent
+            checkbox.setAccessibilityLabel(isOn ? "\(name) On" : "\(name) Pinned")
             return checkbox
         case "name":
             let label = NSTextField(labelWithString: (try? manifest.get().name) ?? (entry.path as NSString).lastPathComponent)
@@ -899,9 +902,9 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         // A rounded box like the text fields above it.
         let box = NSBox()
         box.boxType = .custom
-        box.cornerRadius = 6
-        box.borderColor = .separatorColor
-        box.fillColor = .labelColor.withAlphaComponent(0.04)
+        box.cornerRadius = Theme.Radius.small
+        box.borderColor = Theme.hairline
+        box.fillColor = Theme.fill(Theme.Fill.rest)
         box.contentViewMargins = NSSize(width: 1, height: 1)
         box.contentView = scroll
         box.heightAnchor.constraint(equalToConstant: 96).isActive = true
@@ -1213,6 +1216,8 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
             let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleEnabled(_:)))
             checkbox.tag = row
             checkbox.state = entry.enabled ? .on : .off
+            // The box has no title of its own, so VoiceOver gets the skill's name.
+            checkbox.setAccessibilityLabel("\(entry.name) On")
             return checkbox
         case "name":
             let label = NSTextField(labelWithString: entry.name)

@@ -84,13 +84,37 @@ final class DownloadStore {
             // The path arrives once it is chosen and stays after.
             if download.path.isEmpty { download.path = downloads[index].path }
             guard downloads[index] != download else { return }
+            let progressOnly = downloads[index].state == download.state && downloads[index].path == download.path
             downloads[index] = download
+            // Chromium reports progress many times a second; the ring and the
+            // rows redraw a few times a second. A state change shows at once.
+            if progressOnly { return scheduleChange() }
         } else {
             downloads.insert(download, at: 0)
             if downloads.count > Self.limit { downloads.removeLast(downloads.count - Self.limit) }
             onStart?(download)
         }
+        changeTimer?.invalidate()
+        changeTimer = nil
+        lastChange = Date()
         onChange?()
+    }
+
+    private var changeTimer: Timer?
+    private var lastChange = Date.distantPast
+    private static let changeInterval: TimeInterval = 0.25
+
+    private func scheduleChange() {
+        guard changeTimer == nil else { return }
+        let wait = max(0, Self.changeInterval - Date().timeIntervalSince(lastChange))
+        changeTimer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.changeTimer = nil
+                self.lastChange = Date()
+                self.onChange?()
+            }
+        }
     }
 
     func cancel(_ id: UInt32) {
@@ -181,17 +205,13 @@ final class DownloadsController: NSViewController {
     private let emptyLabel = NSTextField(labelWithString: "No Downloads")
     private var rowViews: [UInt32: DownloadRowView] = [:]
     private lazy var scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 0)
-    private static let width: CGFloat = 320
+    private static let width = Theme.popoverWidth
     /// The list scrolls past this many rows' worth of height.
     private static let maxListHeight: CGFloat = 400
 
     override func loadView() {
         let header = NSTextField(labelWithString: "")
-        header.attributedStringValue = NSAttributedString(string: "DOWNLOADS", attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .kern: 0.6,
-        ])
+        header.attributedStringValue = Theme.sectionHeader("Downloads")
         clearButton.bezelStyle = .accessoryBarAction
         clearButton.controlSize = .small
         clearButton.target = self
@@ -212,7 +232,7 @@ final class DownloadsController: NSViewController {
         scroll.drawsBackground = false
         scroll.automaticallyAdjustsContentInsets = false
 
-        emptyLabel.font = .systemFont(ofSize: 12)
+        emptyLabel.font = .systemFont(ofSize: Theme.FontSize.secondary)
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
 
@@ -270,7 +290,7 @@ final class DownloadsController: NSViewController {
         scroll.isHidden = downloads.isEmpty
         rows.layoutSubtreeIfNeeded()
         let listHeight = rows.fittingSize.height
-        scrollHeight.constant = downloads.isEmpty ? 56 : min(listHeight, Self.maxListHeight)
+        scrollHeight.constant = downloads.isEmpty ? Theme.emptyListHeight : min(listHeight, Self.maxListHeight)
         preferredContentSize = view.fittingSize
     }
 
@@ -291,6 +311,7 @@ private final class DownloadListDocumentView: NSView {
 private final class DownloadRowView: NSView {
     private var download: Download
     private var isHovered = false { didSet { needsDisplay = true } }
+    private var isPressed = false { didSet { needsDisplay = true } }
     private let icon = NSImageView()
     private let name = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
@@ -309,11 +330,11 @@ private final class DownloadRowView: NSView {
 
         icon.imageScaling = .scaleProportionallyUpOrDown
 
-        name.font = .systemFont(ofSize: 13, weight: .medium)
+        name.font = .systemFont(ofSize: Theme.FontSize.body, weight: .medium)
         name.lineBreakMode = .byTruncatingMiddle
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        detail.font = .systemFont(ofSize: 11)
+        detail.font = .systemFont(ofSize: Theme.FontSize.caption)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingTail
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -340,7 +361,7 @@ private final class DownloadRowView: NSView {
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 48),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.RowHeight.twoLine),
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 32),
@@ -463,10 +484,17 @@ private final class DownloadRowView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.cornerRadius = 8
-        layer?.cornerCurve = .continuous
-        let hover = isHovered && download.state == .complete
-        layer?.backgroundColor = (hover ? NSColor.labelColor.withAlphaComponent(0.06) : .clear).cgColor
+        guard let layer else { return }
+        layer.cornerRadius = Theme.Radius.row
+        layer.cornerCurve = .continuous
+        // Only a finished download opens on a click, so only it lights up.
+        let clickable = download.state == .complete
+        let hover = isHovered && clickable
+        let fill = Theme.fill(hovered: hover, pressed: isPressed && clickable)
+        withEasing(Theme.Duration.quick) { layer.backgroundColor = fill.cgColor }
+        // Under Increase Contrast the row under the mouse gets an outline too.
+        layer.borderWidth = Theme.hairlineWidth
+        layer.borderColor = Theme.selectionOutline(selected: hover).cgColor
     }
 
     override func updateTrackingAreas() {
@@ -476,10 +504,16 @@ private final class DownloadRowView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
-    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseDown(with event: NSEvent) { isPressed = true }
 
     override func mouseUp(with event: NSEvent) {
+        isPressed = false
         guard download.state == .complete, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: download.path))
     }

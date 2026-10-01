@@ -54,7 +54,7 @@ final class StartPageView: NSView {
         icon.widthAnchor.constraint(equalToConstant: 72).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 72).isActive = true
         let hint = NSTextField(labelWithString: "Search or enter a website in the address bar.")
-        hint.font = .systemFont(ofSize: 13)
+        hint.font = .systemFont(ofSize: Theme.FontSize.body)
         hint.textColor = .secondaryLabelColor
         emptyHint.orientation = .vertical
         emptyHint.spacing = 14
@@ -95,7 +95,7 @@ final class StartPageView: NSView {
 
     private static func heading(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.font = .systemFont(ofSize: Theme.FontSize.body, weight: .semibold)
         label.textColor = .secondaryLabelColor
         return label
     }
@@ -185,10 +185,10 @@ final class StartPageView: NSView {
             grid.addRow(with: row + Array(repeating: NSGridCell.emptyContentView, count: Self.columns - row.count))
         }
         // Tiles arrive a moment after the page, so they fade in rather than pop.
-        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        guard window != nil, !Theme.reduceMotion else { return }
         grid.alphaValue = 0
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
+            context.duration = Theme.Duration.panel
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             grid.animator().alphaValue = 1
         }
@@ -241,19 +241,6 @@ private class ClickableView: NSView {
 
 }
 
-/// Runs `changes` to layer-backed views so their layers ease to the new
-/// values over `duration`, instead of snapping as they do by default.
-@MainActor
-func withEasing(_ duration: TimeInterval = 0.15, _ changes: () -> Void) {
-    NSAnimationContext.runAnimationGroup { context in
-        context.duration = duration
-        context.allowsImplicitAnimation = true
-        context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        changes()
-    }
-}
-
-
 /// One site: its favicon, or its first letter, on a rounded square that
 /// lifts a little under the mouse, with the site's name under it.
 private final class SiteTile: ClickableView {
@@ -285,7 +272,7 @@ private final class SiteTile: ClickableView {
             glyph = letter
         }
         let name = NSTextField(labelWithString: site.host)
-        name.font = .systemFont(ofSize: 11.5)
+        name.font = .systemFont(ofSize: Theme.FontSize.secondary)
         name.textColor = .secondaryLabelColor
         name.alignment = .center
         name.lineBreakMode = .byTruncatingTail
@@ -315,23 +302,30 @@ private final class SiteTile: ClickableView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// A stable, soft color per site for letter tiles.
-    private static func color(for host: String) -> NSColor {
+    /// A stable, soft color per site for letter tiles. Darker in light mode,
+    /// where a bright yellow or green letter would barely show on the page.
+    /// Nonisolated, so the color can resolve wherever AppKit asks for it.
+    private nonisolated static func color(for host: String) -> NSColor {
         let hash = host.unicodeScalars.reduce(UInt32(5381)) { ($0 << 5) &+ $0 &+ $1.value }
-        return NSColor(hue: CGFloat(hash % 360) / 360, saturation: 0.55, brightness: 0.85, alpha: 1)
+        let hue = CGFloat(hash % 360) / 360
+        return NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return NSColor(hue: hue, saturation: 0.55, brightness: dark ? 0.85 : 0.7, alpha: 1)
+        }
     }
 
     override func updateLayer() {
         guard let layer = well.layer else { return }
-        layer.cornerRadius = 18
+        layer.cornerRadius = Theme.Radius.tile
         layer.cornerCurve = .continuous
-        layer.borderWidth = 1
-        layer.borderColor = NSColor.separatorColor.cgColor
-        let alpha = isPressed ? 0.14 : isHovered ? 0.1 : 0.055
-        // The square lifts under the mouse and settles under a press.
-        let scale: CGFloat = isPressed ? 0.97 : isHovered ? 1.04 : 1
+        layer.borderWidth = Theme.hairlineWidth
+        layer.borderColor = Theme.hairline.cgColor
+        let alpha = isPressed ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : Theme.Fill.rest
+        // The square lifts under the mouse and settles under a press, except
+        // under Reduce Motion, where the fill alone shows it.
+        let scale: CGFloat = Theme.reduceMotion ? 1 : isPressed ? 0.97 : isHovered ? 1.04 : 1
         withEasing {
-            layer.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
+            layer.backgroundColor = Theme.fill(alpha).cgColor
             layer.transform = CATransform3DMakeScale(scale, scale, 1)
         }
     }
@@ -359,11 +353,11 @@ private final class ClosedTabRow: ClickableView {
             DispatchQueue.main.async { MainActor.assumeIsolated { icon?.image = image } }
         }
         let title = NSTextField(labelWithString: tab.title.isEmpty ? HistoryStore.bare(tab.url) : tab.title)
-        title.font = .systemFont(ofSize: 13)
+        title.font = .systemFont(ofSize: Theme.FontSize.body)
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
         let address = NSTextField(labelWithString: HistoryStore.bare(tab.url))
-        address.font = .systemFont(ofSize: 12)
+        address.font = .systemFont(ofSize: Theme.FontSize.secondary)
         address.textColor = .tertiaryLabelColor
         address.lineBreakMode = .byTruncatingTail
         address.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -387,45 +381,47 @@ private final class ClosedTabRow: ClickableView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func updateLayer() {
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
-        let alpha = isPressed ? 0.1 : isHovered ? 0.06 : 0
-        withEasing { layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor }
+        let fill = Theme.fill(hovered: isHovered, pressed: isPressed)
+        withEasing { layer?.backgroundColor = fill.cgColor }
     }
 }
 
-private extension NSFont {
-    /// The same font in the rounded design, where the system has one.
-    var rounded: NSFont {
-        fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: pointSize) } ?? self
-    }
-}
-
-/// Noise over the wash: a tile of white pixels at random, very low alphas,
-/// repeated. Lets the mouse through to what is under it.
+/// Noise over the wash: a tile of pixels at random, very low alphas,
+/// repeated. White in dark mode and black in light mode, where white would
+/// not show. Lets the mouse through to what is under it.
 private final class GrainView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor(patternImage: Self.tile).setFill()
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        NSColor(patternImage: dark ? Self.whiteTile : Self.blackTile).setFill()
         dirtyRect.fill()
     }
 
-    private static let tile: NSImage = {
+    private static let whiteTile = tile(white: true)
+    private static let blackTile = tile(white: false)
+
+    private static func tile(white: Bool) -> NSImage {
         let side = 96
         var pixels = [UInt8](repeating: 0, count: side * side * 4)
         var state: UInt32 = 0x9E37_79B9
         for index in 0..<(side * side) {
             // A small linear congruential generator; the pattern only has to look random.
             state = state &* 1_664_525 &+ 1_013_904_223
-            let alpha = UInt8(truncatingIfNeeded: state >> 24) / 40  // up to about 0.025
-            // White, premultiplied, so every channel is the alpha.
-            for channel in 0..<4 { pixels[index * 4 + channel] = alpha }
+            // Up to about 0.025 for white on a dark wash. Black on a light
+            // one shows at a third of that; more reads as dirt.
+            let alpha = UInt8(truncatingIfNeeded: state >> 24) / (white ? 40 : 120)
+            // Premultiplied, so white has every channel at the alpha and
+            // black has only the alpha.
+            for channel in 0..<3 { pixels[index * 4 + channel] = white ? alpha : 0 }
+            pixels[index * 4 + 3] = alpha
         }
         guard let context = CGContext(
             data: &pixels, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ), let image = context.makeImage() else { return NSImage() }
         return NSImage(cgImage: image, size: NSSize(width: side, height: side))
-    }()
+    }
 }

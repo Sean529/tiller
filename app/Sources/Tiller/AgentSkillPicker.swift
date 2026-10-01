@@ -76,11 +76,11 @@ final class SkillPicker: NSVisualEffectView {
 
     override func updateLayer() {
         super.updateLayer()
-        layer?.cornerRadius = 12
+        layer?.cornerRadius = Theme.Radius.plate
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.6).cgColor
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.hairline.cgColor
     }
 }
 
@@ -89,16 +89,17 @@ private final class SkillPickerRow: NSView {
     var onHover: (() -> Void)?
     var onClick: (() -> Void)?
     var isSelected = false { didSet { if isSelected != oldValue { needsDisplay = true } } }
+    private var isPressed = false { didSet { if isPressed != oldValue { needsDisplay = true } } }
 
     init(skill: AgentSkill) {
         super.init(frame: .zero)
         wantsLayer = true
         let name = NSTextField(labelWithString: "/" + skill.name)
-        name.font = .systemFont(ofSize: 13, weight: .medium)
+        name.font = .systemFont(ofSize: Theme.FontSize.body, weight: .medium)
         name.lineBreakMode = .byTruncatingTail
         name.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         let hint = NSTextField(labelWithString: skill.argumentHint ?? "")
-        hint.font = .systemFont(ofSize: 11)
+        hint.font = .systemFont(ofSize: Theme.FontSize.caption)
         hint.textColor = .tertiaryLabelColor
         hint.lineBreakMode = .byTruncatingTail
         hint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -110,7 +111,7 @@ private final class SkillPickerRow: NSView {
         let top = NSStackView(views: [name, hint, NSView(), badge])
         top.spacing = 6
         let description = NSTextField(labelWithString: skill.description.isEmpty ? " " : skill.description)
-        description.font = .systemFont(ofSize: 11)
+        description.font = .systemFont(ofSize: Theme.FontSize.caption)
         description.textColor = .secondaryLabelColor
         description.lineBreakMode = .byTruncatingTail
         description.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -136,10 +137,17 @@ private final class SkillPickerRow: NSView {
 
     override var wantsUpdateLayer: Bool { true }
 
+    /// The mouse selects the row it is over, so a pressed row is a selected
+    /// one, and deepens its tint rather than turning grey.
     override func updateLayer() {
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor : nil
+        let fill: NSColor = isSelected
+            ? Theme.accent(isPressed ? Theme.Accent.selectedHover : Theme.Accent.selected)
+            : Theme.fill(hovered: false, pressed: isPressed)
+        withEasing(Theme.Duration.quick) { layer?.backgroundColor = fill.cgColor }
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.selectionOutline(selected: isSelected).cgColor
     }
 
     override func updateTrackingAreas() {
@@ -149,9 +157,11 @@ private final class SkillPickerRow: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { onHover?() }
-    override func mouseDown(with event: NSEvent) {}
+    override func mouseExited(with event: NSEvent) { isPressed = false }
+    override func mouseDown(with event: NSEvent) { isPressed = true }
 
     override func mouseUp(with event: NSEvent) {
+        isPressed = false
         if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
     }
 

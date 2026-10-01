@@ -27,7 +27,7 @@ struct AgentConversation: Codable, Equatable {
 }
 
 /// One row of a saved transcript.
-enum AgentRecord: Codable, Equatable {
+enum AgentRecord: Codable, Equatable, Sendable {
     /// `images` are file names in the chat's folder.
     case user(text: String, images: [String])
     case text(String)
@@ -108,8 +108,18 @@ final class AgentHistoryStore {
     }
 
     func records(for id: String) -> [AgentRecord] {
-        if let known = knownRecords[id] { return known.records }
-        let data = try? Data(contentsOf: folder(for: id).appendingPathComponent("transcript.json"))
+        unwrittenRecords(for: id) ?? Self.readRecords(in: folder(for: id))
+    }
+
+    /// The transcript set this run whose write hasn't reached disk, if any.
+    /// A chat reads this first, then the file off the main thread.
+    func unwrittenRecords(for id: String) -> [AgentRecord]? {
+        knownRecords[id]?.records
+    }
+
+    /// The transcript in a chat's folder. Safe off the main thread.
+    nonisolated static func readRecords(in folder: URL) -> [AgentRecord] {
+        let data = try? Data(contentsOf: folder.appendingPathComponent("transcript.json"))
         return data.flatMap { try? JSONDecoder().decode([AgentRecord].self, from: $0) } ?? []
     }
 
@@ -209,11 +219,15 @@ final class AgentHistoryStore {
     /// Folders of chats that were never saved, left by the last run, and the
     /// images folder older versions of Tiller used.
     private func removeUnsavedFolders() {
-        let manager = FileManager.default
-        try? manager.removeItem(atPath: DataDirectory.path + "/agent-attachments")
-        let saved = Set(index.conversations.map(\.id))
-        for name in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? [] where name != "index.json" && !saved.contains(name) {
-            try? manager.removeItem(at: directory.appendingPathComponent(name))
+        // Deleting runs on the writer queue, after any write already on it
+        // and off the main thread, which is building the window meanwhile.
+        let directory = directory, saved = Set(index.conversations.map(\.id))
+        Self.writer.async {
+            let manager = FileManager.default
+            try? manager.removeItem(atPath: DataDirectory.path + "/agent-attachments")
+            for name in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? [] where name != "index.json" && !saved.contains(name) {
+                try? manager.removeItem(at: directory.appendingPathComponent(name))
+            }
         }
     }
 }

@@ -30,7 +30,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private var agentToggleCount = 0
     private let agentButton = NSButton()
     /// A dot on the agent button while a chat works behind a hidden panel.
-    private let agentBadge = NSView()
+    private let agentBadge = AgentBadgeView()
     private let tabStrip = TabStripView()
     private let addressBar = AddressBarView(frame: NSRect(x: 0, y: 0, width: 800, height: 40))
     private let backButton = NSButton()
@@ -788,7 +788,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             completion?()
             layer.removeAnimation(forKey: key)
         }
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if Theme.reduceMotion {
             return finish()
         }
         let animation = CABasicAnimation(keyPath: "transform.translation.x")
@@ -806,14 +806,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     /// The dot shows only while the panel is hidden, where the work would
-    /// otherwise go unseen.
+    /// otherwise go unseen. The button says so too, for VoiceOver and the
+    /// tooltip, which can't see the dot.
     private func updateAgentBadge() {
         let shown = agentPanel.isBusy && !agentPanelShown
         agentBadge.isHidden = !shown
-        guard shown else { return }
-        agentBadge.effectiveAppearance.performAsCurrentDrawingAppearance {
-            agentBadge.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
-        }
+        let label = shown ? "Agent (working)" : "Agent"
+        agentButton.toolTip = label
+        agentButton.setAccessibilityLabel(label)
     }
 
     private static let agentVisibleKey = "agentPanelVisible"
@@ -1120,14 +1120,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         profileButton.action = #selector(showProfilesMenu(_:))
         agentButton.setButtonType(.pushOnPushOff)
         agentButton.state = agentPanel.isHidden ? .off : .on
-        agentBadge.wantsLayer = true
-        agentBadge.layer?.cornerRadius = 3.5
         agentBadge.isHidden = true
         agentBadge.translatesAutoresizingMaskIntoConstraints = false
         agentButton.addSubview(agentBadge)
         NSLayoutConstraint.activate([
-            agentBadge.widthAnchor.constraint(equalToConstant: 7),
-            agentBadge.heightAnchor.constraint(equalToConstant: 7),
+            agentBadge.widthAnchor.constraint(equalToConstant: Theme.busyDot),
+            agentBadge.heightAnchor.constraint(equalToConstant: Theme.busyDot),
             agentBadge.topAnchor.constraint(equalTo: agentButton.topAnchor, constant: 3),
             agentBadge.trailingAnchor.constraint(equalTo: agentButton.trailingAnchor, constant: -3),
         ])
@@ -1569,7 +1567,7 @@ final class StatusBubbleView: NSView {
         wantsLayer = true
         alphaValue = 0
         isHidden = true
-        label.font = .systemFont(ofSize: 11.5)
+        label.font = .systemFont(ofSize: Theme.FontSize.secondary)
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingMiddle
         label.maximumNumberOfLines = 1
@@ -1590,12 +1588,12 @@ final class StatusBubbleView: NSView {
 
     override func updateLayer() {
         guard let layer else { return }
-        layer.cornerRadius = 7
+        layer.cornerRadius = Theme.Radius.row
         layer.cornerCurve = .continuous
         layer.maskedCorners = [.layerMaxXMaxYCorner]
         layer.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
-        layer.borderWidth = 1
-        layer.borderColor = NSColor.separatorColor.cgColor
+        layer.borderWidth = Theme.hairlineWidth
+        layer.borderColor = Theme.hairline.cgColor
     }
 
     /// Shows `text`, or hides the bubble when it is empty. The URL loses its
@@ -1609,7 +1607,8 @@ final class StatusBubbleView: NSView {
         pendingShow = nil
         if shown.isEmpty {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.12
+                // Under Reduce Motion the bubble goes at once.
+                context.duration = Theme.reduceMotion ? 0 : Theme.Duration.quick
                 animator().alphaValue = 0
             } completionHandler: { [weak self] in
                 MainActor.assumeIsolated {
@@ -1627,7 +1626,7 @@ final class StatusBubbleView: NSView {
             MainActor.assumeIsolated {
                 guard let self, !self.shownText.isEmpty else { return }
                 NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.15
+                    context.duration = Theme.reduceMotion ? 0 : Theme.Duration.standard
                     self.animator().alphaValue = 1
                 }
             }
@@ -1643,6 +1642,8 @@ final class StatusBubbleView: NSView {
 /// Holds the tabs' pages. As a card its top corners are rounded where it
 /// meets the sidebar and the agent panel, and a hairline sets it apart from
 /// them, which a light page on the light window would otherwise run into.
+/// The hairline is a bordered layer with the card's own continuous corners,
+/// so it follows the clip exactly.
 final class PageCardView: NSView {
     var isCard = false { didSet { needsDisplay = true } }
     /// Whether the corner next to the agent panel is rounded too.
@@ -1653,14 +1654,14 @@ final class PageCardView: NSView {
         }
     }
 
-    private let outline = CAShapeLayer()
+    private let outline = CALayer()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.cornerCurve = .continuous
-        outline.fillColor = nil
-        outline.lineWidth = 1
+        outline.cornerCurve = .continuous
+        outline.borderWidth = Theme.hairlineWidth
         // Above the pages, which are sublayers too.
         outline.zPosition = 1
     }
@@ -1671,39 +1672,53 @@ final class PageCardView: NSView {
 
     override func updateLayer() {
         guard let layer else { return }
-        layer.cornerRadius = isCard ? 10 : 0
-        layer.masksToBounds = isCard
-        layer.maskedCorners = roundsTrailingCorner
+        let corners: CACornerMask = roundsTrailingCorner
             ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMaxYCorner]
+        layer.cornerRadius = isCard ? Theme.Radius.card : 0
+        layer.masksToBounds = isCard
+        layer.maskedCorners = corners
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         outline.isHidden = !isCard
-        outline.strokeColor = NSColor.separatorColor.cgColor
+        outline.cornerRadius = Theme.Radius.card
+        outline.maskedCorners = corners
+        outline.borderColor = Theme.hairline.cgColor
+        CATransaction.commit()
         if outline.superlayer == nil { layer.addSublayer(outline) }
     }
 
     override func layout() {
         super.layout()
         // The top and the sides next to the sidebar and the panel. The bottom
-        // and an open side are the window's edge.
-        let radius: CGFloat = 10
-        let inset: CGFloat = 0.5
-        let path = CGMutablePath()
-        path.move(to: CGPoint(x: inset, y: 0))
-        path.addLine(to: CGPoint(x: inset, y: bounds.maxY - radius))
-        path.addQuadCurve(to: CGPoint(x: radius, y: bounds.maxY - inset), control: CGPoint(x: inset, y: bounds.maxY - inset))
-        if roundsTrailingCorner {
-            path.addLine(to: CGPoint(x: bounds.maxX - radius, y: bounds.maxY - inset))
-            path.addQuadCurve(
-                to: CGPoint(x: bounds.maxX - inset, y: bounds.maxY - radius),
-                control: CGPoint(x: bounds.maxX - inset, y: bounds.maxY - inset))
-            path.addLine(to: CGPoint(x: bounds.maxX - inset, y: 0))
-        } else {
-            path.addLine(to: CGPoint(x: bounds.maxX, y: bounds.maxY - inset))
-        }
+        // and an open trailing side are the window's edge, so the outline
+        // reaches past them and the card's clip cuts those lines off.
+        let overhang = Theme.hairlineWidth
+        var frame = bounds
+        frame.origin.y -= overhang
+        frame.size.height += overhang
+        if !roundsTrailingCorner { frame.size.width += overhang }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        outline.frame = bounds
-        outline.path = path
+        outline.frame = frame
         CATransaction.commit()
+    }
+}
+
+/// The dot on the agent button. Its color is set in `updateLayer`, so it
+/// follows light and dark mode and the accent color as they change.
+private final class AgentBadgeView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = Theme.busyDot / 2
+        layer?.backgroundColor = NSColor.controlAccentColor.cgColor
     }
 }
 

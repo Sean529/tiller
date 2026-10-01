@@ -84,7 +84,7 @@ final class AgentPanelView: NSView {
             agentPicker.lastItem?.image = kind.logo(size: 16)
         }
         agentPicker.isBordered = false
-        agentPicker.font = .systemFont(ofSize: 13, weight: .semibold)
+        agentPicker.font = .systemFont(ofSize: Theme.FontSize.body, weight: .semibold)
         agentPicker.toolTip = "Agent for this chat"
         agentPicker.target = self
         agentPicker.action = #selector(agentChanged(_:))
@@ -382,8 +382,8 @@ private final class StatusPill: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         dot.wantsLayer = true
-        dot.layer?.cornerRadius = 3
-        label.font = .systemFont(ofSize: 11)
+        dot.layer?.cornerRadius = Theme.busyDot / 2
+        label.font = .systemFont(ofSize: Theme.FontSize.caption)
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -394,14 +394,19 @@ private final class StatusPill: NSView {
         NSLayoutConstraint.activate([
             dot.leadingAnchor.constraint(equalTo: leadingAnchor),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-            dot.widthAnchor.constraint(equalToConstant: 6),
-            dot.heightAnchor.constraint(equalToConstant: 6),
+            dot.widthAnchor.constraint(equalToConstant: Theme.busyDot),
+            dot.heightAnchor.constraint(equalToConstant: Theme.busyDot),
             label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
             label.trailingAnchor.constraint(equalTo: trailingAnchor),
             label.topAnchor.constraint(equalTo: topAnchor),
             label.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The dot's color is the only other sign of the state, so VoiceOver
+        // reads the pill as one element whose label says it in words.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        label.setAccessibilityElement(false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -410,11 +415,12 @@ private final class StatusPill: NSView {
         label.stringValue = text
         isHidden = text.isEmpty
         toolTip = text
+        setAccessibilityLabel("Agent status: \(text)")
         guard busy != self.busy else { return }
         self.busy = busy
         needsDisplay = true
         dot.layer?.removeAnimation(forKey: "pulse")
-        if busy, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if busy, !Theme.reduceMotion {
             let pulse = CABasicAnimation(keyPath: "opacity")
             pulse.fromValue = 1
             pulse.toValue = 0.25
@@ -457,11 +463,11 @@ final class AgentEmptyState: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.font = .systemFont(ofSize: Theme.FontSize.title, weight: .semibold)
         title.alignment = .center
 
         let subtitle = NSTextField(wrappingLabelWithString: "It can read the page, click, type and open tabs for you. Type / for skills.")
-        subtitle.font = .systemFont(ofSize: 12)
+        subtitle.font = .systemFont(ofSize: Theme.FontSize.secondary)
         subtitle.textColor = .secondaryLabelColor
         subtitle.alignment = .center
         subtitle.preferredMaxLayoutWidth = 240
@@ -533,7 +539,7 @@ private final class SymbolBadge: NSView {
 
     override func updateLayer() {
         layer?.cornerRadius = 24
-        let color = logo == nil ? NSColor.controlAccentColor.withAlphaComponent(0.14) : .labelColor.withAlphaComponent(0.06)
+        let color = logo == nil ? Theme.accent(Theme.Accent.soft) : Theme.fill(0.06)
         layer?.backgroundColor = color.cgColor
     }
 }
@@ -553,7 +559,7 @@ private final class SuggestionButton: NSView {
             .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!)
         icon.contentTintColor = .secondaryLabelColor
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 12)
+        label.font = .systemFont(ofSize: Theme.FontSize.secondary)
         let stack = NSStackView(views: [icon, label])
         stack.spacing = 7
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -573,12 +579,12 @@ private final class SuggestionButton: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.cornerRadius = 14
+        layer?.cornerRadius = Theme.Radius.plate
         layer?.cornerCurve = .continuous
-        let alpha = isPressed ? 0.14 : isHovered ? 0.09 : 0.05
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        let alpha = isPressed ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : Theme.Fill.rest
+        withEasing(Theme.Duration.quick) { layer?.backgroundColor = Theme.fill(alpha).cgColor }
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.hairline.cgColor
     }
 
     override func updateTrackingAreas() {
@@ -588,7 +594,11 @@ private final class SuggestionButton: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
     override func mouseDown(with event: NSEvent) { isPressed = true }
 
     override func mouseUp(with event: NSEvent) {
@@ -611,7 +621,7 @@ private final class SuggestionButton: NSView {
 final class Composer: NSView {
     let textView = PlaceholderTextView()
     let sendButton = NSButton()
-    let attachButton = NSButton()
+    let attachButton = Theme.iconButton("paperclip", label: "Attach Images")
     var onImages: (([NSImage]) -> Void)?
     var onOpenImage: ((Int) -> Void)?
     private let undo = UndoManager()
@@ -634,7 +644,7 @@ final class Composer: NSView {
         }
     }
 
-    private static let font = NSFont.systemFont(ofSize: 13)
+    private static let font = NSFont.systemFont(ofSize: Theme.FontSize.body)
     private static let maxLines: CGFloat = 8
     private static let sendImage = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: "Send")?
         .withSymbolConfiguration(.init(pointSize: 22, weight: .regular))
@@ -681,6 +691,9 @@ final class Composer: NSView {
         textView.onFocusChange = { [weak self] in self?.needsDisplay = true }
         textView.onPasteboardImages = { [weak self] pasteboard in self?.takeImages(from: pasteboard) ?? false }
         textView.imageDropTarget = self
+        // The placeholder is drawn by hand, so VoiceOver gets it, and a
+        // name for the field, from here.
+        textView.setAccessibilityLabel("Message")
         registerForDraggedTypes(AgentAttachment.pasteboardTypes)
 
         thumbnails.isHidden = true
@@ -702,14 +715,6 @@ final class Composer: NSView {
         sendButton.imagePosition = .imageOnly
         updateSendButton()
 
-        attachButton.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach Images")?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
-        attachButton.toolTip = "Attach Images"
-        attachButton.isBordered = false
-        attachButton.bezelStyle = .accessoryBarAction
-        attachButton.imagePosition = .imageOnly
-        attachButton.contentTintColor = .secondaryLabelColor
-
         for view in [thumbnails, scrollView, attachButton, sendButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -728,12 +733,10 @@ final class Composer: NSView {
             textHeight,
             attachButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             attachButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            attachButton.widthAnchor.constraint(equalToConstant: 26),
-            attachButton.heightAnchor.constraint(equalToConstant: 26),
             sendButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             sendButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            sendButton.widthAnchor.constraint(equalToConstant: 26),
-            sendButton.heightAnchor.constraint(equalToConstant: 26),
+            sendButton.widthAnchor.constraint(equalToConstant: Theme.ButtonSize.bar),
+            sendButton.heightAnchor.constraint(equalToConstant: Theme.ButtonSize.bar),
         ])
     }
 
@@ -767,10 +770,12 @@ final class Composer: NSView {
         let focused = window?.firstResponder === textView
         layer?.cornerRadius = 16
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.7).cgColor
-        layer?.borderWidth = isDropTarget ? 2 : 1
+        // See-through over the panel's material, unless Reduce Transparency is on.
+        let background: CGFloat = Theme.reduceTransparency ? 1 : 0.7
+        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(background).cgColor
+        layer?.borderWidth = isDropTarget ? 2 : Theme.hairlineWidth
         layer?.borderColor = (isDropTarget ? NSColor.controlAccentColor
-            : focused ? NSColor.controlAccentColor.withAlphaComponent(0.6) : NSColor.separatorColor).cgColor
+            : focused ? Theme.accent(0.6) : Theme.hairline).cgColor
     }
 
     /// Clicks anywhere in the box go to the text.
@@ -824,7 +829,10 @@ final class QuickLookItems: NSObject, QLPreviewPanelDataSource {
 /// it go to `imageDropTarget`.
 final class PlaceholderTextView: NSTextView {
     var placeholder = "" {
-        didSet { needsDisplay = true }
+        didSet {
+            needsDisplay = true
+            setAccessibilityPlaceholderValue(placeholder)
+        }
     }
     var onFocusChange: (() -> Void)?
     /// Takes the pasteboard's images, returning false if it has none.
@@ -874,7 +882,7 @@ final class PlaceholderTextView: NSTextView {
         super.draw(dirtyRect)
         guard string.isEmpty, !placeholder.isEmpty else { return }
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: font ?? .systemFont(ofSize: 13),
+            .font: font ?? .systemFont(ofSize: Theme.FontSize.body),
             .foregroundColor: NSColor.placeholderTextColor,
         ]
         let origin = NSPoint(x: textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0), y: textContainerOrigin.y)

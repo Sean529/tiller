@@ -63,17 +63,29 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// A saved chat opens at its newest message once it has a size.
     private var pendingScrollToBottom = false
 
-    /// Whether the saved transcript has been read and drawn. A saved chat
-    /// waits until it is first shown or written to, so a launch with several
-    /// tabs of long chats doesn't build them all behind a hidden panel.
-    private var recordsLoaded: Bool
+    /// Where the saved transcript is: still in its file, on its way from
+    /// disk, or drawn. A saved chat waits until it is first shown or written
+    /// to, so a launch with several tabs of long chats doesn't build them all
+    /// behind a hidden panel.
+    private enum LoadState {
+        case unloaded
+        /// Numbered, so a read that was overtaken is dropped when it lands.
+        case loading(Int)
+        case loaded
+    }
+    private var loadState: LoadState
+    private var loadCount = 0
+    private var recordsLoaded: Bool {
+        if case .loaded = loadState { return true }
+        return false
+    }
 
     /// A new chat, or a saved one with its transcript.
     init(conversation: AgentConversation? = nil) {
         id = conversation?.id ?? UUID().uuidString
         self.conversation = conversation
         tools = conversation?.tools ?? Settings.agentTools
-        recordsLoaded = conversation == nil
+        loadState = conversation == nil ? .loaded : .unloaded
         super.init(frame: .zero)
         build()
         showIdle()
@@ -82,15 +94,64 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         )
     }
 
-    /// Reads and draws the saved transcript, once.
-    func loadIfNeeded() {
-        guard !recordsLoaded else { return }
-        recordsLoaded = true
-        records = AgentHistoryStore.shared.records(for: id)
-        records.forEach(show)
+    /// Reads and draws the saved transcript, once. The file and the
+    /// thumbnails of its images are read off the main thread, since a long
+    /// chat with screenshots would hold the tab switch up. `now` reads them
+    /// here instead, for a send that is about to add to them.
+    func loadIfNeeded(now: Bool = false) {
+        switch loadState {
+        case .loaded: return
+        case .loading where !now: return
+        case .loading, .unloaded: break
+        }
+        let folder = folder
+        // The newest records may still be on their way to disk.
+        let unwritten = AgentHistoryStore.shared.unwrittenRecords(for: id)
+        if now {
+            let records = unwritten ?? AgentHistoryStore.readRecords(in: folder)
+            finishLoading(records, thumbnails: Self.thumbnails(for: records, in: folder))
+            return
+        }
+        loadCount += 1
+        let count = loadCount
+        loadState = .loading(count)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let records = unwritten ?? AgentHistoryStore.readRecords(in: folder)
+            let thumbnails = Self.thumbnails(for: records, in: folder)
+            await MainActor.run {
+                guard let self, case .loading(count) = self.loadState else { return }
+                self.finishLoading(records, thumbnails: thumbnails)
+            }
+        }
+    }
+
+    /// Thumbnails for every image a transcript names, by file name. Read
+    /// from the files, not the whole images: a saved chat can hold a dozen
+    /// screenshots.
+    nonisolated private static func thumbnails(for records: [AgentRecord], in folder: URL) -> Thumbnails {
+        var images: [String: NSImage] = [:]
+        for case .user(_, let names) in records {
+            for name in names where images[name] == nil {
+                images[name] = AgentAttachment.thumbnail(at: folder.appendingPathComponent(name), side: 128)
+            }
+        }
+        return Thumbnails(images: images)
+    }
+
+    /// Images made on a background thread and only used on the main one
+    /// once they are handed over.
+    private struct Thumbnails: @unchecked Sendable {
+        let images: [String: NSImage]
+    }
+
+    private func finishLoading(_ records: [AgentRecord], thumbnails: Thumbnails) {
+        loadState = .loaded
+        self.records = records
+        for record in records { show(record, thumbnails: thumbnails) }
         transcript.closeToolGroup()
         pendingScrollToBottom = !records.isEmpty
         showIdle()
+        if pendingScrollToBottom { needsLayout = true }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -235,11 +296,11 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         layoutSubtreeIfNeeded()
         let clip = scrollView.contentView
         let y = max(0, transcript.frame.height - clip.bounds.height)
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if Theme.reduceMotion {
             clip.scroll(to: NSPoint(x: 0, y: y))
         } else {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.25
+                context.duration = Theme.Duration.panel
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 clip.animator().setBoundsOrigin(NSPoint(x: 0, y: y))
             }
@@ -392,7 +453,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
 
     func send(_ text: String, images: [AgentAttachment] = []) {
-        loadIfNeeded()
+        loadIfNeeded(now: true)
         var conversation = conversation ?? AgentConversation(
             id: id, kind: .current, title: AgentConversation.title(from: text), created: Date(), updated: Date()
         )
@@ -734,13 +795,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
 
     /// Draws a saved row.
-    private func show(_ record: AgentRecord) {
+    private func show(_ record: AgentRecord, thumbnails: Thumbnails) {
         switch record {
         case .user(let text, let names):
-            // Thumbnails read from the files, not the whole images: a saved
-            // chat can hold a dozen screenshots.
-            let loaded = names.map { folder.appendingPathComponent($0) }
-                .compactMap { url in AgentAttachment.thumbnail(at: url, side: 128).map { (url, $0) } }
+            let loaded = names.compactMap { name in thumbnails.images[name].map { (folder.appendingPathComponent(name), $0) } }
             let urls = loaded.map(\.0)
             transcript.add(UserMessageView(text: text, images: loaded.map(\.1)) { [weak self] index in
                 self?.preview(urls, at: index)
@@ -798,9 +856,9 @@ final class ScrollDownButton: NSButton {
         guard show != shown else { return }
         shown = show
         if show { isHidden = false }
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let reduceMotion = Theme.reduceMotion
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = reduceMotion ? 0 : 0.15
+            context.duration = reduceMotion ? 0 : Theme.Duration.standard
             animator().alphaValue = show ? 1 : 0
         } completionHandler: { [weak self] in
             MainActor.assumeIsolated {
@@ -817,8 +875,8 @@ final class ScrollDownButton: NSButton {
         guard let layer else { return }
         layer.cornerRadius = 15
         layer.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        layer.borderWidth = 1
-        layer.borderColor = NSColor.separatorColor.cgColor
+        layer.borderWidth = Theme.hairlineWidth
+        layer.borderColor = Theme.hairline.cgColor
         layer.shadowColor = NSColor.black.cgColor
         layer.shadowOpacity = 0.18
         layer.shadowRadius = 4

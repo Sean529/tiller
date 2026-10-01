@@ -39,7 +39,7 @@ final class TabStripView: NSView {
     private static let titleMinWidth: CGFloat = 104
     private static let minTabWidth: CGFloat = 34
     private static let rowHeight: CGFloat = 34
-    private static let animationDuration = 0.18
+    private static let animationDuration = Theme.Duration.slide
 
     private var items: [TabItemView] = []
     private var selectedItem: TabItemView?
@@ -130,6 +130,8 @@ final class TabStripView: NSView {
     /// `reveal` scrolls the selected tab into view.
     private func layoutItems(animated: Bool, fadeIn: [TabItemView] = [], reveal: Bool = true) {
         guard !items.isEmpty else { return }
+        // Under Reduce Motion tabs land in their new places at once.
+        let animated = animated && !Theme.reduceMotion
         let length = tabLength
         let extent = extent
         let compact = (isVertical ? bounds.width : length) < Self.titleMinWidth
@@ -230,7 +232,9 @@ final class TabItemView: NSView {
     var isSelected = false {
         didSet {
             guard isSelected != oldValue else { return }
-            titleLabel.font = .systemFont(ofSize: 12, weight: isSelected ? .medium : .regular)
+            titleLabel.font = .systemFont(ofSize: Theme.FontSize.secondary, weight: isSelected ? .medium : .regular)
+            setAccessibilityValue(isSelected)
+            setAccessibilitySelected(isSelected)
             updateAppearance()
         }
     }
@@ -263,6 +267,7 @@ final class TabItemView: NSView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
     private var isHovered = false { didSet { updateAppearance() } }
+    private var isPressed = false { didSet { updateAppearance() } }
     private var iconLeading: NSLayoutConstraint!
     private var iconCentered: NSLayoutConstraint!
     private var closeOverIcon: NSLayoutConstraint!
@@ -270,22 +275,30 @@ final class TabItemView: NSView {
     private var titleToClose: NSLayoutConstraint!
 
     private static let globe = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
-    private static let closeImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")?
-        .withSymbolConfiguration(.init(pointSize: 9, weight: .bold))
+    private static let closeImage = Theme.closeImage(size: 9, label: "Close Tab")
 
     init(tab: Tab) {
         self.tab = tab
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
+        // VoiceOver reads a tab as one of a group of radio buttons, as it
+        // does the tabs of a tab view.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.radioButton)
+        setAccessibilityValue(false)
+        setAccessibilitySelected(false)
+        setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: "Close Tab", target: self, selector: #selector(closeFromAccessibility)),
+        ])
 
         icon.imageScaling = .scaleProportionallyDown
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
-        titleLabel.font = .systemFont(ofSize: 12)
+        titleLabel.font = .systemFont(ofSize: Theme.FontSize.secondary)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.cell?.truncatesLastVisibleLine = true
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -337,6 +350,7 @@ final class TabItemView: NSView {
         if titleLabel.stringValue != title {
             titleLabel.stringValue = title
             toolTip = title
+            setAccessibilityLabel(title)
         }
         icon.image = tab.favicon ?? Self.globe
         icon.contentTintColor = .secondaryLabelColor
@@ -344,11 +358,15 @@ final class TabItemView: NSView {
     }
 
     private func updateAppearance() {
-        let fill: NSColor = isSelected ? .labelColor.withAlphaComponent(0.11)
-            : isHovered ? .labelColor.withAlphaComponent(0.05) : .clear
+        let fill = Theme.fill(hovered: isHovered, pressed: isPressed, selected: isSelected)
         // The fill eases between rest, hover and selected rather than snapping.
         withEasing { layer?.backgroundColor = fill.cgColor }
-        titleLabel.textColor = isSelected ? .labelColor : .secondaryLabelColor
+        // Under Increase Contrast the selected tab gets an outline too.
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.selectionOutline(selected: isSelected).cgColor
+        // Unselected titles in secondary gray read as disabled; the weight
+        // alone marks the selected one.
+        titleLabel.textColor = .labelColor
         // A compact tab only offers to close when it is the selected one, so a
         // pass of the mouse along a crowded row can't hit a close button.
         let showsClose = closesOnTrailing ? isHovered || isSelected : isHovered && (!isCompact || isSelected)
@@ -380,15 +398,24 @@ final class TabItemView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
 
     override func mouseDown(with event: NSEvent) {
+        isPressed = true
         onSelect?()
         strip?.beginDrag(self, with: event)
     }
 
     override func mouseDragged(with event: NSEvent) { strip?.continueDrag(with: event) }
-    override func mouseUp(with event: NSEvent) { strip?.endDrag() }
+
+    override func mouseUp(with event: NSEvent) {
+        isPressed = false
+        strip?.endDrag()
+    }
 
     // Middle click closes, as in other browsers.
     override func otherMouseUp(with event: NSEvent) {
@@ -404,6 +431,18 @@ final class TabItemView: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
 
     @objc private func closeClicked() { onClose?() }
+
+    // MARK: Accessibility
+
+    override func accessibilityPerformPress() -> Bool {
+        onSelect?()
+        return true
+    }
+
+    @objc private func closeFromAccessibility() -> Bool {
+        onClose?()
+        return true
+    }
 }
 
 /// The row after the last tab of a sidebar, which opens a new tab.
@@ -423,20 +462,23 @@ final class NewTabRowView: NSView {
     private let icon = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "New Tab")
     private var isHovered = false { didSet { needsDisplay = true } }
+    private var isPressed = false { didSet { needsDisplay = true } }
     private var iconLeading: NSLayoutConstraint!
     private var iconCentered: NSLayoutConstraint!
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
         toolTip = "New Tab"
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("New Tab")
 
-        icon.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        icon.image = Theme.symbol("plus", size: Theme.Symbol.row, label: "New Tab")
         icon.contentTintColor = .secondaryLabelColor
-        titleLabel.font = .systemFont(ofSize: 12)
+        titleLabel.font = .systemFont(ofSize: Theme.FontSize.secondary)
         titleLabel.textColor = .secondaryLabelColor
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -466,9 +508,9 @@ final class NewTabRowView: NSView {
 
     override func updateLayer() {
         super.updateLayer()
-        withEasing { layer?.backgroundColor = (isHovered ? NSColor.labelColor.withAlphaComponent(0.05) : .clear).cgColor }
+        let fill = Theme.fill(hovered: isHovered, pressed: isPressed)
+        withEasing { layer?.backgroundColor = fill.cgColor }
     }
-
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -478,9 +520,22 @@ final class NewTabRowView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseDown(with event: NSEvent) { isPressed = true }
+
     override func mouseUp(with event: NSEvent) {
+        isPressed = false
         if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
     }
 
     override var mouseDownCanMoveWindow: Bool { false }

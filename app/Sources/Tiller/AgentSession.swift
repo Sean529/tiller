@@ -324,7 +324,15 @@ final class AgentSession {
                         guard let name = plugin["name"] as? String, let path = plugin["path"] as? String else { return nil }
                         return (name, path)
                     }
-                    onEvent?(.skills(AgentSkillCatalog.skills(named: names, plugins: plugins, kind: kind)))
+                    // Reading every skill file would hold the first token up.
+                    let generation = generation, kind = kind
+                    Task.detached(priority: .utility) { [weak self] in
+                        let scanned = AgentSkillCatalog.scanSkills(plugins: plugins, kind: kind)
+                        await MainActor.run {
+                            guard let self, self.generation == generation else { return }
+                            self.onEvent?(.skills(AgentSkillCatalog.skills(named: names, scanned: scanned, kind: kind)))
+                        }
+                    }
                 }
             case "api_retry": onEvent?(.retrying)
             default: break
@@ -640,14 +648,19 @@ final class JSONLineParser: @unchecked Sendable {
     func feed(_ data: Data) -> [Message] {
         buffer.append(data)
         var messages: [Message] = []
-        while let newline = buffer[(buffer.startIndex + scanned)...].firstIndex(of: 0x0A) {
-            let line = buffer[buffer.startIndex..<newline]
+        // The consumed lines are dropped once per chunk, not once per line:
+        // a chunk of token lines would otherwise shift the rest of the
+        // buffer for every one of them.
+        var start = buffer.startIndex
+        while let newline = buffer[(start + scanned)...].firstIndex(of: 0x0A) {
+            let line = buffer[start..<newline]
             if let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
                 messages.append(Message(object: object))
             }
-            buffer.removeSubrange(buffer.startIndex...newline)
+            start = newline + 1
             scanned = 0
         }
+        if start > buffer.startIndex { buffer.removeSubrange(buffer.startIndex..<start) }
         scanned = buffer.count
         return messages
     }

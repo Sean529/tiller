@@ -456,14 +456,21 @@ enum AgentSkillCatalog {
     }
 
     /// The skills the CLI said it loaded, described from their files where
-    /// Tiller finds them. `plugins` are folders whose `skills` hold more.
-    static func skills(named names: [String], plugins: [(name: String, path: String)], kind: AgentKind) -> [AgentSkill] {
+    /// Tiller finds them: the library's enabled skills first, then `scanned`,
+    /// what `scanSkills` read for the CLI.
+    static func skills(named names: [String], scanned: [AgentSkill], kind: AgentKind) -> [AgentSkill] {
         var known: [String: AgentSkill] = [:]
-        let pluginSkills = plugins.flatMap { plugin in
+        for skill in AgentSkillStore.shared.enabledSkills + scanned where known[skill.name] == nil { known[skill.name] = skill }
+        return names.map { known[$0] ?? AgentSkill(name: $0, description: "", argumentHint: nil, path: nil, origin: .user) }
+    }
+
+    /// The CLI's own skills and its plugins', from their files. `plugins` are
+    /// folders whose `skills` hold more. Many plugins mean many files, so a
+    /// session asks off the main thread.
+    nonisolated static func scanSkills(plugins: [(name: String, path: String)], kind: AgentKind) -> [AgentSkill] {
+        userSkills(for: kind) + plugins.flatMap { plugin in
             folders(in: plugin.path + "/skills").compactMap { AgentSkill.read(folder: $0, origin: .user, prefix: plugin.name) }
         }
-        for skill in skills(for: kind) + pluginSkills where known[skill.name] == nil { known[skill.name] = skill }
-        return names.map { known[$0] ?? AgentSkill(name: $0, description: "", argumentHint: nil, path: nil, origin: .user) }
     }
 
     /// The CLI's own skills, from its user folders and the working folder's.
