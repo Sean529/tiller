@@ -214,3 +214,79 @@ private final class SkillPickerRow: NSView {
         return true
     }
 }
+
+/// Drives a `SkillPicker` for a text view: opens it while the text is a `/`
+/// and the start of a name, moves through it with the arrow keys, and puts
+/// `/name ` in the text on Tab, Return or a click. The chat's message field
+/// and the scheduled prompt editor both use it.
+@MainActor
+final class SkillCompletion {
+    let picker = SkillPicker()
+    /// What `/` can call, read when the picker opens.
+    var skills: () -> [AgentSkill]
+    private weak var textView: NSTextView?
+    /// The skills offered while the picker is open.
+    private var offered: [AgentSkill]?
+
+    init(textView: NSTextView, skills: @escaping () -> [AgentSkill]) {
+        self.textView = textView
+        self.skills = skills
+        picker.isHidden = true
+        picker.onPick = { [weak self] skill in self?.complete(skill) }
+    }
+
+    var isShown: Bool { !picker.isHidden }
+
+    /// Call when the text changes.
+    func update() {
+        guard let text = textView?.string, text.hasPrefix("/"), !text.contains(where: \.isWhitespace) else { return hide() }
+        let skills = offered ?? self.skills()
+        offered = skills
+        picker.show(skills, matching: String(text.dropFirst()))
+    }
+
+    func hide() {
+        picker.isHidden = true
+        offered = nil
+    }
+
+    /// The text view's `doCommandBy` while the picker is open. Returns
+    /// whether the picker took the command.
+    func handle(_ selector: Selector) -> Bool {
+        guard isShown else { return false }
+        switch selector {
+        case #selector(NSResponder.moveUp(_:)):
+            picker.moveSelection(by: -1)
+        case #selector(NSResponder.moveDown(_:)):
+            picker.moveSelection(by: 1)
+        case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertNewline(_:)):
+            if let skill = picker.selectedSkill { complete(skill) }
+        case #selector(NSResponder.cancelOperation(_:)):
+            hide()
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// Puts `/name ` in the field, keeping it undoable.
+    func complete(_ skill: AgentSkill) {
+        guard let textView else { return }
+        let range = NSRange(location: 0, length: (textView.string as NSString).length)
+        let replacement = "/" + skill.name + " "
+        if textView.shouldChangeText(in: range, replacementString: replacement) {
+            textView.replaceCharacters(in: range, with: replacement)
+            textView.didChangeText()
+        }
+        textView.setSelectedRange(NSRange(location: (replacement as NSString).length, length: 0))
+        hide()
+        textView.window?.makeFirstResponder(textView)
+    }
+
+    /// The skill a message starting with `/name` calls, among `skills`.
+    static func skill(calledBy text: String, in skills: [AgentSkill]) -> AgentSkill? {
+        guard text.hasPrefix("/") else { return nil }
+        let name = text.dropFirst().prefix { !$0.isWhitespace }
+        return skills.first { $0.name == name }
+    }
+}

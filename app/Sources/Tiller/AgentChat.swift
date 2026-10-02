@@ -21,8 +21,15 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     var input: NSView { composer.textView }
     var isEmpty: Bool { conversation == nil }
     var isBusy: Bool { session?.isBusy == true }
-    /// A new chat uses the agent picked for new chats until its first message.
-    var kind: AgentKind { conversation?.kind ?? .current }
+    /// A new chat uses the agent picked for new chats until its first
+    /// message, unless it was made for another.
+    var kind: AgentKind { conversation?.kind ?? presetKind ?? .current }
+    /// When the chat last changed, for picking a tab a scheduled run can take.
+    var updated: Date { conversation?.updated ?? .distantPast }
+    /// Whether the message field has text or images not yet sent.
+    var hasDraft: Bool {
+        !composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !composer.attachments.isEmpty
+    }
     var title: String { conversation?.title ?? "New Chat" }
     /// The built-in tools this chat allows. A new chat starts with Settings'.
     private(set) var tools: [AgentTool]
@@ -42,12 +49,16 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private static let insets = NSEdgeInsets(top: 8, left: 0, bottom: 10, right: 0)
     private let emptyState = AgentEmptyState()
     private let composer = Composer()
-    private let skillPicker = SkillPicker()
+    private lazy var skillCompletion = SkillCompletion(textView: composer.textView) { [weak self] in
+        self?.availableSkills ?? []
+    }
     /// The skills the running agent said it loaded. Until then, `/` offers
     /// what Tiller finds on disk.
     private var loadedSkills: [AgentSkill]?
-    /// What `/` offers while the picker is open, read when it opens.
-    private var pickerSkills: [AgentSkill]?
+    /// The agent a new chat was made for, such as a scheduled run's.
+    private let presetKind: AgentKind?
+    /// Called once when a scheduled run's turn ends, with how it went.
+    private var runCompletion: ((AgentRunOutcome) -> Void)?
 
     private var session: AgentSession?
     /// Set while a session resumes a saved conversation and hasn't started yet.
@@ -87,11 +98,13 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         return false
     }
 
-    /// A new chat, or a saved one with its transcript.
-    init(conversation: AgentConversation? = nil) {
+    /// A new chat, or a saved one with its transcript. A new chat can be
+    /// given its agent and tools instead of those in Settings.
+    init(conversation: AgentConversation? = nil, kind: AgentKind? = nil, tools: [AgentTool]? = nil) {
         id = conversation?.id ?? UUID().uuidString
         self.conversation = conversation
-        tools = conversation?.tools ?? Settings.agentTools
+        presetKind = conversation == nil ? kind : nil
+        self.tools = conversation?.tools ?? tools ?? Settings.agentTools
         loadState = conversation == nil ? .loaded : .unloaded
         super.init(frame: .zero)
         build()
@@ -173,6 +186,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             keepLiveText()
             addNote("Stopped")
         }
+        finishRun(.stopped)
         finishToolRows()
         transcript.hideThinking()
         transcript.closeToolGroup()
@@ -220,13 +234,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             self.preview(self.composer.attachments.map(\.url), at: index)
         }
 
-        skillPicker.isHidden = true
-        skillPicker.onPick = { [weak self] skill in self?.complete(skill) }
-
         scrollDownButton.target = self
         scrollDownButton.action = #selector(scrollDown(_:))
 
-        for view in [scrollView, topFade, bottomFade, separator, emptyState, scrollDownButton, tabBarHost, composer, skillPicker] as [NSView] {
+        for view in [scrollView, topFade, bottomFade, separator, emptyState, scrollDownButton, tabBarHost, composer, skillCompletion.picker] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -275,9 +286,9 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             composer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
 
-            skillPicker.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
-            skillPicker.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
-            skillPicker.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
+            skillCompletion.picker.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            skillCompletion.picker.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            skillCompletion.picker.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
         ])
     }
 
@@ -341,7 +352,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// picker follows it.
     func setTextForTesting(_ text: String) {
         composer.text = text
-        updatePicker()
+        skillCompletion.update()
     }
 
     /// Pastes the clipboard into the composer twice, as Cmd+V would, then
@@ -370,24 +381,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// Enter sends. Option+Enter or Shift+Enter adds a line. Escape stops a
     /// running turn.
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        if !skillPicker.isHidden {
-            switch selector {
-            case #selector(NSResponder.moveUp(_:)):
-                skillPicker.moveSelection(by: -1)
-                return true
-            case #selector(NSResponder.moveDown(_:)):
-                skillPicker.moveSelection(by: 1)
-                return true
-            case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertNewline(_:)):
-                if let skill = skillPicker.selectedSkill { complete(skill) }
-                return true
-            case #selector(NSResponder.cancelOperation(_:)):
-                hidePicker()
-                return true
-            default:
-                break
-            }
-        }
+        if skillCompletion.handle(selector) { return true }
         switch selector {
         case #selector(NSResponder.insertNewline(_:)):
             let flags = NSApp.currentEvent?.modifierFlags ?? []
@@ -411,7 +405,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {
         composer.textChanged()
-        updatePicker()
+        skillCompletion.update()
     }
 
     // MARK: Skills
@@ -419,41 +413,6 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// What `/` can call in this chat.
     private var availableSkills: [AgentSkill] {
         loadedSkills ?? AgentSkillCatalog.skills(for: kind)
-    }
-
-    /// Open while the text is a `/` and the start of a name, with nothing after.
-    private func updatePicker() {
-        let text = composer.text
-        guard text.hasPrefix("/"), !text.contains(where: \.isWhitespace) else { return hidePicker() }
-        let skills = pickerSkills ?? availableSkills
-        pickerSkills = skills
-        skillPicker.show(skills, matching: String(text.dropFirst()))
-    }
-
-    private func hidePicker() {
-        skillPicker.isHidden = true
-        pickerSkills = nil
-    }
-
-    /// Puts `/name ` in the field, keeping it undoable.
-    private func complete(_ skill: AgentSkill) {
-        let textView = composer.textView
-        let range = NSRange(location: 0, length: (textView.string as NSString).length)
-        let replacement = "/" + skill.name + " "
-        if textView.shouldChangeText(in: range, replacementString: replacement) {
-            textView.replaceCharacters(in: range, with: replacement)
-            textView.didChangeText()
-        }
-        textView.setSelectedRange(NSRange(location: (replacement as NSString).length, length: 0))
-        hidePicker()
-        window?.makeFirstResponder(textView)
-    }
-
-    /// The skill a message starting with `/name` calls.
-    private func skill(calledBy text: String) -> AgentSkill? {
-        guard text.hasPrefix("/") else { return nil }
-        let name = text.dropFirst().prefix { !$0.isWhitespace }
-        return availableSkills.first { $0.name == name }
     }
 
     /// The composer keeps its own undo, which a sent message clears.
@@ -467,20 +426,26 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         guard !text.isEmpty || !images.isEmpty, !isBusy else { return }
         composer.text = ""
         composer.attachments = []
-        hidePicker()
+        skillCompletion.hide()
         send(text, images: images)
     }
 
-    func send(_ text: String, images: [AgentAttachment] = []) {
+    /// `contextOverride` replaces the selected tab's description, and
+    /// `schedule` marks the message as that schedule's run.
+    func send(
+        _ text: String, images: [AgentAttachment] = [], contextOverride: String? = nil, schedule: ScheduledPrompt? = nil
+    ) {
         loadIfNeeded(now: true)
         var conversation = conversation ?? AgentConversation(
-            id: id, kind: .current, title: AgentConversation.title(from: text), created: Date(), updated: Date()
+            id: id, kind: kind, title: schedule?.name ?? AgentConversation.title(from: text), created: Date(), updated: Date()
         )
+        if let schedule, conversation.scheduleID == nil { conversation.scheduleID = schedule.id }
         conversation.tools = tools
         conversation.updated = Date()
         save(conversation)
         let session = self.session ?? makeSession()
         emptyState.isHidden = true
+        if let schedule { addNote("Scheduled run of “\(schedule.name)”") }
         records.append(.user(text: text, images: images.map(\.url.lastPathComponent)))
         saveRecords()
         // Only the files are kept for Quick Look, not the images' bytes.
@@ -490,7 +455,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         })
         lastSent = (text, images)
         do {
-            try session.send(text, images: images, context: context?() ?? "", skill: skill(calledBy: text))
+            try session.send(
+                text, images: images, context: contextOverride ?? context?() ?? "",
+                skill: SkillCompletion.skill(calledBy: text, in: availableSkills)
+            )
             if session.isRunning { setStatus("Working…", busy: true) }
             setBusy(true)
             transcript.showThinking()
@@ -499,10 +467,13 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             addError(error.message, action: openSettings)
             endSession()
             showIdle()
+            finishRun(.failed(error.message))
         } catch {
-            addError((error as? ControlError)?.message ?? error.localizedDescription, action: tryAgain)
+            let message = (error as? ControlError)?.message ?? error.localizedDescription
+            addError(message, action: tryAgain)
             endSession()
             showIdle()
+            finishRun(.failed(message))
         }
         scrollToBottom()
     }
@@ -696,6 +667,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             if stopped { addNote("Stopped") }
             showIdle()
             readTitle()
+            finishRun(error.map { .failed($0) } ?? (stopped ? .stopped : .finished(lastAgentText)))
         case .exited(let message):
             keepLiveText()
             finishToolRows()
@@ -713,8 +685,43 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             session = nil
             resuming = false
             showIdle()
+            finishRun(.failed(message ?? "\(kind.displayName) stopped."))
         }
         if follow { scrollToBottom() }
+    }
+
+    // MARK: Scheduled runs
+
+    /// What a scheduled run tells the agent instead of the selected tab.
+    private static func scheduledContext(_ name: String) -> String {
+        "[Tiller: scheduled run of \"\(name)\", sent by Tiller on a timer rather than typed. "
+            + "No tab is yours: open the tabs you need with new_tab background.]"
+    }
+
+    /// Sends the schedule's prompt in this new chat. `completion` gets how
+    /// its turn ended, once.
+    func runScheduled(_ schedule: ScheduledPrompt, completion: @escaping (AgentRunOutcome) -> Void) {
+        runCompletion = completion
+        send(schedule.prompt, contextOverride: Self.scheduledContext(schedule.name), schedule: schedule)
+    }
+
+    private func finishRun(_ outcome: AgentRunOutcome) {
+        guard let completion = runCompletion else { return }
+        runCompletion = nil
+        // After whatever started the run has finished with the chat.
+        DispatchQueue.main.async { completion(outcome) }
+    }
+
+    /// The agent's last text since the last message sent.
+    private var lastAgentText: String? {
+        for record in records.reversed() {
+            switch record {
+            case .user: return nil
+            case .text(let text): return text
+            default: continue
+            }
+        }
+        return nil
     }
 
     /// Keeps the text a turn was streaming when it ended without the complete block.

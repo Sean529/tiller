@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/1960eca0-6cb0-460b-bb6f-b292b739a147
 - **Import from Chrome.** Cookies, saved passwords, history, extensions, search engine and homepage.
 - **Chrome extensions.** Add unpacked folders or CRX files, or bring Chrome's over. Content scripts, background workers and popups run; Chrome's tab and window APIs don't see Tiller's tabs.
 - **Profiles.** Each profile has its own site data, history, passwords, settings and chats, and runs as its own app instance.
-- **Agent panel.** Chat with Qoder CLI, Claude Code or Codex in a side panel that controls the browser, and call skills with `/`, from your own folders or a skill library each agent shares.
+- **Agent panel.** Chat with Qoder CLI, Claude Code or Codex in a side panel that controls the browser, and call skills with `/`, from your own folders or a skill library each agent shares. Prompts can also run on a schedule, skills included.
 - **Browser tools.** A stdio MCP server and the `tiller` command-line tool expose the same tools to external agents and scripts.
 
 ## Requirements
@@ -90,7 +90,7 @@ See [Browser tools](docs/tools.md) for every tool, command and option.
 | Guide | Covers |
 |---|---|
 | [Using the browser](docs/browser.md) | Tabs, find and zoom, address bar, history, saved passwords, Chrome import, profiles |
-| [Agent panel](docs/agent.md) | Chats, image attachments, skills, agent permissions, Codex isolation |
+| [Agent panel](docs/agent.md) | Chats, image attachments, skills, scheduled prompts, agent permissions, Codex isolation |
 | [Browser tools](docs/tools.md) | MCP server, command-line tool, debug launch arguments |
 | [Settings and data](docs/settings-and-data.md) | Settings, Chromium switches, data folder, environment variables, migrations |
 

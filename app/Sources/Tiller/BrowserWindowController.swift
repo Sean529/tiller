@@ -839,6 +839,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private static let defaultAgentPanelWidth: CGFloat = 400
     private static let sidebarWidthKey = "sidebarWidth"
 
+    // MARK: Scheduled prompts
+
+    /// Sends a scheduled prompt in a new agent chat. The panel stays as it
+    /// is; while hidden, its button's dot shows the run working.
+    func runScheduledPrompt(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String? {
+        agentPanel.runScheduled(schedule, completion: completion)
+    }
+
+    func isAgentChatBusy(_ id: String) -> Bool {
+        agentPanel.isChatBusy(id)
+    }
+
+    /// Brings the window forward with the panel showing the chat, for a
+    /// scheduled run's notification.
+    func showAgentChat(_ id: String) {
+        NSApp.activate()
+        window?.makeKeyAndOrderFront(nil)
+        if !agentPanelShown { toggleAgentPanel(nil) }
+        agentPanel.open(id)
+    }
+
     #if DEBUG
     /// For testing without typing: `open Tiller.app --args -agentPrompt "..."`.
     /// `-agentPasteImage YES` pastes the clipboard twice first.
@@ -1418,7 +1439,9 @@ extension BrowserWindowController {
     /// `ui.<action>` on the control socket, for driving the window from a
     /// script without the keyboard or mouse: `agent` toggles the panel,
     /// `agentAction` runs one of the panel's buttons (`text` names it),
-    /// `agentText` puts `text` in the message field, `find` searches for
+    /// `agentText` puts `text` in the message field, `runSchedule` runs the
+    /// scheduled prompt named `text` now, `scheduleEditor` opens a new
+    /// scheduled prompt with `text` as its prompt, `find` searches for
     /// `text`, `location` types `text` in the address bar, `downloads`,
     /// `sidebar` and `settings` open those, `appearance` forces `light` or
     /// `dark`, and `resize` sets the window to `width` by `height`.
@@ -1431,6 +1454,14 @@ extension BrowserWindowController {
             agentPanel.performForTesting(text)
         case "agentText":
             agentPanel.setTextForTesting(text)
+        case "runSchedule":
+            guard let schedule = AgentScheduleStore.shared.schedules.first(where: { $0.name == text }) else {
+                throw ControlError("no scheduled prompt named \(text)")
+            }
+            AgentScheduler.shared.runNow(schedule.id)
+        case "scheduleEditor":
+            (NSApp.delegate as? AppDelegate)?.showSettings(pane: ScheduledSettingsPane.paneTitle)
+            ScheduledSettingsPane.shown?.addForTesting(prompt: text)
         case "find":
             showFindBar(nil)
             findBar.field.stringValue = text

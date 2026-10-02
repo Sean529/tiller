@@ -1,7 +1,8 @@
 import AppKit
 
 /// The row above the message field: a numbered button per open chat on the
-/// left, and tools, new tab, new chat and history buttons on the right.
+/// left, and tools, new tab, new chat, history and scheduled prompts buttons
+/// on the right.
 final class AgentTabBar: NSView {
     static let height: CGFloat = 26
 
@@ -13,12 +14,14 @@ final class AgentTabBar: NSView {
     var onHistory: ((NSView) -> Void)?
     /// Gets the tools button, to show the menu from.
     var onTools: ((NSView) -> Void)?
+    var onSchedules: (() -> Void)?
 
     private let tabStack = NSStackView()
     private let toolsButton = Theme.iconButton("wrench.and.screwdriver", label: "Tools")
     private let newTabButton = Theme.iconButton("plus", label: "New Tab")
     private let newChatButton = Theme.iconButton("square.and.pencil", label: "New Chat")
     private let historyButton = Theme.iconButton("clock.arrow.circlepath", label: "Chat History")
+    private let schedulesButton = Theme.iconButton("calendar.badge.clock", label: "Scheduled Prompts")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -31,7 +34,9 @@ final class AgentTabBar: NSView {
         historyButton.action = #selector(history(_:))
         toolsButton.target = self
         toolsButton.action = #selector(tools(_:))
-        let buttons = NSStackView(views: [toolsButton, newTabButton, newChatButton, historyButton])
+        schedulesButton.target = self
+        schedulesButton.action = #selector(schedules(_:))
+        let buttons = NSStackView(views: [toolsButton, newTabButton, newChatButton, historyButton, schedulesButton])
         buttons.spacing = 4
         for view in [tabStack, buttons] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -76,6 +81,7 @@ final class AgentTabBar: NSView {
     @objc private func newChat(_ sender: Any?) { onNewChat?() }
     @objc private func history(_ sender: Any?) { onHistory?(historyButton) }
     @objc private func tools(_ sender: Any?) { onTools?(toolsButton) }
+    @objc private func schedules(_ sender: Any?) { onSchedules?() }
 
     #if DEBUG
     /// Clicks the history or tools button for `ui.agentAction`, so what opens
@@ -352,7 +358,8 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
         let subtitle = item.tab.map { "Open in tab \($0 + 1)" } ?? Self.dateText(item.conversation.updated)
         return HistoryCellView(
             title: item.conversation.title,
-            subtitle: subtitle + " · " + item.conversation.kind.displayName,
+            subtitle: subtitle + " · " + item.conversation.kind.displayName
+                + (item.conversation.scheduleID == nil ? "" : " · Scheduled"),
             logo: item.conversation.kind.logo(size: 18),
             isCurrent: isCurrent
         )

@@ -1,0 +1,571 @@
+import AppKit
+
+// MARK: Scheduled pane
+
+/// Settings > Scheduled: the profile's scheduled prompts, with buttons to
+/// add, edit, run and remove them.
+final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    static let paneTitle = "Scheduled"
+
+    private let table = NSTableView()
+    private let addButton = NSButton(title: "Add…", target: nil, action: nil)
+    private let editButton = NSButton(title: "Edit…", target: nil, action: nil)
+    private let runButton = NSButton(title: "Run Now", target: nil, action: nil)
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let note = SettingsPane.wrappingNote(width: 680)
+    private var placeholder: NSTextField?
+    /// The editor sheet while it is open.
+    private var editorWindow: NSWindow?
+    private var store: AgentScheduleStore { .shared }
+    private var schedules: [ScheduledPrompt] { store.schedules }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        formatter.doesRelativeDateFormatting = true
+        return formatter
+    }()
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        title = Self.paneTitle
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        for (id, title, width) in [
+            ("on", "On", 30.0), ("name", "Name", 130.0), ("rule", "Runs", 140.0), ("next", "Next Run", 120.0),
+            ("last", "Last Run", 220.0),
+        ] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.allowsMultipleSelection = true
+        table.style = .inset
+        table.rowHeight = 22
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(edit(_:))
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let (tableBox, placeholder) = SettingsPane.withPlaceholder(scroll, "No Scheduled Prompts")
+        self.placeholder = placeholder
+
+        for (button, action) in [
+            (addButton, #selector(add(_:))),
+            (editButton, #selector(edit(_:))),
+            (runButton, #selector(runNow(_:))),
+            (removeButton, #selector(remove(_:))),
+        ] {
+            button.target = self
+            button.action = action
+        }
+        let buttons = NSStackView(views: [addButton, editButton, NSView(), runButton, removeButton])
+        buttons.spacing = 8
+
+        let stack = NSStackView(views: [tableBox, buttons, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let view = NSView()
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalToConstant: 680),
+            scroll.heightAnchor.constraint(equalToConstant: 260),
+            buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+        ])
+        self.view = view
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = view.fittingSize
+        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .agentSchedulesDidChange, object: nil)
+        reload(nil)
+        showDefaultNote()
+        #if DEBUG
+        Self.shown = self
+        #endif
+    }
+
+    @objc private func reload(_ notification: Notification?) {
+        let selected = table.selectedRowIndexes
+        table.reloadData()
+        table.selectRowIndexes(selected.filteredIndexSet { $0 < schedules.count }, byExtendingSelection: false)
+        updateControls()
+    }
+
+    private func updateControls() {
+        let count = table.selectedRowIndexes.count
+        editButton.isEnabled = count == 1
+        runButton.isEnabled = count == 1
+        removeButton.isEnabled = count > 0
+        placeholder?.isHidden = !schedules.isEmpty
+    }
+
+    private func showDefaultNote() {
+        SettingsPane.show(
+            "Each run sends its prompt in a new chat in the agent panel, while this profile's Tiller is open. "
+                + "A run missed while Tiller was closed or the Mac slept happens once when it's back.",
+            in: note
+        )
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { schedules.count }
+
+    func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
+        guard schedules.indices.contains(row) else { return nil }
+        let schedule = schedules[row]
+        func label(_ text: String, secondary: Bool = true) -> NSTextField {
+            let label = NSTextField(labelWithString: text)
+            label.lineBreakMode = .byTruncatingTail
+            label.textColor = secondary ? .secondaryLabelColor : .labelColor
+            label.toolTip = text
+            return label
+        }
+        switch column?.identifier.rawValue {
+        case "on":
+            let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleEnabled(_:)))
+            checkbox.tag = row
+            checkbox.state = schedule.enabled ? .on : .off
+            checkbox.setAccessibilityLabel("\(schedule.name) On")
+            return checkbox
+        case "name":
+            let name = label(schedule.name, secondary: false)
+            name.toolTip = schedule.prompt
+            return name
+        case "rule":
+            return label(schedule.rule.displayText)
+        case "next":
+            if !schedule.enabled { return label("Off") }
+            return label(schedule.nextRun.map(Self.dateFormatter.string(from:)) ?? "Never")
+        default:
+            guard let date = schedule.lastRun else { return label("Never") }
+            let text = Self.dateFormatter.string(from: date) + (schedule.lastResult.map { " · " + $0.displayText } ?? "")
+            let last = label(text)
+            if schedule.lastResult?.isProblem == true { last.textColor = .systemRed }
+            return last
+        }
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateControls()
+    }
+
+    @objc private func toggleEnabled(_ sender: NSButton) {
+        guard schedules.indices.contains(sender.tag) else { return }
+        store.setEnabled(sender.state == .on, for: schedules[sender.tag].id)
+    }
+
+    @objc private func add(_ sender: Any?) {
+        presentEditor(for: nil)
+    }
+
+    @objc private func edit(_ sender: Any?) {
+        // A double-click edits the row clicked, a button the one selected.
+        let row = sender as? NSTableView === table && table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+        guard schedules.indices.contains(row) else { return }
+        presentEditor(for: schedules[row])
+    }
+
+    private func presentEditor(for schedule: ScheduledPrompt?) {
+        guard let window = view.window, editorWindow == nil else { return }
+        let editor = ScheduleEditorController(schedule: schedule)
+        let sheet = NSWindow(contentViewController: editor)
+        sheet.styleMask = [.titled]
+        sheet.isReleasedWhenClosed = false
+        editor.onDone = { [weak self, weak window, weak sheet] saved in
+            if let sheet { window?.endSheet(sheet) }
+            self?.editorWindow = nil
+            guard let saved else { return }
+            AgentScheduleStore.shared.save(saved)
+            AgentScheduler.shared.askForNotifications()
+        }
+        editorWindow = sheet
+        window.beginSheet(sheet)
+    }
+
+    #if DEBUG
+    /// The pane last loaded, for `ui.scheduleEditor`.
+    static weak var shown: ScheduledSettingsPane?
+
+    /// Opens the editor for a new schedule with `prompt` typed in.
+    func addForTesting(prompt: String) {
+        presentEditor(for: nil)
+        (editorWindow?.contentViewController as? ScheduleEditorController)?.setPromptForTesting(prompt)
+    }
+    #endif
+
+    @objc private func runNow(_ sender: Any?) {
+        guard table.selectedRowIndexes.count == 1, schedules.indices.contains(table.selectedRow) else { return }
+        AgentScheduler.shared.runNow(schedules[table.selectedRow].id)
+    }
+
+    /// Asks first. Chats from earlier runs stay in history.
+    @objc private func remove(_ sender: Any?) {
+        let indexes = table.selectedRowIndexes
+        let picked = indexes.compactMap { schedules.indices.contains($0) ? schedules[$0] : nil }
+        guard !picked.isEmpty, let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = picked.count == 1 ? "Remove “\(picked[0].name)”?" : "Remove \(picked.count) scheduled prompts?"
+        alert.informativeText = "It stops running. Chats from earlier runs stay in the agent panel's history."
+        alert.addButton(withTitle: "Remove")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.store.remove(Set(picked.map(\.id)))
+                self.table.deselectAll(nil)
+            }
+        }
+    }
+}
+
+// MARK: Editor
+
+/// The sheet that adds or edits a scheduled prompt: its name, agent, tools,
+/// when it runs and the prompt, where `/` picks a skill as in the panel.
+final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTextFieldDelegate {
+    /// Called with the edited schedule, or nil when cancelled.
+    var onDone: ((ScheduledPrompt?) -> Void)?
+
+    private enum RuleKind: Int, CaseIterable {
+        case every, daily, weekdays, cron
+
+        var title: String {
+            switch self {
+            case .every: "Every…"
+            case .daily: "Every Day"
+            case .weekdays: "Weekdays"
+            case .cron: "Cron Expression"
+            }
+        }
+    }
+
+    private let original: ScheduledPrompt?
+    private let grid = NSGridView()
+    private let nameField = NSTextField()
+    private var kindPopUp: NSPopUpButton?
+    private var toolBoxes: [NSButton] = []
+    private let rulePopUp = NSPopUpButton()
+    private let intervalField = NSTextField()
+    private let unitPopUp = NSPopUpButton()
+    private let timePicker = NSDatePicker()
+    private let cronField = NSTextField()
+    private let ruleNote = SettingsPane.note()
+    private var intervalRow: NSGridRow?
+    private var timeRow: NSGridRow?
+    private var cronRow: NSGridRow?
+    private var promptView: NSTextView!
+    private var completion: SkillCompletion!
+    private let errorNote = SettingsPane.note()
+
+    private static let fieldWidth: CGFloat = 420
+
+    private var kind: AgentKind {
+        (kindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentKind.init) ?? .current
+    }
+
+    init(schedule: ScheduledPrompt?) {
+        original = schedule
+        super.init(nibName: nil, bundle: nil)
+        title = schedule == nil ? "New Scheduled Prompt" : "Edit Scheduled Prompt"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        let schedule = original
+        grid.rowSpacing = 8
+        grid.columnSpacing = 8
+        grid.rowAlignment = .firstBaseline
+        grid.translatesAutoresizingMaskIntoConstraints = false
+
+        nameField.stringValue = schedule?.name ?? ""
+        nameField.placeholderString = "Morning news digest"
+        nameField.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        addRow("Name:", nameField)
+
+        let popUp = SettingsPane.popUp(
+            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: schedule?.kind ?? .current,
+            target: self, action: #selector(kindChanged(_:))
+        )
+        kindPopUp = popUp
+        addRow("Agent:", popUp)
+
+        let tools = schedule?.tools ?? Settings.agentTools
+        toolBoxes = AgentTool.allCases.map { tool in
+            let checkbox = NSButton(checkboxWithTitle: tool.displayName, target: nil, action: nil)
+            checkbox.state = tools.contains(tool) ? .on : .off
+            return checkbox
+        }
+        let toolStack = NSStackView(views: toolBoxes)
+        toolStack.orientation = .vertical
+        toolStack.alignment = .leading
+        toolStack.spacing = 6
+        let toolsRow = addRow("Allowed tools:", toolStack)
+        toolsRow.rowAlignment = .none
+        toolsRow.cell(at: 0).yPlacement = .top
+
+        for rule in RuleKind.allCases {
+            rulePopUp.addItem(withTitle: rule.title)
+            rulePopUp.lastItem?.tag = rule.rawValue
+        }
+        rulePopUp.target = self
+        rulePopUp.action = #selector(ruleChanged(_:))
+        addRow("Runs:", rulePopUp)
+
+        let formatter = NumberFormatter()
+        formatter.allowsFloats = false
+        formatter.minimum = 1
+        formatter.maximum = 100_000
+        intervalField.formatter = formatter
+        intervalField.delegate = self
+        intervalField.alignment = .right
+        intervalField.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        unitPopUp.addItems(withTitles: ["Minutes", "Hours"])
+        unitPopUp.target = self
+        unitPopUp.action = #selector(ruleChanged(_:))
+        let intervalStack = NSStackView(views: [intervalField, unitPopUp])
+        intervalStack.spacing = 8
+        intervalRow = addRow("Every:", intervalStack)
+
+        timePicker.datePickerStyle = .textFieldAndStepper
+        timePicker.datePickerElements = .hourMinute
+        timePicker.target = self
+        timePicker.action = #selector(ruleChanged(_:))
+        timeRow = addRow("At:", timePicker)
+
+        cronField.placeholderString = "0 9 * * 1-5"
+        cronField.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        cronField.delegate = self
+        cronField.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        cronRow = addRow("Expression:", cronField)
+        addNote(ruleNote)
+
+        intervalField.integerValue = 60
+        timePicker.dateValue = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: Date()) ?? Date()
+        var ruleKind = RuleKind.daily
+        switch schedule?.rule {
+        case .every(let minutes):
+            ruleKind = .every
+            let hours = minutes % 60 == 0
+            intervalField.integerValue = hours ? minutes / 60 : minutes
+            unitPopUp.selectItem(at: hours ? 1 : 0)
+        case .daily(let hour, let minute), .weekdays(let hour, let minute):
+            if case .weekdays = schedule?.rule { ruleKind = .weekdays }
+            timePicker.dateValue = Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: Date()) ?? Date()
+        case .cron(let text):
+            ruleKind = .cron
+            cronField.stringValue = text
+        case nil:
+            break
+        }
+        rulePopUp.selectItem(withTag: ruleKind.rawValue)
+
+        let scroll = NSTextView.scrollableTextView()
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        let box = NSBox()
+        box.boxType = .custom
+        box.cornerRadius = Theme.Radius.small
+        box.borderColor = Theme.hairline
+        box.fillColor = Theme.fill(Theme.Fill.rest)
+        box.contentViewMargins = NSSize(width: 1, height: 1)
+        box.contentView = scroll
+        box.widthAnchor.constraint(equalToConstant: Self.fieldWidth).isActive = true
+        box.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        let textView = scroll.documentView as! NSTextView
+        textView.drawsBackground = false
+        textView.string = schedule?.prompt ?? ""
+        textView.font = .systemFont(ofSize: 13)
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.textContainerInset = NSSize(width: 2, height: 4)
+        textView.delegate = self
+        textView.setAccessibilityLabel("Prompt")
+        promptView = textView
+        completion = SkillCompletion(textView: textView) { [weak self] in
+            AgentSkillCatalog.skills(for: self?.kind ?? .current)
+        }
+        let promptRow = addRow("Prompt:", box)
+        promptRow.rowAlignment = .none
+        promptRow.cell(at: 0).yPlacement = .top
+        addNote(SettingsPane.note("Start with /name to call a skill. Type / to pick one."))
+        grid.column(at: 0).xPlacement = .trailing
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
+        cancel.keyEquivalent = "\u{1b}"
+        // Return adds a line in the prompt, so saving takes Cmd+Return.
+        let save = NSButton(title: "Save", target: self, action: #selector(save(_:)))
+        save.keyEquivalent = "\r"
+        save.keyEquivalentModifierMask = .command
+        save.bezelColor = .controlAccentColor
+        save.toolTip = "Save (⌘↩)"
+        errorNote.textColor = .systemRed
+        errorNote.lineBreakMode = .byWordWrapping
+        errorNote.maximumNumberOfLines = 2
+        errorNote.preferredMaxLayoutWidth = 300
+        let buttons = NSStackView(views: [errorNote, NSView(), cancel, save])
+        buttons.spacing = 8
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        let picker = completion.picker
+        let view = NSView()
+        for subview in [grid, buttons, picker] as [NSView] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(subview)
+        }
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            grid.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            grid.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            buttons.topAnchor.constraint(equalTo: grid.bottomAnchor, constant: 16),
+            buttons.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            buttons.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            buttons.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
+            // Opens above the prompt, over the rows there, as in the panel.
+            picker.bottomAnchor.constraint(equalTo: box.topAnchor, constant: -4),
+            picker.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+            picker.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+        ])
+        self.view = view
+        showRuleRows()
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = view.fittingSize
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(original == nil ? nameField : promptView)
+    }
+
+    @discardableResult
+    private func addRow(_ label: String, _ control: NSView) -> NSGridRow {
+        grid.addRow(with: [NSTextField(labelWithString: label), control])
+    }
+
+    private func addNote(_ note: NSTextField) {
+        let row = grid.addRow(with: [NSGridCell.emptyContentView, note])
+        row.topPadding = -4
+        row.bottomPadding = 6
+    }
+
+    // MARK: Rule
+
+    private var ruleKind: RuleKind { RuleKind(rawValue: rulePopUp.selectedTag()) ?? .daily }
+
+    private var rule: ScheduleRule {
+        let time = Calendar.current.dateComponents([.hour, .minute], from: timePicker.dateValue)
+        switch ruleKind {
+        case .every: return .every(minutes: intervalField.integerValue * (unitPopUp.indexOfSelectedItem == 1 ? 60 : 1))
+        case .daily: return .daily(hour: time.hour ?? 9, minute: time.minute ?? 0)
+        case .weekdays: return .weekdays(hour: time.hour ?? 9, minute: time.minute ?? 0)
+        case .cron: return .cron(cronField.stringValue.trimmingCharacters(in: .whitespaces))
+        }
+    }
+
+    /// Only the rows the picked kind of rule uses.
+    private func showRuleRows() {
+        intervalRow?.isHidden = ruleKind != .every
+        timeRow?.isHidden = ruleKind != .daily && ruleKind != .weekdays
+        cronRow?.isHidden = ruleKind != .cron
+        showRuleNote()
+    }
+
+    /// When it would next run, or what is wrong with the rule.
+    private func showRuleNote() {
+        do {
+            if ruleKind == .cron, cronField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
+                return SettingsPane.show("Minute, hour, day, month, day of week. 0 9 * * 1-5 is 9:00 on weekdays.", in: ruleNote)
+            }
+            try rule.validate()
+            let next = rule.nextDate(after: Date()).map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "never"
+            SettingsPane.show("Next run: \(next)", in: ruleNote)
+        } catch {
+            SettingsPane.show(error.localizedDescription, in: ruleNote, warning: true)
+        }
+    }
+
+    @objc private func ruleChanged(_ sender: Any?) {
+        showRuleRows()
+        view.layoutSubtreeIfNeeded()
+        view.window?.setContentSize(view.fittingSize)
+    }
+
+    @objc private func kindChanged(_ sender: Any?) {
+        completion.hide()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        showRuleNote()
+    }
+
+    // MARK: Prompt
+
+    func textDidChange(_ notification: Notification) {
+        completion.update()
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if completion.handle(selector) { return true }
+        if selector == #selector(NSResponder.insertNewline(_:)) {
+            textView.insertNewlineIgnoringFieldEditor(nil)
+            return true
+        }
+        return false
+    }
+
+    #if DEBUG
+    func setPromptForTesting(_ text: String) {
+        promptView.string = text
+        view.window?.makeFirstResponder(promptView)
+        completion.update()
+    }
+    #endif
+
+    // MARK: Done
+
+    @objc private func cancel(_ sender: Any?) {
+        onDone?(nil)
+    }
+
+    @objc private func save(_ sender: Any?) {
+        let prompt = promptView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return showError("Write the prompt to send.") }
+        if ruleKind == .every, intervalField.integerValue < 1 { return showError("Pick how often it runs.") }
+        do {
+            try rule.validate()
+        } catch {
+            return showError(error.localizedDescription)
+        }
+        var name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { name = AgentConversation.title(from: prompt) }
+        let tools = zip(AgentTool.allCases, toolBoxes).filter { $0.1.state == .on }.map(\.0)
+        var schedule = original ?? ScheduledPrompt(name: name, prompt: prompt, kind: kind, tools: tools, rule: rule)
+        schedule.name = name
+        schedule.prompt = prompt
+        schedule.kind = kind
+        schedule.tools = tools
+        schedule.rule = rule
+        onDone?(schedule)
+    }
+
+    private func showError(_ message: String) {
+        errorNote.stringValue = message
+        NSSound.beep()
+    }
+}

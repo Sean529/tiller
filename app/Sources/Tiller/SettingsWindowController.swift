@@ -2,7 +2,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// The Settings window (Cmd+,), with General, Passwords, Extensions, Agent,
-/// Skills and Profiles panes. Every change is saved as it is made, in the current profile.
+/// Skills, Scheduled and Profiles panes. Every change is saved as it is made, in the current profile.
 @MainActor
 final class SettingsWindowController: NSWindowController {
     private let tabs = NSTabViewController()
@@ -15,6 +15,7 @@ final class SettingsWindowController: NSWindowController {
             (ExtensionsSettingsPane(), "puzzlepiece.extension"),
             (AgentSettingsPane(), "sparkles"),
             (SkillsSettingsPane(), "wand.and.stars"),
+            (ScheduledSettingsPane(), "calendar.badge.clock"),
             (ProfilesSettingsPane(), "person.2"),
         ]
         for (pane, symbol) in panes {
