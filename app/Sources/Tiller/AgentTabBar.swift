@@ -76,6 +76,13 @@ final class AgentTabBar: NSView {
     @objc private func newChat(_ sender: Any?) { onNewChat?() }
     @objc private func history(_ sender: Any?) { onHistory?(historyButton) }
     @objc private func tools(_ sender: Any?) { onTools?(toolsButton) }
+
+    #if DEBUG
+    /// Clicks the history or tools button for `ui.agentAction`, so what opens
+    /// hangs off that button, as it does for a real click.
+    func historyForTesting() { history(nil) }
+    func toolsForTesting() { tools(nil) }
+    #endif
 }
 
 /// A tab's number in a rounded square, tinted with the accent color when

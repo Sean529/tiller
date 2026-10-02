@@ -209,6 +209,9 @@ class SettingsPane: NSViewController {
         return (box, label)
     }
 
+    /// The least width of a column of pop-ups.
+    static let popUpWidth: CGFloat = 180
+
     static func fixWidth(_ view: NSView, _ width: CGFloat = controlWidth) -> NSView {
         view.widthAnchor.constraint(equalToConstant: width).isActive = true
         return view
@@ -220,9 +223,13 @@ class SettingsPane: NSViewController {
     ) -> NSPopUpButton where T: Equatable {
         let button = NSPopUpButton()
         for value in cases {
-            button.addItem(withTitle: title(value))
+            let icon = image?(value)
+            // The pop-up leaves only a couple of points after an item's
+            // image; a leading space makes it about six.
+            button.addItem(withTitle: icon == nil ? title(value) : " " + title(value))
             button.lastItem?.representedObject = value.rawValue
-            button.lastItem?.image = image?(value)
+            icon?.size = NSSize(width: 16, height: 16)
+            button.lastItem?.image = icon
         }
         button.selectItem(at: cases.firstIndex(of: selected) ?? 0)
         button.target = target
@@ -295,6 +302,12 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         )
         self.searchPopUp = searchPopUp
         addRow("Search engine:", searchPopUp)
+
+        // One width for the four, so their right edges line up; a longer
+        // title can still widen its own.
+        for popUp in [launchPopUp, newTabPopUp, tabLayoutPopUp, searchPopUp] {
+            popUp.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.popUpWidth).isActive = true
+        }
 
         templateField.stringValue = Settings.searchTemplate
         templateField.placeholderString = "https://example.com/search?q=%s"

@@ -92,8 +92,9 @@ final class TranscriptView: NSView {
     var isThinking: Bool { thinking != nil }
 
     /// Whether the bottom of the transcript is in view, give or take a line.
+    /// The clip runs under the scroll view's bottom inset, which isn't text.
     func isNearBottom(of scrollView: NSScrollView) -> Bool {
-        scrollView.contentView.bounds.maxY >= frame.height - 40
+        scrollView.contentView.bounds.maxY - scrollView.contentInsets.bottom >= frame.height - 40
     }
 
     /// Only a width change re-measures every row; new rows are measured as
@@ -1545,6 +1546,8 @@ final class MarkdownCodeView: NSView, TranscriptRow {
 
     private static let headerHeight: CGFloat = 24
     private static let padding = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+    /// A borderless text field's cell still insets its text 2pt on each side.
+    private static let cellInset: CGFloat = 4
     private static let font = NSFont.monospacedSystemFont(ofSize: Theme.FontSize.secondary, weight: .regular)
     private static let copyImage = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy Code")?
         .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
@@ -1647,7 +1650,10 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     /// padding around it, and the block is as tall as the text.
     private func relayout() {
         let p = Self.padding
-        let size = label.intrinsicContentSize
+        let measured = label.intrinsicContentSize
+        // Rounded up, plus the cell's 2pt inset on each side: a fractional or
+        // inset-less width clips the last glyph of the longest line.
+        let size = NSSize(width: ceil(measured.width) + Self.cellInset, height: ceil(measured.height))
         let documentWidth = max(size.width + p.left + p.right, width)
         document.frame = NSRect(x: 0, y: 0, width: documentWidth, height: size.height + p.top + p.bottom)
         // The document isn't flipped, so the bottom padding is the origin.
@@ -1761,7 +1767,7 @@ private final class FocusReportingButton: NSButton {
     }
 }
 
-/// A block quote: dimmed text beside a bar.
+/// A block quote: dimmed text beside a bar as tall as the quote.
 final class MarkdownQuoteView: NSView, TranscriptRow {
     private let bar = NSView()
     private let label = TranscriptLinkLabel(wrappingLabelWithString: "")
@@ -1779,6 +1785,7 @@ final class MarkdownQuoteView: NSView, TranscriptRow {
         super.init(frame: .zero)
         bar.wantsLayer = true
         bar.layer?.cornerRadius = 1.5
+        bar.layer?.cornerCurve = .continuous
         label.isSelectable = true
         label.allowsEditingTextAttributes = true
         for view in [bar, label] {
@@ -1787,8 +1794,8 @@ final class MarkdownQuoteView: NSView, TranscriptRow {
         }
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            bar.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            bar.topAnchor.constraint(equalTo: topAnchor),
+            bar.bottomAnchor.constraint(equalTo: bottomAnchor),
             bar.widthAnchor.constraint(equalToConstant: 3),
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
             label.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -1806,7 +1813,7 @@ final class MarkdownQuoteView: NSView, TranscriptRow {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        bar.layer?.backgroundColor = Theme.fill(0.18).cgColor
+        bar.layer?.backgroundColor = NSColor.tertiaryLabelColor.cgColor
     }
 }
 

@@ -344,9 +344,9 @@ private final class ClosedTabRow: ClickableView {
     init(tab: SessionStore.SavedTab, action: @escaping (OpenDisposition) -> Void) {
         super.init(action: action)
         let icon = FaviconView()
-        icon.image = NSImage(systemSymbolName: "arrow.uturn.backward.circle", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
-        icon.contentTintColor = .tertiaryLabelColor
+        // A site without a favicon shows the globe, as it does in the tab strip.
+        icon.image = Theme.symbol("globe", size: Theme.Symbol.row, weight: .regular)
+        icon.contentTintColor = .secondaryLabelColor
         HistoryStore.shared.icon(for: tab.url) { [weak icon] png in
             guard let png, let image = NSImage(data: png) else { return }
             image.size = NSSize(width: 16, height: 16)

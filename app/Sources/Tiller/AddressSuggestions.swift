@@ -43,6 +43,9 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         list.alignment = .width
         let background = SuggestionsBackground()
         background.material = .popover
+        // Blurs what is behind the panel, the page and the toolbar, and stays
+        // lit though the panel is never key.
+        background.blendingMode = .behindWindow
         background.state = .active
         background.wantsLayer = true
         background.layer?.cornerRadius = Theme.Radius.plate
@@ -170,10 +173,24 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
 /// The list's plate: a popover's material with a hairline around it, like
 /// the glass of the address bar it hangs from.
 private final class SuggestionsBackground: NSVisualEffectView {
-    override func updateLayer() {
-        super.updateLayer()
-        layer?.borderWidth = Theme.hairlineWidth
-        layer?.borderColor = Theme.hairline.cgColor
+    // A material view need not call updateLayer, so the border is set here
+    // and again when the appearance changes the separator's color.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateBorder()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBorder()
+    }
+
+    private func updateBorder() {
+        guard let layer else { return }
+        layer.borderWidth = Theme.hairlineWidth
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer.borderColor = Theme.hairline.cgColor
+        }
     }
 }
 
@@ -296,6 +313,11 @@ private final class SuggestionRow: NSView {
         }
         return result
     }
+
+    // The row draws its own selection, so its text stays in plain colors
+    // over the material rather than blending into it, as white on the
+    // accent fill would.
+    override var allowsVibrancy: Bool { false }
 
     override func draw(_ dirtyRect: NSRect) {
         guard isHighlighted else { return }

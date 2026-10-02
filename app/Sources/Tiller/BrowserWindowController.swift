@@ -149,11 +149,29 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         agentPanel.wantsLayer = true
         // Not the name used while there were two panes, whose saved widths
         // don't fit three.
+        // Read before the name is set, since setting it saves the frames.
+        let hasSavedSplit = UserDefaults.standard.object(forKey: "NSSplitView Subview Frames TillerSplit") != nil
         splitView.autosaveName = "TillerSplit"
         window.contentView = splitView
         window.toolbarStyle = .unified
 
         if !window.setFrameUsingName("TillerBrowserWindow") { window.center() }
+        // With no widths saved yet, the split view would give the panel every
+        // point the page can spare, since the panel holds its width harder.
+        // The panel starts at its own width instead.
+        if agentPanelShown, !hasSavedSplit {
+            // Once the window has laid out, so the split view has its width.
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let position = max(
+                        self.splitView.bounds.width - Self.defaultAgentPanelWidth,
+                        self.splitView.minPossiblePositionOfDivider(at: 1)
+                    )
+                    self.splitView.setPosition(position, ofDividerAt: 1)
+                }
+            }
+        }
 
         configureControls()
         statusBubble.translatesAutoresizingMaskIntoConstraints = false
@@ -817,6 +835,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     private static let agentVisibleKey = "agentPanelVisible"
+    /// The panel's width until the divider is dragged.
+    private static let defaultAgentPanelWidth: CGFloat = 400
     private static let sidebarWidthKey = "sidebarWidth"
 
     #if DEBUG
@@ -1132,6 +1152,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         agentPanel.onBusyChange = { [weak self] _ in self?.updateAgentBadge() }
         downloadsButton.target = self
         downloadsButton.action = #selector(showDownloads(_:))
+        // The two round buttons side by side take one size, the agent's, so
+        // their circles match whatever glyph each shows.
+        let round = agentButton.intrinsicContentSize
+        NSLayoutConstraint.activate([
+            downloadsButton.widthAnchor.constraint(equalToConstant: round.width),
+            downloadsButton.heightAnchor.constraint(equalToConstant: round.height),
+        ])
         DownloadStore.shared.onChange = { [weak self] in self?.downloadsChanged() }
         DownloadStore.shared.onStart = { [weak self] download in self?.downloadStarted(download) }
 

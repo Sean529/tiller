@@ -41,6 +41,10 @@ struct Entry {
     /// The favicon URL last fetched for the tab. Pages of one site share an
     /// icon, so the same URL again isn't fetched and encoded again.
     icon_url: Option<String>,
+    /// The site `icon_url` was fetched for. Another site naming the same
+    /// URL fetches it again, since the first fetch may still be on its way
+    /// and will be dropped as the old site's.
+    icon_origin: String,
 }
 
 /// A DevTools call waiting for its result.
@@ -115,7 +119,7 @@ pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, call
     };
     let id = browser.identifier();
     BROWSERS.with_borrow_mut(|map| {
-        map.insert(id, Entry { browser, callbacks: Some(callbacks), devtools: None, icon_url: None })
+        map.insert(id, Entry { browser, callbacks: Some(callbacks), devtools: None, icon_url: None, icon_origin: String::new() })
     });
     id
 }
@@ -408,18 +412,21 @@ wrap_display_handler! {
             let Some(browser) = browser else { return };
             let id = browser.identifier();
             let first = icon_urls.and_then(first_string);
+            let origin = page_origin(browser);
             let Some(url) = first else {
-                set_icon_url(id, None);
+                set_icon_url(id, None, &origin);
                 send_favicon(id, &[]);
                 return;
             };
             // Every page of a site names the same icon; the tab has it already.
-            if BROWSERS.with_borrow(|map| map.get(&id).is_some_and(|e| e.icon_url.as_deref() == Some(url.as_str()))) {
+            if BROWSERS.with_borrow(|map| {
+                map.get(&id).is_some_and(|e| e.icon_url.as_deref() == Some(url.as_str()) && e.icon_origin == origin)
+            }) {
                 return;
             }
             if let Some(host) = browser.host() {
-                set_icon_url(id, Some(url.clone()));
-                let mut callback = TillerFaviconCallback::new(id, page_origin(browser));
+                set_icon_url(id, Some(url.clone()), &origin);
+                let mut callback = TillerFaviconCallback::new(id, origin);
                 host.download_image(Some(&CefString::from(url.as_str())), 1, 64, 0, Some(&mut callback));
             }
         }
@@ -498,10 +505,11 @@ fn send_favicon(id: i32, png: &[u8]) {
     }
 }
 
-fn set_icon_url(id: i32, url: Option<String>) {
+fn set_icon_url(id: i32, url: Option<String>, origin: &str) {
     BROWSERS.with_borrow_mut(|map| {
         if let Some(entry) = map.get_mut(&id) {
             entry.icon_url = url;
+            entry.icon_origin = origin.to_string();
         }
     });
 }

@@ -1,5 +1,6 @@
 import AppKit
 import CTillerCore
+import UniformTypeIdentifiers
 
 /// A file the browser is saving, or has saved, to ~/Downloads.
 struct Download: Equatable {
@@ -159,10 +160,11 @@ final class DownloadsButton: NSButton {
 
     /// The arrow in a circle, which fills around as the download comes in.
     private static func image(progress: Double?, active: Bool) -> NSImage? {
-        guard active else {
-            return NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Downloads")
-        }
-        let side: CGFloat = 20
+        let idle = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Downloads")
+        guard active else { return idle }
+        // The ring takes the idle circle's size, so the glyph and the button
+        // don't grow when a download starts.
+        let side = idle.map { max($0.size.width, $0.size.height).rounded(.up) } ?? 18
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
             let ring = rect.insetBy(dx: 1.5, dy: 1.5)
             let track = NSBezierPath(ovalIn: ring)
@@ -180,7 +182,7 @@ final class DownloadsButton: NSButton {
                 done.stroke()
             }
             if let arrow = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 9, weight: .bold))
+                .withSymbolConfiguration(.init(pointSize: 8, weight: .bold))
             {
                 let size = arrow.size
                 let origin = NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
@@ -317,9 +319,11 @@ private final class DownloadRowView: NSView {
     private let detail = NSTextField(labelWithString: "")
     private let progress = NSProgressIndicator()
     private let action = NSButton()
-    /// The path the icon was loaded for. Asking the Finder for an icon
-    /// costs a trip to LaunchServices, so it happens once per file.
+    /// The path the icon was loaded for, and whether it came from the file
+    /// itself. Asking for an icon costs a trip to LaunchServices, so it
+    /// happens once per path, and once more when the file lands on disk.
     private var iconPath: String?
+    private var iconFromFile = false
     /// Recent (time, bytes) readings, for the speed.
     private var readings: [(time: TimeInterval, bytes: Int64)] = []
 
@@ -328,7 +332,7 @@ private final class DownloadRowView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
 
-        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.imageScaling = .scaleProportionallyDown
 
         name.font = .systemFont(ofSize: Theme.FontSize.body, weight: .medium)
         name.lineBreakMode = .byTruncatingMiddle
@@ -373,7 +377,8 @@ private final class DownloadRowView: NSView {
             progress.widthAnchor.constraint(equalTo: text.widthAnchor),
             action.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             action.centerYAnchor.constraint(equalTo: centerYAnchor),
-            action.widthAnchor.constraint(equalToConstant: 22),
+            action.widthAnchor.constraint(equalToConstant: Self.actionSize),
+            action.heightAnchor.constraint(equalToConstant: Self.actionSize),
         ])
         setAccessibilityRole(.button)
         update(download, force: true)
@@ -390,11 +395,13 @@ private final class DownloadRowView: NSView {
             readings.append((now, download.received))
             readings.removeAll { now - $0.time > 5 }
         }
-        if iconPath != download.path || force {
+        // A file under way may not be at its path yet, so a state change
+        // looks again until the icon comes from the file itself.
+        if iconPath != download.path || (stateChanged && !iconFromFile) {
             iconPath = download.path
-            icon.image = download.path.isEmpty
-                ? NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
-                : NSWorkspace.shared.icon(forFile: download.path)
+            let (image, fromFile) = Self.icon(for: download)
+            icon.image = image
+            iconFromFile = fromFile
         }
         if name.stringValue != download.name { name.stringValue = download.name }
         let text = detailText()
@@ -412,13 +419,9 @@ private final class DownloadRowView: NSView {
             action.isHidden = false
             switch download.state {
             case .inProgress:
-                action.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Cancel")
-                action.toolTip = "Cancel"
-                action.action = #selector(cancel(_:))
+                setAction("xmark.circle.fill", "Cancel", #selector(cancel(_:)))
             case .complete:
-                action.image = NSImage(systemSymbolName: "magnifyingglass.circle.fill", accessibilityDescription: "Show in Finder")
-                action.toolTip = "Show in Finder"
-                action.action = #selector(reveal(_:))
+                setAction("magnifyingglass.circle.fill", "Show in Finder", #selector(reveal(_:)))
             case .canceled, .failed:
                 action.isHidden = true
             }
@@ -426,6 +429,29 @@ private final class DownloadRowView: NSView {
             needsDisplay = true
         }
         setAccessibilityLabel("\(download.name), \(text)")
+    }
+
+    /// The cancel and Finder buttons' square, big enough to hit beside a
+    /// two-line row.
+    private static let actionSize: CGFloat = 24
+
+    private func setAction(_ symbol: String, _ label: String, _ selector: Selector) {
+        action.image = Theme.symbol(symbol, size: 16, weight: .medium, label: label)
+        action.toolTip = label
+        action.setAccessibilityLabel(label)
+        action.action = selector
+    }
+
+    /// The file's own icon once it is on disk; before that, the icon for its
+    /// kind, from the name's extension. The flag says which it is.
+    private static func icon(for download: Download) -> (NSImage, Bool) {
+        let path = download.path
+        if !path.isEmpty, FileManager.default.fileExists(atPath: path) {
+            return (NSWorkspace.shared.icon(forFile: path), true)
+        }
+        let ext = (download.name as NSString).pathExtension
+        let type = ext.isEmpty ? nil : UTType(filenameExtension: ext)
+        return (NSWorkspace.shared.icon(for: type ?? .data), false)
     }
 
     private static let bytes: ByteCountFormatter = {

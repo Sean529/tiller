@@ -74,13 +74,28 @@ final class SkillPicker: NSVisualEffectView {
         for (i, row) in rows.enumerated() { row.isSelected = i == index }
     }
 
-    override func updateLayer() {
-        super.updateLayer()
-        layer?.cornerRadius = Theme.Radius.plate
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
-        layer?.borderWidth = Theme.hairlineWidth
-        layer?.borderColor = Theme.hairline.cgColor
+    // A material view doesn't reliably call `updateLayer`, so the plate's
+    // shape and border are set when it joins a window and when the
+    // appearance changes, as the suggestions plate does.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        shapePlate()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        shapePlate()
+    }
+
+    private func shapePlate() {
+        guard let layer else { return }
+        layer.cornerRadius = Theme.Radius.plate
+        layer.cornerCurve = .continuous
+        layer.masksToBounds = true
+        layer.borderWidth = Theme.hairlineWidth
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer.borderColor = Theme.hairline.cgColor
+        }
     }
 }
 
@@ -91,25 +106,39 @@ private final class SkillPickerRow: NSView {
     var isSelected = false { didSet { if isSelected != oldValue { needsDisplay = true } } }
     private var isPressed = false { didSet { if isPressed != oldValue { needsDisplay = true } } }
 
+    private let name: NSTextField
+    private let hint: NSTextField
+    private let badge: NSTextField
+    private let hasHint: Bool
+    /// Between the name, the hint, the spacer and the badge.
+    private static let spacing: CGFloat = 6
+    private static let sideInset: CGFloat = 8
+
     init(skill: AgentSkill) {
+        let argumentHint = skill.argumentHint ?? ""
+        name = NSTextField(labelWithString: "/" + skill.name)
+        hint = NSTextField(labelWithString: argumentHint)
+        badge = NSTextField(labelWithString: skill.origin == .library ? "Tiller" : "")
+        hasHint = !argumentHint.isEmpty
         super.init(frame: .zero)
         wantsLayer = true
-        let name = NSTextField(labelWithString: "/" + skill.name)
         name.font = .systemFont(ofSize: Theme.FontSize.body, weight: .medium)
         name.lineBreakMode = .byTruncatingTail
         name.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        let hint = NSTextField(labelWithString: skill.argumentHint ?? "")
         hint.font = .systemFont(ofSize: Theme.FontSize.caption)
         hint.textColor = .tertiaryLabelColor
+        // Never cut: a hint broken mid-token misleads, so `layout()` hides
+        // it when it doesn't fit whole. It gives way to the row's width, and
+        // under the split view's holding priority, so a long hint can't
+        // widen the panel.
         hint.lineBreakMode = .byTruncatingTail
         hint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        hint.isHidden = skill.argumentHint == nil
-        let badge = NSTextField(labelWithString: skill.origin == .library ? "Tiller" : "")
+        hint.isHidden = !hasHint
         badge.font = .systemFont(ofSize: 10, weight: .medium)
         badge.textColor = .secondaryLabelColor
         badge.isHidden = skill.origin != .library
         let top = NSStackView(views: [name, hint, NSView(), badge])
-        top.spacing = 6
+        top.spacing = Self.spacing
         let description = NSTextField(labelWithString: skill.description.isEmpty ? " " : skill.description)
         description.font = .systemFont(ofSize: Theme.FontSize.caption)
         description.textColor = .secondaryLabelColor
@@ -124,8 +153,8 @@ private final class SkillPickerRow: NSView {
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 5),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.sideInset),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.sideInset),
             top.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         toolTip = skill.description.isEmpty ? nil : skill.description
@@ -134,6 +163,21 @@ private final class SkillPickerRow: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Shows the hint only when the name, the hint and the badge all fit on
+    /// the line. Decided before the stack lays out, so it lays out once.
+    override func layout() {
+        if hasHint, bounds.width > 0 {
+            let available = bounds.width - 2 * Self.sideInset
+            // The spacer between the hint and the badge adds one gap even at zero width.
+            let badgeWidth = badge.isHidden ? 0 : Self.spacing + ceil(badge.intrinsicContentSize.width)
+            let needed = ceil(name.intrinsicContentSize.width) + Self.spacing
+                + ceil(hint.intrinsicContentSize.width) + Self.spacing + badgeWidth
+            let hide = needed > available
+            if hint.isHidden != hide { hint.isHidden = hide }
+        }
+        super.layout()
+    }
 
     override var wantsUpdateLayer: Bool { true }
 

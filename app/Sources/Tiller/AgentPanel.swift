@@ -348,8 +348,8 @@ final class AgentPanelView: NSView {
         case "newChat": newChat()
         case "newTab": newTab()
         case "closeTab": closeTab(activeIndex)
-        case "history": showHistory(from: tabBar)
-        case "tools": showTools(from: tabBar)
+        case "history": tabBar.historyForTesting()
+        case "tools": tabBar.toolsForTesting()
         case "focus": window?.makeFirstResponder(input)
         default:
             if action.hasPrefix("tab"), let index = Int(action.dropFirst(3)), chats.indices.contains(index - 1) {
@@ -668,6 +668,12 @@ final class Composer: NSView {
         set { textView.placeholder = newValue }
     }
 
+    /// Drawn instead of `placeholder` when that doesn't fit the field.
+    var shortPlaceholder: String {
+        get { textView.shortPlaceholder }
+        set { textView.shortPlaceholder = newValue }
+    }
+
     var isBusy = false {
         didSet { updateSendButton() }
     }
@@ -834,6 +840,11 @@ final class PlaceholderTextView: NSTextView {
             setAccessibilityPlaceholderValue(placeholder)
         }
     }
+    /// Drawn when `placeholder` would truncate. VoiceOver still reads the
+    /// full one.
+    var shortPlaceholder = "" {
+        didSet { needsDisplay = true }
+    }
     var onFocusChange: (() -> Void)?
     /// Takes the pasteboard's images, returning false if it has none.
     var onPasteboardImages: ((NSPasteboard) -> Bool)?
@@ -885,10 +896,23 @@ final class PlaceholderTextView: NSTextView {
             .font: font ?? .systemFont(ofSize: Theme.FontSize.body),
             .foregroundColor: NSColor.placeholderTextColor,
         ]
-        let origin = NSPoint(x: textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0), y: textContainerOrigin.y)
-        NSAttributedString(string: placeholder, attributes: attributes)
-            .draw(with: NSRect(origin: origin, size: NSSize(width: bounds.width - origin.x, height: bounds.height)),
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        let origin = NSPoint(x: textContainerOrigin.x + padding, y: textContainerOrigin.y)
+        let available = bounds.width - origin.x - textContainerOrigin.x - padding
+        var text = NSAttributedString(string: placeholder, attributes: attributes)
+        // A shorter hint whole reads better than the long one cut off.
+        if !shortPlaceholder.isEmpty, ceil(text.size().width) > available {
+            text = NSAttributedString(string: shortPlaceholder, attributes: attributes)
+        }
+        text.draw(with: NSRect(origin: origin, size: NSSize(width: available, height: bounds.height)),
                   options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    }
+
+    /// The hint that fits depends on the width, so it is drawn again on a resize.
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged, string.isEmpty, !placeholder.isEmpty { needsDisplay = true }
     }
 
     override func becomeFirstResponder() -> Bool {

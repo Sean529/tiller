@@ -33,6 +33,13 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private let separator = NSBox()
     private let transcript = TranscriptView()
     private let scrollView = NSScrollView()
+    /// Fades the transcript out under the header and above the tab bar, so a
+    /// line is never sliced at either edge.
+    private let topFade = EdgeFadeView(edge: .top)
+    private let bottomFade = EdgeFadeView(edge: .bottom)
+    /// Room above the first message and below the last, inside the scroll
+    /// view, so neither sits on the fades.
+    private static let insets = NSEdgeInsets(top: 8, left: 0, bottom: 10, right: 0)
     private let emptyState = AgentEmptyState()
     private let composer = Composer()
     private let skillPicker = SkillPicker()
@@ -193,6 +200,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = Self.insets
         // Shows the rule at the top only once the transcript scrolls under it.
         scrollView.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
@@ -218,7 +226,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         scrollDownButton.target = self
         scrollDownButton.action = #selector(scrollDown(_:))
 
-        for view in [scrollView, separator, emptyState, scrollDownButton, tabBarHost, composer, skillPicker] as [NSView] {
+        for view in [scrollView, topFade, bottomFade, separator, emptyState, scrollDownButton, tabBarHost, composer, skillPicker] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -239,7 +247,17 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             transcript.topAnchor.constraint(equalTo: clip.topAnchor),
             transcript.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
             transcript.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            transcript.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
+            // Less the insets, so a short transcript doesn't scroll.
+            transcript.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor, constant: -(Self.insets.top + Self.insets.bottom)),
+
+            topFade.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            topFade.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            topFade.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            topFade.heightAnchor.constraint(equalToConstant: EdgeFadeView.height),
+            bottomFade.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
+            bottomFade.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            bottomFade.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            bottomFade.heightAnchor.constraint(equalToConstant: EdgeFadeView.height),
 
             emptyState.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor, constant: -10),
             emptyState.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
@@ -279,7 +297,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
 
     @objc private func transcriptScrolled(_ notification: Notification) {
-        let scrolled = scrollView.contentView.bounds.minY > 1
+        // At the top the clip's origin sits at minus the top inset.
+        let scrolled = scrollView.contentView.bounds.minY > 1 - Self.insets.top
         if (separator.alphaValue > 0) != scrolled { separator.alphaValue = scrolled ? 1 : 0 }
         updateScrollDownButton()
     }
@@ -288,14 +307,14 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// worth out of view.
     private func updateScrollDownButton() {
         let clip = scrollView.contentView.bounds
-        let away = transcript.frame.height - clip.maxY
+        let away = transcript.frame.height - (clip.maxY - Self.insets.bottom)
         scrollDownButton.setShown(away > max(80, clip.height * 0.5))
     }
 
     @objc private func scrollDown(_ sender: Any?) {
         layoutSubtreeIfNeeded()
         let clip = scrollView.contentView
-        let y = max(0, transcript.frame.height - clip.bounds.height)
+        let y = bottomOffset
         if Theme.reduceMotion {
             clip.scroll(to: NSPoint(x: 0, y: y))
         } else {
@@ -746,6 +765,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         setBusy(false)
         setStatus(session == nil ? "" : "Ready", busy: false)
         composer.placeholder = "Ask \(kind.displayName) about this page…"
+        composer.shortPlaceholder = "Ask \(kind.displayName)…"
         emptyState.kind = kind
         emptyState.isHidden = !transcript.isEmpty || !recordsLoaded
     }
@@ -821,9 +841,51 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     func scrollToBottom() {
         layoutSubtreeIfNeeded()
         let clip = scrollView.contentView
-        let y = max(0, transcript.frame.height - clip.bounds.height)
-        clip.scroll(to: NSPoint(x: 0, y: y))
+        clip.scroll(to: NSPoint(x: 0, y: bottomOffset))
         scrollView.reflectScrolledClipView(clip)
+    }
+
+    /// The clip's origin with the last message just above the bottom inset.
+    /// The clip spans the insets too, so the top rests at minus the top inset.
+    private var bottomOffset: CGFloat {
+        let clipHeight = scrollView.contentView.bounds.height
+        return max(-Self.insets.top, transcript.frame.height - clipHeight + Self.insets.bottom)
+    }
+}
+
+/// A strip over one edge of the transcript that fades from the panel's
+/// background to clear. It only draws: clicks and scrolls pass through.
+final class EdgeFadeView: NSView {
+    enum Edge { case top, bottom }
+    static let height: CGFloat = 10
+    private let edge: Edge
+
+    init(edge: Edge) {
+        self.edge = edge
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func makeBackingLayer() -> CALayer { CAGradientLayer() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    /// The panel draws nothing of its own, so it shows the window's
+    /// background. Resolved here, where the view's appearance is current, so
+    /// it follows light and dark mode.
+    override func updateLayer() {
+        guard let gradient = layer as? CAGradientLayer else { return }
+        // Opaque at the edge, clear toward the transcript. Layer y runs up.
+        gradient.startPoint = CGPoint(x: 0.5, y: edge == .top ? 1 : 0)
+        gradient.endPoint = CGPoint(x: 0.5, y: edge == .top ? 0 : 1)
+        gradient.colors = [
+            NSColor.windowBackgroundColor.cgColor,
+            NSColor.windowBackgroundColor.withAlphaComponent(0).cgColor,
+        ]
     }
 }
 
