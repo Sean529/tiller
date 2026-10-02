@@ -435,7 +435,7 @@ private final class StatusPill: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        dot.layer?.backgroundColor = (busy ? NSColor.controlAccentColor : NSColor.systemGreen).cgColor
+        dot.layer?.backgroundColor = (busy ? Theme.accentColor : NSColor.systemGreen).cgColor
     }
 }
 
@@ -508,7 +508,7 @@ private final class SymbolBadge: NSView {
     var logo: NSImage? {
         didSet {
             image.image = logo ?? symbol
-            image.contentTintColor = logo == nil ? .controlAccentColor : nil
+            image.contentTintColor = logo == nil ? Theme.accentColor : nil
             needsDisplay = true
         }
     }
@@ -522,7 +522,7 @@ private final class SymbolBadge: NSView {
         image = NSImageView(image: self.symbol)
         super.init(frame: .zero)
         wantsLayer = true
-        image.contentTintColor = .controlAccentColor
+        image.contentTintColor = Theme.accentColor
         image.translatesAutoresizingMaskIntoConstraints = false
         addSubview(image)
         NSLayoutConstraint.activate([
@@ -766,7 +766,7 @@ final class Composer: NSView {
         let empty = textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty
         sendButton.image = isBusy ? Self.stopImage : Self.sendImage
         sendButton.toolTip = isBusy ? "Stop (⎋)" : "Send (↩)"
-        sendButton.contentTintColor = isBusy ? .labelColor : empty ? .tertiaryLabelColor : .controlAccentColor
+        sendButton.contentTintColor = isBusy ? .labelColor : empty ? .tertiaryLabelColor : Theme.accentColor
         sendButton.isEnabled = isBusy || !empty
     }
 
@@ -780,7 +780,7 @@ final class Composer: NSView {
         let background: CGFloat = Theme.reduceTransparency ? 1 : 0.7
         layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(background).cgColor
         layer?.borderWidth = isDropTarget ? 2 : Theme.hairlineWidth
-        layer?.borderColor = (isDropTarget ? NSColor.controlAccentColor
+        layer?.borderColor = (isDropTarget ? Theme.accentColor
             : focused ? Theme.accent(0.6) : Theme.hairline).cgColor
     }
 

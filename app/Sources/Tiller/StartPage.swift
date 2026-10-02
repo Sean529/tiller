@@ -119,7 +119,7 @@ final class StartPageView: NSView {
     override func updateLayer() {
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let tint = NSColor.controlAccentColor.withAlphaComponent(dark ? 0.09 : 0.05)
+        let tint = Theme.accent(dark ? 0.09 : 0.05)
         glow.colors = [tint.cgColor, NSColor.clear.cgColor]
     }
 

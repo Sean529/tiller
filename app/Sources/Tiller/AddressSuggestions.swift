@@ -322,7 +322,7 @@ private final class SuggestionRow: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard isHighlighted else { return }
         let path = NSBezierPath(roundedRect: bounds, xRadius: Theme.Radius.row, yRadius: Theme.Radius.row)
-        NSColor.selectedContentBackgroundColor.setFill()
+        Theme.selectionColor.setFill()
         path.fill()
         // A press shades the highlight, as it does a tile or a row elsewhere.
         if isPressed {

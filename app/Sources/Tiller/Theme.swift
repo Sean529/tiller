@@ -3,7 +3,8 @@ import AppKit
 /// The values the chrome shares, so a hover, a corner or a caption reads the
 /// same in the tab strip, the start page, the popovers and the agent panel.
 /// Colors stay semantic system colors with an alpha on top, so they follow
-/// light and dark mode and the accent color on their own.
+/// light and dark mode on their own. The accent is the one chosen in
+/// Settings, which `accentColor` reads each time it is drawn.
 enum Theme {
     // MARK: Fills
 
@@ -41,8 +42,28 @@ enum Theme {
         return .clear
     }
 
-    /// `controlAccentColor` at `alpha`.
-    static func accent(_ alpha: CGFloat) -> NSColor { .controlAccentColor.withAlphaComponent(alpha) }
+    /// The accent chosen in Settings, resolved whenever it is drawn, so a
+    /// color set once still follows a change. Nonisolated, so it can resolve
+    /// wherever AppKit asks for it.
+    nonisolated static let accentColor = accentColor(alpha: 1)
+
+    /// The accent at `alpha`.
+    static func accent(_ alpha: CGFloat) -> NSColor { accentColor(alpha: alpha) }
+
+    private nonisolated static func accentColor(alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            var color = NSColor.controlAccentColor
+            appearance.performAsCurrentDrawingAppearance {
+                color = Settings.accentTheme.color.usingColorSpace(.sRGB) ?? color
+            }
+            return alpha < 1 ? color.withAlphaComponent(alpha) : color
+        }
+    }
+
+    /// The solid fill of a highlighted row: the system's, or the chosen accent.
+    static var selectionColor: NSColor {
+        Settings.accentTheme == .system ? .selectedContentBackgroundColor : accentColor
+    }
 
     /// A one-point line between surfaces.
     static var hairline: NSColor { .separatorColor }
@@ -175,6 +196,29 @@ enum Theme {
         static let slide: TimeInterval = 0.2
         /// A panel opening or closing.
         static let panel: TimeInterval = 0.25
+    }
+
+    // MARK: Appearance
+
+    /// Sets light or dark from Settings for the whole app, which Chromium
+    /// passes on to pages as `prefers-color-scheme`.
+    @MainActor
+    static func applyAppearance() {
+        NSApp.appearance = Settings.appearance.appearance
+    }
+
+    /// Redraws every window after the accent changes. Views pick their
+    /// colors in `updateLayer` or `draw`, which a change of accent alone
+    /// would not call again, unlike a change of appearance.
+    @MainActor
+    static func redrawAll() {
+        func mark(_ view: NSView) {
+            view.needsDisplay = true
+            view.subviews.forEach(mark)
+        }
+        for window in NSApp.windows {
+            if let frame = window.contentView?.superview { mark(frame) } else if let content = window.contentView { mark(content) }
+        }
     }
 
     // MARK: Accessibility

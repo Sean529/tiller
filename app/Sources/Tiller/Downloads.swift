@@ -178,7 +178,7 @@ final class DownloadsButton: NSButton {
                     startAngle: 90, endAngle: 90 - 360 * progress, clockwise: true)
                 done.lineWidth = 2
                 done.lineCapStyle = .round
-                NSColor.controlAccentColor.setStroke()
+                Theme.accentColor.setStroke()
                 done.stroke()
             }
             if let arrow = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: nil)?

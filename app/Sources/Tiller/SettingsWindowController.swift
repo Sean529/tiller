@@ -245,6 +245,8 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     private var launchPopUp: NSPopUpButton?
     private var newTabPopUp: NSPopUpButton?
     private var tabLayoutPopUp: NSPopUpButton?
+    private var appearancePopUp: NSPopUpButton?
+    private var accentPopUp: NSPopUpButton?
     private var searchPopUp: NSPopUpButton?
     private let templateField = NSTextField()
     private let templateNote = SettingsPane.note()
@@ -296,6 +298,21 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         self.tabLayoutPopUp = tabLayoutPopUp
         addRow("Show tabs:", tabLayoutPopUp)
 
+        let appearancePopUp = Self.popUp(
+            Appearance.allCases, title: \.displayName, selected: Settings.appearance,
+            target: self, action: #selector(appearanceChanged(_:))
+        )
+        self.appearancePopUp = appearancePopUp
+        addRow("Appearance:", appearancePopUp)
+
+        let accentPopUp = Self.popUp(
+            AccentTheme.allCases, title: \.displayName, image: { Self.swatch($0.color) }, selected: Settings.accentTheme,
+            target: self, action: #selector(accentChanged(_:))
+        )
+        self.accentPopUp = accentPopUp
+        addRow("Accent color:", accentPopUp)
+        addNote(Self.note("Selections, chat bubbles and busy dots. Pages follow the appearance."))
+
         let searchPopUp = Self.popUp(
             SearchEngine.allCases, title: \.displayName, selected: Settings.searchEngine,
             target: self, action: #selector(searchEngineChanged(_:))
@@ -303,9 +320,9 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         self.searchPopUp = searchPopUp
         addRow("Search engine:", searchPopUp)
 
-        // One width for the four, so their right edges line up; a longer
+        // One width for them all, so their right edges line up; a longer
         // title can still widen its own.
-        for popUp in [launchPopUp, newTabPopUp, tabLayoutPopUp, searchPopUp] {
+        for popUp in [launchPopUp, newTabPopUp, tabLayoutPopUp, appearancePopUp, accentPopUp, searchPopUp] {
             popUp.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.popUpWidth).isActive = true
         }
 
@@ -326,6 +343,8 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         launchPopUp?.selectItem(at: LaunchTabs.allCases.firstIndex(of: Settings.launchTabs) ?? 0)
         newTabPopUp?.selectItem(at: NewTabPage.allCases.firstIndex(of: Settings.newTabPage) ?? 0)
         tabLayoutPopUp?.selectItem(at: TabLayout.allCases.firstIndex(of: Settings.tabLayout) ?? 0)
+        appearancePopUp?.selectItem(at: Appearance.allCases.firstIndex(of: Settings.appearance) ?? 0)
+        accentPopUp?.selectItem(at: AccentTheme.allCases.firstIndex(of: Settings.accentTheme) ?? 0)
         searchPopUp?.selectItem(at: SearchEngine.allCases.firstIndex(of: Settings.searchEngine) ?? 0)
         showTemplateState()
     }
@@ -371,6 +390,30 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     @objc private func tabLayoutChanged(_ sender: NSPopUpButton) {
         guard let layout = (sender.selectedItem?.representedObject as? String).flatMap(TabLayout.init) else { return }
         Settings.tabLayout = layout
+    }
+
+    @objc private func appearanceChanged(_ sender: NSPopUpButton) {
+        guard let appearance = (sender.selectedItem?.representedObject as? String).flatMap(Appearance.init) else { return }
+        Settings.appearance = appearance
+    }
+
+    @objc private func accentChanged(_ sender: NSPopUpButton) {
+        guard let theme = (sender.selectedItem?.representedObject as? String).flatMap(AccentTheme.init) else { return }
+        Settings.accentTheme = theme
+    }
+
+    /// A dot of `color` for a pop-up item. Drawn on demand, so it follows
+    /// light and dark mode.
+    private static func swatch(_ color: NSColor) -> NSImage {
+        NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+            let dot = NSBezierPath(ovalIn: rect.insetBy(dx: 2.5, dy: 2.5))
+            color.setFill()
+            dot.fill()
+            Theme.hairline.setStroke()
+            dot.lineWidth = 1
+            dot.stroke()
+            return true
+        }
     }
 
     @objc private func searchEngineChanged(_ sender: NSPopUpButton) {

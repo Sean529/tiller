@@ -9,6 +9,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Links that arrived before the window, which opens them.
     private var pendingURLs: [URL] = []
 
+    /// A change of appearance redraws everything on its own; a change of
+    /// accent needs a nudge.
+    @objc private func themeChanged(_ notification: Notification) {
+        Theme.applyAppearance()
+        Theme.redrawAll()
+    }
+
     @objc func showSettings(_ sender: Any?) {
         let controller = settingsController ?? SettingsWindowController()
         settingsController = controller
@@ -75,6 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Show All Tabs out of the View menu.
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.mainMenu = MainMenu.build()
+        // Before the first window, so it never shows in the wrong appearance.
+        Theme.applyAppearance()
+        NotificationCenter.default.addObserver(self, selector: #selector(themeChanged(_:)), name: .themeDidChange, object: nil)
 
         tiller_core_set_quit_handler {
             MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.quitRequested() }

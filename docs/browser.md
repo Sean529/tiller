@@ -140,6 +140,10 @@ Tiller can be the Mac's default browser, for web links and HTML files opened fro
 - Only a bundled Tiller.app can be the default. macOS remembers the choice by bundle id and finds the app by where it is, so a moved or rebuilt copy is found again, but a deleted one isn't.
 - `-askedDefaultBrowser YES` skips the question at launch, for scripted runs. The answer is stored in `dev.sorrycc.tiller`, shared by every profile.
 
+## Appearance
+
+Settings > General picks light or dark and an accent color for each profile. Light or dark applies to pages too, which see it as `prefers-color-scheme`, so a site with a dark theme follows Tiller rather than macOS. The accent tints Tiller's own selections, chat bubbles, busy dots and the start page. Buttons, focus rings and text selection are drawn by macOS and keep the system accent. Both default to matching the system. See [Settings](settings-and-data.md#settings).
+
 ## Accessibility
 
 The chrome follows the system's accessibility settings. VoiceOver reads tabs, the New Tab row, address suggestions, the agent panel's chat chips and its message field, with a Close action on each tab and chip. Under Reduce Motion, tabs don't slide when reordered, hovers and the start page's tiles don't animate, and the panel and the status bubble appear at once. Under Increase Contrast, the selected tab and the highlighted rows of the popovers get an outline, since a faint fill alone wouldn't show. Under Reduce Transparency, the agent panel's message field is opaque.

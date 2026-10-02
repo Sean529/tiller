@@ -13,6 +13,8 @@ Tiller > Settings… (Cmd+,) has six panes: General, Passwords, Extensions (see 
 | General | At launch, open: Tabs from Last Time or Homepage | Tabs from Last Time | next launch |
 | General | New tabs open with: Blank Page or Homepage | Blank Page | next new tab |
 | General | Show tabs: Along the Top or In a Sidebar | Along the Top | right away |
+| General | Appearance: Match System, Light or Dark, for Tiller's windows and for pages, which see it as `prefers-color-scheme` | Match System | right away |
+| General | Accent color: Match System, Graphite, Blue, Teal, Green, Orange or Pink, for Tiller's selections, chat bubbles, busy dots and the start page. Buttons, focus rings and text selection keep the system accent | Match System | right away |
 | General | Search engine: Google, Bing, DuckDuckGo or Custom | Google | next search |
 | General | Custom search URL, with `%s` for the query | empty | next search; Google is used while it isn't a valid http(s) URL with `%s` |
 | Agent | New chats use: Qoder CLI, Claude Code or Codex | Qoder CLI | next new chat; same as the picker in the panel |

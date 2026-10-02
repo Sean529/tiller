@@ -66,7 +66,7 @@ final class AgentTabBar: NSView {
             button.isSelected = index == selected
         }
         newTabButton.isHidden = !canAddTab
-        toolsButton.contentTintColor = tools.isEmpty ? .secondaryLabelColor : .controlAccentColor
+        toolsButton.contentTintColor = tools.isEmpty ? .secondaryLabelColor : Theme.accentColor
         toolsButton.toolTip = tools.isEmpty
             ? "Tools: browser only"
             : "Tools: browser, " + tools.map { $0.displayName.lowercased() }.joined(separator: ", ")
@@ -149,7 +149,7 @@ private final class TabNumberButton: NSView {
         closeIcon.isHidden = true
         busyDot.wantsLayer = true
         busyDot.layer?.cornerRadius = Theme.busyDot / 2
-        busyDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        busyDot.layer?.backgroundColor = Theme.accentColor.cgColor
         busyDot.isHidden = true
         for view in [label, closeIcon, busyDot] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -194,7 +194,7 @@ private final class TabNumberButton: NSView {
         layer?.borderWidth = isSelected || Theme.increaseContrast ? Theme.hairlineWidth : 0
         layer?.borderColor = (isSelected ? Theme.accent(Theme.Accent.outline) : Theme.hairline).cgColor
         label.textColor = isSelected ? .labelColor : .secondaryLabelColor
-        busyDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        busyDot.layer?.backgroundColor = Theme.accentColor.cgColor
     }
 
     override func updateTrackingAreas() {
@@ -491,7 +491,7 @@ private final class HistoryCellView: NSView {
         super.init(frame: .zero)
         let icon = NSImageView(image: logo ?? NSImage(systemSymbolName: "bubble.left", accessibilityDescription: nil)!
             .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))!)
-        if logo == nil { icon.contentTintColor = isCurrent ? .controlAccentColor : .secondaryLabelColor }
+        if logo == nil { icon.contentTintColor = isCurrent ? Theme.accentColor : .secondaryLabelColor }
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: Theme.FontSize.body, weight: .medium)
         titleLabel.lineBreakMode = .byTruncatingTail

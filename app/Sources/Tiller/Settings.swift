@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Where address bar searches go.
 enum SearchEngine: String, CaseIterable {
@@ -66,6 +66,70 @@ enum TabLayout: String, CaseIterable {
     }
 }
 
+/// Light or dark for the chrome and for pages, which see it as
+/// `prefers-color-scheme`.
+enum Appearance: String, CaseIterable {
+    case system
+    case light
+    case dark
+
+    var displayName: String {
+        switch self {
+        case .system: "Match System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    /// What `NSApp.appearance` is set to. Nil follows the system.
+    var appearance: NSAppearance? {
+        switch self {
+        case .system: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
+/// The color Tiller's own tinted surfaces use: selections, the message
+/// bubble, busy dots and the start page's wash. AppKit's controls, such as
+/// focus rings and text selection, keep the system accent either way.
+enum AccentTheme: String, CaseIterable {
+    case system
+    case graphite
+    case blue
+    case teal
+    case green
+    case orange
+    case pink
+
+    var displayName: String {
+        switch self {
+        case .system: "Match System"
+        case .graphite: "Graphite"
+        case .blue: "Blue"
+        case .teal: "Teal"
+        case .green: "Green"
+        case .orange: "Orange"
+        case .pink: "Pink"
+        }
+    }
+
+    /// A system color, so each one has its own light, dark and
+    /// high-contrast shades.
+    var color: NSColor {
+        switch self {
+        case .system: .controlAccentColor
+        case .graphite: .systemGray
+        case .blue: .systemBlue
+        case .teal: .systemTeal
+        case .green: .systemGreen
+        case .orange: .systemOrange
+        case .pink: .systemPink
+        }
+    }
+}
+
 /// Every setting the Settings window shows, stored in the current profile's
 /// user defaults. Launch arguments (`-homepage https://…`) override them like
 /// any default.
@@ -100,6 +164,22 @@ enum Settings {
         set {
             defaults.set(newValue.rawValue, forKey: "tabLayout")
             NotificationCenter.default.post(name: .tabLayoutDidChange, object: nil)
+        }
+    }
+
+    static var appearance: Appearance {
+        get { defaults.string(forKey: "appearance").flatMap(Appearance.init) ?? .system }
+        set {
+            defaults.set(newValue.rawValue, forKey: "appearance")
+            NotificationCenter.default.post(name: .themeDidChange, object: nil)
+        }
+    }
+
+    static var accentTheme: AccentTheme {
+        get { defaults.string(forKey: "accentTheme").flatMap(AccentTheme.init) ?? .system }
+        set {
+            defaults.set(newValue.rawValue, forKey: "accentTheme")
+            NotificationCenter.default.post(name: .themeDidChange, object: nil)
         }
     }
 
@@ -246,4 +326,6 @@ extension Notification.Name {
     static let agentTabsDidChange = Notification.Name("TillerAgentTabsDidChange")
     /// Posted when `Settings.tabLayout` changes.
     static let tabLayoutDidChange = Notification.Name("TillerTabLayoutDidChange")
+    /// Posted when `Settings.appearance` or `Settings.accentTheme` changes.
+    static let themeDidChange = Notification.Name("TillerThemeDidChange")
 }

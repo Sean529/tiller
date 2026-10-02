@@ -1745,7 +1745,7 @@ private final class AgentBadgeView: NSView {
 
     override func updateLayer() {
         layer?.cornerRadius = Theme.busyDot / 2
-        layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        layer?.backgroundColor = Theme.accentColor.cgColor
     }
 }
 
