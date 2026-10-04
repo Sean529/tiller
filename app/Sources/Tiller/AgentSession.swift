@@ -121,6 +121,7 @@ final class AgentSession {
     /// The folder the agent runs in: the one given, or Settings' at start.
     private(set) var directory: URL?
     private(set) var isBusy = false
+    private let chat: String
     private var process: Process?
     private var stdin: FileHandle?
     private var stderrTail = ""
@@ -143,9 +144,11 @@ final class AgentSession {
     private var resumeRetries = 0
 
     /// `sessionID` resumes that saved conversation in `directory`, the folder
-    /// it was started in, since the CLIs keep sessions by folder.
-    init(kind: AgentKind, tools: [AgentTool], resuming sessionID: String? = nil, in directory: URL? = nil) {
+    /// it was started in, since the CLIs keep sessions by folder. `chat` is
+    /// the chat's id, which tiller_mcp passes on so Tiller knows who asks.
+    init(kind: AgentKind, tools: [AgentTool], chat: String, resuming sessionID: String? = nil, in directory: URL? = nil) {
         self.kind = kind
+        self.chat = chat
         self.tools = tools
         self.sessionID = sessionID
         self.directory = directory
@@ -166,7 +169,7 @@ final class AgentSession {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = kind.arguments(
-            mcpConfig: try AgentEnvironment.writeMCPConfig(),
+            mcpConfig: try AgentEnvironment.writeMCPConfig(chat: chat),
             systemPrompt: AgentEnvironment.systemPrompt(tools: tools),
             tools: tools,
             resume: sessionID
@@ -174,7 +177,7 @@ final class AgentSession {
         let directory = try self.directory ?? AgentEnvironment.workingDirectory()
         self.directory = directory
         process.currentDirectoryURL = directory
-        process.environment = try AgentEnvironment.environment(for: kind)
+        process.environment = try AgentEnvironment.environment(for: kind, chat: chat)
 
         // Writing to an agent that has exited should fail, not kill Tiller.
         signal(SIGPIPE, SIG_IGN)
@@ -683,6 +686,12 @@ enum AgentEnvironment {
         change or improve a skill, use list_skills and read_skill to see the existing ones and \
         save_skill to write it to Tiller's skill library, where every agent finds it from its next \
         start. Skills outside the library are read-only.
+
+        Tiller can also send a prompt by itself on a schedule, each run in a new chat. When the \
+        user asks for something to happen regularly or at a later time, use list_schedules to see \
+        the existing ones and save_schedule to create or change one; delete_schedule removes one \
+        and run_schedule runs one now. A schedule's prompt is sent as is, so write it to stand on \
+        its own, and it may start with /name to call a skill.
         """
 
     /// Tiller's prompt, a line on the file and shell tools if any are on, then
@@ -775,7 +784,7 @@ enum AgentEnvironment {
         return shell.terminationStatus == 0 && !path.isEmpty ? path : nil
     }
 
-    static func environment(for kind: AgentKind) throws -> [String: String] {
+    static func environment(for kind: AgentKind, chat: String) throws -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let path = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (searchDirectories + [path]).joined(separator: ":")
@@ -783,6 +792,8 @@ enum AgentEnvironment {
         for key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] { env[key] = nil }
         // Each profile has its own socket, so tiller_mcp is told which.
         env["TILLER_SOCKET"] = ControlServer.socketPath
+        // Tells Tiller which chat a tool call comes from.
+        env["TILLER_CHAT"] = chat
         if kind == .codex { env["CODEX_HOME"] = try codexHome() }
         return env
     }
@@ -824,7 +835,7 @@ enum AgentEnvironment {
                         "args": [String](),
                         // Codex starts MCP servers with only a few variables
                         // set, so pass on the one that picks this profile's socket.
-                        "env_vars": ["TILLER_SOCKET"],
+                        "env_vars": ["TILLER_SOCKET", "TILLER_CHAT"],
                         "default_tools_approval_mode": "approve",
                     ],
                 ],
@@ -857,20 +868,21 @@ enum AgentEnvironment {
         Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/tiller_mcp").path
     }
 
-    /// Points the agent at tiller_mcp.
-    static func writeMCPConfig() throws -> String {
+    /// Points the agent at tiller_mcp, telling it the chat's id. Written to
+    /// `mcp.json` in the chat's folder, so it goes when the chat does.
+    static func writeMCPConfig(chat: String) throws -> String {
         let config: [String: Any] = [
             "mcpServers": [
                 "tiller": [
                     "type": "stdio", "command": mcpServerPath, "args": [String](),
-                    "env": ["TILLER_SOCKET": ControlServer.socketPath],
+                    "env": ["TILLER_SOCKET": ControlServer.socketPath, "TILLER_CHAT": chat],
                 ],
             ],
         ]
-        try FileManager.default.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
-        let path = supportDirectory + "/agent-mcp.json"
-        try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted])
-            .write(to: URL(fileURLWithPath: path))
-        return path
+        let folder = AgentHistoryStore.shared.folder(for: chat)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent("mcp.json")
+        try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted]).write(to: url)
+        return url.path
     }
 }

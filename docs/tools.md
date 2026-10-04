@@ -1,6 +1,6 @@
 # Browser tools
 
-Tiller exposes one set of browser tools two ways: as an MCP server for agents and as the `tiller` command-line tool for shells and scripts. The MCP server also has three tools for the [skill library](agent.md#tillers-skill-library).
+Tiller exposes one set of browser tools two ways: as an MCP server for agents and as the `tiller` command-line tool for shells and scripts. The MCP server also has three tools for the [skill library](agent.md#tillers-skill-library) and four for [scheduled prompts](agent.md#scheduling-from-a-chat).
 
 ## MCP server
 
@@ -21,6 +21,10 @@ Tiller exposes one set of browser tools two ways: as an MCP server for agents an
 | `list_skills` | Every skill agents can call: the library's, marked editable and on or off, then the CLIs' own |
 | `read_skill` | A skill's `SKILL.md` and the other files in its folder |
 | `save_skill` | Creates or updates a library skill from the whole `SKILL.md`, or its body plus a `description`, with optional `files` to write and `delete_files` to remove |
+| `list_schedules` | Every scheduled prompt: id, name, prompt, agent, tools, rule, on or off, next run and last result |
+| `save_schedule` | Creates a scheduled prompt, or changes the one with `id`, keeping fields not given. `rule` is one of `{"every_minutes": 30}`, `{"daily": "09:00"}`, `{"weekdays": "09:00"}` or `{"cron": "0 9 * * 1-5"}` |
+| `delete_schedule` | Removes a scheduled prompt by `id` |
+| `run_schedule` | Runs a scheduled prompt now, without moving its next run |
 
 Tools act on the selected tab unless given `tab_id`, and work in background tabs without bringing them to the front, so agents can each work in a tab of their own while you use another. Only `select_tab` and `new_tab` without `background` change the selected tab.
 
@@ -28,7 +32,7 @@ Background tabs are hidden, and Chromium stops drawing hidden pages and stalls o
 
 `read_page` marks each element it lists with a `data-tiller-ref` attribute, which pages can see. Refs are renumbered on every call.
 
-How it's wired: tab operations (`tabs.*`, including `tabs.wake` and `tabs.wait_load`, which answers once a tab's load ends or a moment passes with none starting) and skill operations (`skills.*`, in `AgentSkills.swift`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
+How it's wired: tab operations (`tabs.*`, including `tabs.wake` and `tabs.wait_load`, which answers once a tab's load ends or a moment passes with none starting) skill operations (`skills.*`, in `AgentSkills.swift`) and schedule operations (`schedules.*`, in `AgentSchedules.swift`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
 
 To try it without an agent:
 

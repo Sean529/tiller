@@ -115,7 +115,8 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     private func showDefaultNote() {
         SettingsPane.show(
             "Each run sends its prompt in a new chat in the agent panel, while this profile's Tiller is open. "
-                + "A run missed while Tiller was closed or the Mac slept happens once when it's back.",
+                + "A run missed while Tiller was closed or the Mac slept happens once when it's back. "
+                + "Agents can also create and change these when you ask them to in a chat.",
             in: note
         )
     }
@@ -545,13 +546,7 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
 
     @objc private func save(_ sender: Any?) {
         let prompt = promptView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { return showError("Write the prompt to send.") }
         if ruleKind == .every, intervalField.integerValue < 1 { return showError("Pick how often it runs.") }
-        do {
-            try rule.validate()
-        } catch {
-            return showError(error.localizedDescription)
-        }
         var name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { name = AgentConversation.title(from: prompt) }
         let tools = zip(AgentTool.allCases, toolBoxes).filter { $0.1.state == .on }.map(\.0)
@@ -561,6 +556,11 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         schedule.kind = kind
         schedule.tools = tools
         schedule.rule = rule
+        do {
+            try schedule.validate()
+        } catch {
+            return showError(error.localizedDescription)
+        }
         onDone?(schedule)
     }
 

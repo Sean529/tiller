@@ -223,6 +223,14 @@ struct ScheduledPrompt: Codable, Equatable {
         self.rule = rule
         enabled = true
     }
+
+    /// What has to hold before it is saved, from Settings or a chat.
+    func validate() throws {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ScheduleError("Write the prompt to send.")
+        }
+        try rule.validate()
+    }
 }
 
 /// The profile's scheduled prompts, in `agent-schedules.json` in its folder.
@@ -472,6 +480,180 @@ final class AgentScheduler: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         completionHandler([.banner, .list])
+    }
+}
+
+// MARK: Control socket
+
+/// list_schedules, save_schedule, delete_schedule and run_schedule from
+/// tiller_mcp. A chat can't give a schedule built-in tools it doesn't have
+/// itself, nor change the prompt, agent or tools of one that has more, and a
+/// chat a schedule started can only list them, so an unattended run can't
+/// make more runs. Requests carry the chat's id as `chat`; one without it
+/// counts as a chat with no built-in tools.
+@MainActor
+enum AgentScheduleControl {
+    private struct Caller {
+        var kind: AgentKind?
+        var tools: Set<AgentTool> = []
+        var isScheduledRun = false
+    }
+
+    private static var store: AgentScheduleStore { .shared }
+
+    static func control(_ method: String, params: [String: Any]) throws -> Any {
+        let caller = caller(params["chat"] as? String)
+        if method != "schedules.list", caller.isScheduledRun {
+            throw ControlError("A scheduled run can list schedules but not change or run them. Ask the user to do it from a chat they started, or in Settings > Scheduled.")
+        }
+        switch method {
+        case "schedules.list":
+            return ["schedules": store.schedules.map(describe)]
+        case "schedules.save":
+            return try save(params, caller: caller)
+        case "schedules.delete":
+            let schedule = try find(params)
+            store.remove([schedule.id])
+            return ["deleted": schedule.name, "id": schedule.id]
+        case "schedules.run":
+            let schedule = try find(params)
+            AgentScheduler.shared.runNow(schedule.id)
+            let after = store.schedule(schedule.id)
+            return ["ran": schedule.name, "id": schedule.id, "result": after?.lastResult?.displayText ?? "", "chat": after?.lastChat ?? ""]
+        default:
+            throw ControlError("unknown method \(method)")
+        }
+    }
+
+    private static func caller(_ chat: String?) -> Caller {
+        guard let chat, let conversation = AgentHistoryStore.shared.conversation(chat) else { return Caller() }
+        return Caller(
+            kind: conversation.kind, tools: Set(conversation.tools ?? Settings.agentTools),
+            isScheduledRun: conversation.scheduleID != nil
+        )
+    }
+
+    private static func find(_ params: [String: Any]) throws -> ScheduledPrompt {
+        guard let id = params["id"] as? String, !id.isEmpty else { throw ControlError("id is required. Get it from list_schedules.") }
+        guard let schedule = store.schedule(id) else { throw ControlError("No scheduled prompt has the id \(id). Get it from list_schedules.") }
+        return schedule
+    }
+
+    private static func save(_ params: [String: Any], caller: Caller) throws -> Any {
+        let original = (params["id"] as? String).map(\.isEmpty) == false ? try find(params) : nil
+
+        let prompt = (params["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rule = try params["rule"].map(parseRule)
+        let kind = try (params["agent"] as? String).map { name in
+            guard let kind = AgentKind(rawValue: name) else {
+                throw ControlError("agent is one of \(AgentKind.allCases.map(\.rawValue).joined(separator: ", ")).")
+            }
+            return kind
+        }
+        let tools = try (params["tools"] as? [Any]).map { list in
+            try list.map { item in
+                guard let name = item as? String, let tool = AgentTool(rawValue: name) else {
+                    throw ControlError("tools are any of read, write and shell.")
+                }
+                return tool
+            }
+        }
+
+        var schedule: ScheduledPrompt
+        if let original {
+            schedule = original
+            let changesWhatRuns = (prompt != nil && prompt != original.prompt) || (kind != nil && kind != original.kind)
+                || (tools != nil && Set(tools!) != Set(original.tools))
+            if changesWhatRuns, !Set(original.tools).isSubset(of: caller.tools) {
+                throw ControlError("“\(original.name)” can \(names(Set(original.tools).subtracting(caller.tools))), which this chat can't, so its prompt, agent and tools can only be changed in Settings > Scheduled. Its name, timing and whether it is on can still be changed here.")
+            }
+        } else {
+            guard let prompt, !prompt.isEmpty else { throw ControlError("prompt is required for a new schedule.") }
+            guard let rule else { throw ControlError("rule is required for a new schedule.") }
+            schedule = ScheduledPrompt(
+                name: AgentConversation.title(from: prompt), prompt: prompt, kind: caller.kind ?? .current, tools: [], rule: rule
+            )
+        }
+        if let tools {
+            let extra = Set(tools).subtracting(caller.tools)
+            guard extra.isEmpty else {
+                throw ControlError("This chat can't \(names(extra)), so a schedule it makes can't either. The user can turn that on in Settings > Scheduled.")
+            }
+            schedule.tools = AgentTool.allCases.filter(tools.contains)
+        }
+        if let prompt { schedule.prompt = prompt }
+        if let rule { schedule.rule = rule }
+        if let kind { schedule.kind = kind }
+        if let name = (params["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            schedule.name = name
+        }
+        if let enabled = params["enabled"] as? Bool { schedule.enabled = enabled }
+        do {
+            try schedule.validate()
+        } catch {
+            throw ControlError(error.localizedDescription)
+        }
+        store.save(schedule)
+        AgentScheduler.shared.askForNotifications()
+        var result = describe(store.schedule(schedule.id) ?? schedule)
+        result["created"] = original == nil
+        return result
+    }
+
+    /// `{"every_minutes": 30}`, `{"daily": "09:00"}`, `{"weekdays": "09:00"}`
+    /// or `{"cron": "0 9 * * 1-5"}`.
+    private static func parseRule(_ value: Any) throws -> ScheduleRule {
+        let usage = "rule is one of {\"every_minutes\": 30}, {\"daily\": \"09:00\"}, {\"weekdays\": \"09:00\"} or {\"cron\": \"0 9 * * 1-5\"}."
+        guard let object = value as? [String: Any], object.count == 1, let (key, field) = object.first else {
+            throw ControlError(usage)
+        }
+        func time(_ field: Any) throws -> (Int, Int) {
+            let parts = (field as? String)?.split(separator: ":").compactMap { Int($0) } ?? []
+            guard parts.count == 2, (0...23).contains(parts[0]), (0...59).contains(parts[1]) else {
+                throw ControlError("\(key) takes a 24-hour time, HH:MM.")
+            }
+            return (parts[0], parts[1])
+        }
+        switch key {
+        case "every_minutes":
+            guard let minutes = (field as? NSNumber)?.intValue, minutes >= 1 else { throw ControlError("every_minutes is a whole number, 1 or more.") }
+            return .every(minutes: minutes)
+        case "daily":
+            let (hour, minute) = try time(field)
+            return .daily(hour: hour, minute: minute)
+        case "weekdays":
+            let (hour, minute) = try time(field)
+            return .weekdays(hour: hour, minute: minute)
+        case "cron":
+            guard let text = field as? String else { throw ControlError(usage) }
+            return .cron(text.trimmingCharacters(in: .whitespaces))
+        default:
+            throw ControlError(usage)
+        }
+    }
+
+    private static func describe(_ schedule: ScheduledPrompt) -> [String: Any] {
+        let dates = ISO8601DateFormatter()
+        var rule: [String: Any]
+        switch schedule.rule {
+        case .every(let minutes): rule = ["every_minutes": minutes]
+        case .daily(let hour, let minute): rule = ["daily": String(format: "%02d:%02d", hour, minute)]
+        case .weekdays(let hour, let minute): rule = ["weekdays": String(format: "%02d:%02d", hour, minute)]
+        case .cron(let text): rule = ["cron": text]
+        }
+        rule["text"] = schedule.rule.displayText
+        var result: [String: Any] = [
+            "id": schedule.id, "name": schedule.name, "prompt": schedule.prompt, "agent": schedule.kind.rawValue,
+            "tools": schedule.tools.map(\.rawValue), "rule": rule, "enabled": schedule.enabled,
+        ]
+        if let next = schedule.nextRun { result["next_run"] = dates.string(from: next) }
+        if let last = schedule.lastRun { result["last_run"] = dates.string(from: last) }
+        if let outcome = schedule.lastResult { result["last_result"] = outcome.displayText }
+        return result
+    }
+
+    private static func names(_ tools: Set<AgentTool>) -> String {
+        AgentTool.allCases.filter(tools.contains).map { $0.displayName.lowercased() }.joined(separator: " or ")
     }
 }
 

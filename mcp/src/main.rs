@@ -154,6 +154,47 @@ fn tools() -> Value {
             }, "required": ["name", "content"] },
         },
         {
+            "name": "list_schedules",
+            "description": "Lists the prompts Tiller sends by itself on a schedule, each run in a new chat: id, name, prompt, agent, tools, rule, whether it is on, its next run and how its last run went.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            "name": "save_schedule",
+            "description": "Creates a scheduled prompt, or changes the one with the given id. It takes effect at once. Each run sends the prompt in a new chat, with no other context, so write it to stand on its own; it may start with /name to call a skill. On a change, fields not given stay as they are. A schedule can't have built-in tools this chat doesn't have.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "string", "description": "The schedule to change, from list_schedules. Omit to create one." },
+                "name": { "type": "string", "description": "Short name, shown in Settings, the chat and the notification." },
+                "prompt": { "type": "string", "description": "The message each run sends." },
+                "rule": {
+                    "type": "object",
+                    "description": "When it runs, in the Mac's time zone. One of: {\"every_minutes\": 30}; {\"daily\": \"09:00\"}; {\"weekdays\": \"09:00\"}; {\"cron\": \"0 9 * * 1-5\"} (minute, hour, day of month, month, day of week).",
+                    "properties": {
+                        "every_minutes": { "type": "integer", "minimum": 1 },
+                        "daily": { "type": "string", "description": "HH:MM, 24-hour." },
+                        "weekdays": { "type": "string", "description": "HH:MM, 24-hour, Monday to Friday." },
+                        "cron": { "type": "string" },
+                    },
+                },
+                "agent": { "type": "string", "enum": ["qodercli", "claude", "codex"], "description": "Which CLI runs it. Defaults to this chat's." },
+                "tools": { "type": "array", "items": { "type": "string", "enum": ["read", "write", "shell"] }, "description": "Built-in tools besides Tiller's: read files, write and edit files, run commands. At most this chat's own. Default none." },
+                "enabled": { "type": "boolean", "description": "Whether it runs. Default true for a new one." },
+            } },
+        },
+        {
+            "name": "delete_schedule",
+            "description": "Removes a scheduled prompt. Chats from its earlier runs stay in history.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "string" },
+            }, "required": ["id"] },
+        },
+        {
+            "name": "run_schedule",
+            "description": "Runs a scheduled prompt now, in a new chat, whether it is on or off, without moving its next run.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "string" },
+            }, "required": ["id"] },
+        },
+        {
             "name": "eval_js",
             "description": "Runs a JavaScript expression in the page and returns its value as JSON. Promises are awaited.",
             "inputSchema": { "type": "object", "properties": {

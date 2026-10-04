@@ -42,6 +42,16 @@ Each run starts a new chat with the prompt's agent and tools, under a note namin
 
 When the run's first turn ends, macOS shows a notification with the agent's first line, or the error; clicking it shows the chat. Tiller asks for permission to notify the first time a prompt is saved or run. A run due while the last one of the same prompt is still working is skipped, and so is one with every tab busy. The pane shows the reason until a run of that prompt ends.
 
+### Scheduling from a chat
+
+Ask the agent to do something every morning, every hour or at a later time, and it uses four of Tiller's tools: `list_schedules`, `save_schedule`, `delete_schedule` and `run_schedule`. A schedule it saves takes effect at once and shows in Settings > Scheduled, and its agent is the chat's unless it picks another. Three limits keep a page that steers the agent from setting up more than the chat could do itself:
+
+- A schedule saved from a chat can't have built-in tools the chat doesn't have, as set in the chat's wrench menu when the call is made. The user can turn on more in Settings > Scheduled.
+- A chat can't change the prompt, agent or tools of a schedule that has built-in tools the chat lacks. It can still rename it, change when it runs, turn it on or off, run it or delete it.
+- A chat a schedule started can list schedules but not save, delete or run them, so a run can't make more runs. That holds for later messages in that chat too.
+
+Tiller tells which chat a call comes from by the chat's id, which `tiller_mcp` gets in `TILLER_CHAT`. Calls without one count as a chat with no built-in tools.
+
 Prompts run only while the profile's Tiller is open. One that came due while Tiller was closed or the Mac slept runs once, a few seconds after launch or on wake, and then follows its rule again. They are kept in `agent-schedules.json` in the [profile's folder](settings-and-data.md#data-folder).
 
 ## How agents run
@@ -58,7 +68,7 @@ By default the agent gets Tiller's [browser and skill tools](tools.md) and, apar
 | Only Tiller's MCP server | `--mcp-config <file> --strict-mcp-config` | same | `mcp_servers.tiller` in `config`, with Tiller's own `CODEX_HOME` so your `config.toml` servers don't load |
 | Tiller's tools allowed without asking | `--allowed-tools mcp__tiller --permission-mode dont_ask` | `--allowedTools mcp__tiller --permission-mode dontAsk` | `default_tools_approval_mode = "approve"` on the server, `approvalPolicy: "never"` for everything else |
 
-The MCP config is written to `agent-mcp.json` in the profile's folder and points at the `tiller_mcp` inside the running app. Claude Code and Qoder CLI also get `--add-dir` with the [skill library](#tillers-skill-library). The agent runs in the empty `agent` directory in the profile's folder, or in the folder set in Settings > Agent > Working folder. A real project folder loads that project's instructions and settings too.
+The MCP config is written to `mcp.json` in the chat's folder and points at the `tiller_mcp` inside the running app, with the chat's id in `TILLER_CHAT`. Claude Code and Qoder CLI also get `--add-dir` with the [skill library](#tillers-skill-library). The agent runs in the empty `agent` directory in the profile's folder, or in the folder set in Settings > Agent > Working folder. A real project folder loads that project's instructions and settings too.
 
 ### Optional built-in tools
 

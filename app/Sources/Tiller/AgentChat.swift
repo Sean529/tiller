@@ -498,7 +498,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         if conversation.sessionID != nil, let path = conversation.directory {
             directory = URL(fileURLWithPath: path)
         }
-        let session = AgentSession(kind: conversation.kind, tools: tools, resuming: conversation.sessionID, in: directory)
+        let session = AgentSession(kind: conversation.kind, tools: tools, chat: id, resuming: conversation.sessionID, in: directory)
         session.onEvent = { [weak self] event in self?.handle(event) }
         self.session = session
         resuming = conversation.sessionID != nil

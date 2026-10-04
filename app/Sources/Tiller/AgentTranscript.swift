@@ -549,6 +549,10 @@ final class ToolRowView: NSView, TranscriptRow {
         case "list_skills": "List skills"
         case "read_skill": "Read skill"
         case "save_skill": "Save skill"
+        case "list_schedules": "List schedules"
+        case "save_schedule": "Save schedule"
+        case "delete_schedule": "Delete schedule"
+        case "run_schedule": "Run schedule"
         case "Read": "Read file"
         case "Write": "Write file"
         case "Edit", "MultiEdit": "Edit file"
@@ -598,6 +602,8 @@ final class ToolRowView: NSView, TranscriptRow {
         if let pattern = input["pattern"] { parts.append("\(pattern)") }
         if let path = input["file_path"] ?? input["path"] { parts.append("\(path)") }
         if parts.isEmpty, let tab = input["tab_id"] { parts.append("tab \(tab)") }
+        // A skill or schedule by name.
+        if parts.isEmpty, let name = input["name"] { parts.append("\(name)") }
         let string = parts.joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
         return string.count > 80 ? String(string.prefix(80)) + "…" : string
     }

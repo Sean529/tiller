@@ -139,6 +139,23 @@ impl Browser {
                 json_out(self.request("skills.read", json!({ "name": name }))?)
             }
             "save_skill" => json_out(self.request("skills.save", args.clone())?),
+            "list_schedules" | "save_schedule" | "delete_schedule" | "run_schedule" => {
+                let method = match name {
+                    "list_schedules" => "schedules.list",
+                    "save_schedule" => "schedules.save",
+                    "delete_schedule" => "schedules.delete",
+                    _ => "schedules.run",
+                };
+                // The app limits what a chat may do with schedules by the
+                // chat's own tools, so it is told which chat asks.
+                let mut params = if args.is_object() { args.clone() } else { json!({}) };
+                if let Ok(chat) = std::env::var("TILLER_CHAT")
+                    && !chat.is_empty()
+                {
+                    params["chat"] = json!(chat);
+                }
+                json_out(self.request(method, params)?)
+            }
             _ => Err(format!("unknown tool: {name}")),
         }
     }

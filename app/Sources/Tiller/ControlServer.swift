@@ -14,7 +14,8 @@ final class ControlDeferred {
 }
 
 /// Answers tiller_mcp's tab requests (list, open, select, navigate, close) and
-/// skill requests (list, read, save) that arrive on the control socket. DevTools calls on the same socket never reach
+/// skill requests (list, read, save) and schedule requests (list, save,
+/// delete, run) that arrive on the control socket. DevTools calls on the same socket never reach
 /// Swift; the core sends them to the tab directly.
 @MainActor
 final class ControlServer {
@@ -49,6 +50,8 @@ final class ControlServer {
                 let params = request["params"] as? [String: Any] ?? [:]
                 if method.hasPrefix("skills.") {
                     result = try AgentSkillCatalog.control(method, params: params)
+                } else if method.hasPrefix("schedules.") {
+                    result = try AgentScheduleControl.control(method, params: params)
                 } else {
                     guard let browser else { throw ControlError("no browser window is open") }
                     result = try browser.control(method, params: params)
