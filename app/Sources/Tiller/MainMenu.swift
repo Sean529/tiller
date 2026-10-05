@@ -78,6 +78,8 @@ enum MainMenu {
         agentItem = view.addItem(withTitle: "Show Agent", action: #selector(BrowserWindowController.toggleAgentPanel(_:)), keyEquivalent: "")
         applyAgentShortcut()
         view.addItem(withTitle: "Show Tab Sidebar", action: #selector(BrowserWindowController.toggleTabSidebar(_:)), keyEquivalent: "L")
+        let collapse = view.addItem(withTitle: "Collapse Tab Sidebar", action: #selector(BrowserWindowController.toggleSidebarCollapsed(_:)), keyEquivalent: "s")
+        collapse.keyEquivalentModifierMask = [.command, .control]
         view.addItem(.separator())
         let source = view.addItem(withTitle: "View Page Source", action: #selector(BrowserWindowController.viewPageSource(_:)), keyEquivalent: "u")
         source.keyEquivalentModifierMask = [.command, .option]
@@ -199,6 +201,9 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
     /// opens with these rather than waiting on the database, which an
     /// import or a search may be holding, and asks for fresh ones.
     private var pages: [HistoryPage] = []
+    /// The pages' favicons by URL, decoded once when fresh pages arrive
+    /// rather than each time the menu opens.
+    private var icons: [String: NSImage] = [:]
     private var pagesVersion = -1
     /// The menu, for filling once fresh pages arrive.
     private weak var menu: NSMenu?
@@ -215,11 +220,17 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
         let store = HistoryStore.shared
         if store.version != pagesVersion {
             let version = store.version
-            store.recent(limit: Self.limit) { pages in
+            store.recentWithIcons(limit: Self.limit) { pages in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         guard let self = MainMenu.historyDelegate else { return }
                         self.pages = pages
+                        self.icons = [:]
+                        for page in pages {
+                            guard let data = page.icon, let image = NSImage(data: data) else { continue }
+                            image.size = NSSize(width: 16, height: 16)
+                            self.icons[page.url] = image
+                        }
                         self.pagesVersion = version
                         // Usually back before the menu has drawn; else the
                         // items change under the mouse, which is fine.
@@ -243,6 +254,8 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
             let item = NSMenuItem(title: title, action: #selector(BrowserWindowController.openHistoryItem(_:)), keyEquivalent: "")
             item.representedObject = page.url
             item.toolTip = page.url
+            // A globe for a site with no saved favicon, so the titles line up.
+            item.image = icons[page.url] ?? Theme.symbol("globe", size: Theme.Symbol.row, weight: .regular)
             item.tag = Self.recentTag
             menu.insertItem(item, at: index)
             index += 1

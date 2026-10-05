@@ -1,4 +1,5 @@
 import AppKit
+import os
 
 /// Where address bar searches go.
 enum SearchEngine: String, CaseIterable {
@@ -175,9 +176,21 @@ enum Settings {
         }
     }
 
+    /// The accent last read or set. Every tinted color resolves it each time
+    /// it is drawn, from any thread, so it skips the defaults lookup.
+    private static let cachedAccentTheme = OSAllocatedUnfairLock<AccentTheme?>(initialState: nil)
+
     static var accentTheme: AccentTheme {
-        get { defaults.string(forKey: "accentTheme").flatMap(AccentTheme.init) ?? .system }
+        get {
+            cachedAccentTheme.withLock { cached in
+                if let cached { return cached }
+                let theme = defaults.string(forKey: "accentTheme").flatMap(AccentTheme.init) ?? .system
+                cached = theme
+                return theme
+            }
+        }
         set {
+            cachedAccentTheme.withLock { $0 = newValue }
             defaults.set(newValue.rawValue, forKey: "accentTheme")
             NotificationCenter.default.post(name: .themeDidChange, object: nil)
         }

@@ -140,6 +140,22 @@ final class HistoryStore: @unchecked Sendable {
         }
     }
 
+    /// Like `recent`, with each page's site favicon filled in, for the
+    /// History menu. `completion` runs on the store's queue.
+    func recentWithIcons(limit: Int, completion: @escaping @Sendable ([HistoryPage]) -> Void) {
+        queue.async { [db] in
+            var pages = (try? db?.query(
+                "SELECT url, title, visit_count, last_visit FROM pages ORDER BY last_visit DESC LIMIT ?",
+                [limit], row: Self.page
+            )) ?? []
+            let icons = Self.icons(for: Array(Set(pages.compactMap { Self.host(of: $0.url) })), in: db)
+            for index in pages.indices {
+                pages[index].icon = Self.host(of: pages[index].url).flatMap { icons[$0] }
+            }
+            completion(pages)
+        }
+    }
+
     /// Pages whose URL or title contains `text`, best first: URLs that start
     /// with it, then titles with a word that starts with it, then the rest,
     /// each by visit count, with their sites' favicons. `completion` runs on the store's queue. A search
@@ -168,11 +184,11 @@ final class HistoryStore: @unchecked Sendable {
             }
             // A stable sort keeps the query's visit-count order within each rank.
             let best = ranked.enumerated().sorted { ($0.element.1, -$0.offset) > ($1.element.1, -$1.offset) }
-            completion(best.prefix(limit).map { ranked in
-                var page = ranked.element.0
-                if let host = Self.host(of: page.url) {
-                    page.icon = (try? db?.query("SELECT png FROM icons WHERE host = ?", [host]) { $0.data(0) })?.first
-                }
+            let top = best.prefix(limit).map(\.element.0)
+            let icons = Self.icons(for: Array(Set(top.compactMap { Self.host(of: $0.url) })), in: db)
+            completion(top.map { page in
+                var page = page
+                page.icon = Self.host(of: page.url).flatMap { icons[$0] }
                 return page
             })
         }

@@ -232,9 +232,7 @@ final class AgentPanelView: NSView {
         let chat = active
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let header = NSMenuItem(title: "Also allow in this chat", action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
+        menu.addItem(.sectionHeader(title: "Also allow in this chat"))
         for tool in AgentTool.allCases {
             let item = NSMenuItem(title: tool.displayName, action: #selector(toggleTool(_:)), keyEquivalent: "")
             item.target = self
@@ -480,7 +478,7 @@ private final class StatusPill: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        dot.layer?.backgroundColor = (busy ? Theme.accentColor : NSColor.systemGreen).cgColor
+        dot.layer?.backgroundColor = (busy ? Theme.accentColor : NSColor.systemGreen).layerColor
     }
 }
 
@@ -499,6 +497,8 @@ final class AgentEmptyState: NSView {
 
     private let badge = SymbolBadge(symbol: "sparkles")
     private let title = NSTextField(labelWithString: "")
+    private let subtitle = NSTextField(wrappingLabelWithString: "It can read the page, click, type and open tabs for you. Type / for skills.")
+    private static let subtitleWidth: CGFloat = 240
 
     private static let suggestions: [(symbol: String, text: String)] = [
         ("text.alignleft", "Summarize this page"),
@@ -511,11 +511,10 @@ final class AgentEmptyState: NSView {
         title.font = .systemFont(ofSize: Theme.FontSize.title, weight: .semibold)
         title.alignment = .center
 
-        let subtitle = NSTextField(wrappingLabelWithString: "It can read the page, click, type and open tabs for you. Type / for skills.")
         subtitle.font = .systemFont(ofSize: Theme.FontSize.secondary)
         subtitle.textColor = .secondaryLabelColor
         subtitle.alignment = .center
-        subtitle.preferredMaxLayoutWidth = 240
+        subtitle.preferredMaxLayoutWidth = Self.subtitleWidth
 
         let buttons = NSStackView()
         buttons.orientation = .vertical
@@ -545,6 +544,14 @@ final class AgentEmptyState: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The subtitle wraps to the space there is, when the panel is narrower
+    /// than its usual width. Set before the stack lays out, so it lays out once.
+    override func layout() {
+        let width = min(Self.subtitleWidth, bounds.width)
+        if width > 0, subtitle.preferredMaxLayoutWidth != width { subtitle.preferredMaxLayoutWidth = width }
+        super.layout()
+    }
 }
 
 /// An SF Symbol on a soft accent-colored circle, or a logo on a plain one.
@@ -585,7 +592,7 @@ private final class SymbolBadge: NSView {
     override func updateLayer() {
         layer?.cornerRadius = 24
         let color = logo == nil ? Theme.accent(Theme.Accent.soft) : Theme.fill(0.06)
-        layer?.backgroundColor = color.cgColor
+        layer?.backgroundColor = color.layerColor
     }
 }
 
@@ -627,9 +634,9 @@ private final class SuggestionButton: NSView {
         layer?.cornerRadius = Theme.Radius.plate
         layer?.cornerCurve = .continuous
         let alpha = isPressed ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : Theme.Fill.rest
-        withEasing(Theme.Duration.quick) { layer?.backgroundColor = Theme.fill(alpha).cgColor }
+        withEasing(Theme.Duration.quick) { layer?.backgroundColor = Theme.fill(alpha).layerColor }
         layer?.borderWidth = Theme.hairlineWidth
-        layer?.borderColor = Theme.hairline.cgColor
+        layer?.borderColor = Theme.hairline.layerColor
     }
 
     override func updateTrackingAreas() {
@@ -793,9 +800,7 @@ final class Composer: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private static var lineHeight: CGFloat {
-        NSLayoutManager().defaultLineHeight(for: font)
-    }
+    private static let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
 
     func textChanged() {
         guard let layoutManager = textView.layoutManager, let container = textView.textContainer else { return }
@@ -811,7 +816,9 @@ final class Composer: NSView {
         let empty = textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty
         sendButton.image = isBusy ? Self.stopImage : Self.sendImage
         sendButton.toolTip = isBusy ? "Stop (⎋)" : "Send (↩)"
-        sendButton.contentTintColor = isBusy ? .labelColor : empty ? .tertiaryLabelColor : Theme.accentColor
+        // A disabled button fades its image itself, so an empty field's
+        // arrow starts from secondary rather than fading twice.
+        sendButton.contentTintColor = isBusy ? .labelColor : empty ? .secondaryLabelColor : Theme.accentColor
         sendButton.isEnabled = isBusy || !empty
     }
 
@@ -819,14 +826,18 @@ final class Composer: NSView {
 
     override func updateLayer() {
         let focused = window?.firstResponder === textView
-        layer?.cornerRadius = 16
+        // The same corners as the skill picker that opens above it.
+        layer?.cornerRadius = Theme.Radius.plate
         layer?.cornerCurve = .continuous
         // See-through over the panel's material, unless Reduce Transparency is on.
         let background: CGFloat = Theme.reduceTransparency ? 1 : 0.7
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(background).cgColor
-        layer?.borderWidth = isDropTarget ? 2 : Theme.hairlineWidth
-        layer?.borderColor = (isDropTarget ? Theme.accentColor
-            : focused ? Theme.accent(0.6) : Theme.hairline).cgColor
+        layer?.backgroundColor = NSColor.controlBackgroundColor.dynamic(alpha: background).layerColor
+        let border: NSColor = isDropTarget ? Theme.accentColor
+            : focused ? Theme.accent(Theme.Accent.outline) : Theme.hairline
+        withEasing(Theme.Duration.quick) {
+            layer?.borderWidth = isDropTarget ? 2 : Theme.hairlineWidth
+            layer?.borderColor = border.layerColor
+        }
     }
 
     /// Clicks anywhere in the box go to the text.

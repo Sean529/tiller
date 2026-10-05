@@ -124,6 +124,10 @@ final class AgentSession {
     private let chat: String
     private var process: Process?
     private var stdin: FileHandle?
+    /// Writes to stdin happen here, one at a time and in the order they were
+    /// sent, so a message with screenshots that the CLI is slow to read
+    /// doesn't hold the main thread, and an interrupt never overtakes it.
+    private let writer = DispatchQueue(label: "tiller.agent.stdin", qos: .userInitiated)
     private var stderrTail = ""
     /// Bumped for every process, so output and exit events from a stopped one are ignored.
     private var generation = 0
@@ -234,10 +238,16 @@ final class AgentSession {
             try startCodexTurn(input + [["type": "text", "text": prompt]])
         } else {
             if text.hasPrefix("/") { prompt = text + "\n\n" + context }
-            let content: Any = images.isEmpty ? prompt : images.map { image in
-                ["type": "image", "source": ["type": "base64", "media_type": image.mediaType, "data": image.data.base64EncodedString()]]
-            } + [["type": "text", "text": prompt]]
-            try write(["type": "user", "message": ["role": "user", "content": content]])
+            // The images run to megabytes, so they are encoded on the
+            // writer's queue along with the write.
+            let images = images.map { (mediaType: $0.mediaType, data: $0.data) }
+            let prompt = prompt
+            try enqueue {
+                let content: Any = images.isEmpty ? prompt : images.map { image in
+                    ["type": "image", "source": ["type": "base64", "media_type": image.mediaType, "data": image.data.base64EncodedString()]]
+                } + [["type": "text", "text": prompt]]
+                return try JSONSerialization.data(withJSONObject: ["type": "user", "message": ["role": "user", "content": content]])
+            }
         }
         isBusy = true
     }
@@ -271,9 +281,10 @@ final class AgentSession {
     func stop() {
         guard let process else { return }
         generation += 1
-        // stream-json input ends the agent when stdin closes. Terminate in
-        // case it is in the middle of a request.
-        try? stdin?.close()
+        // stream-json input ends the agent when stdin closes. Closed after
+        // any writes still queued, which fail once the process ends.
+        // Terminate in case it is in the middle of a request.
+        if let stdin { writer.async { try? stdin.close() } }
         if process.isRunning { process.terminate() }
         reset()
     }
@@ -295,10 +306,32 @@ final class AgentSession {
     }
 
     private func write(_ object: [String: Any]) throws {
+        let data = try JSONSerialization.data(withJSONObject: object)
+        try enqueue { data }
+    }
+
+    /// Queues a line for stdin. `line` makes its bytes on the writer's
+    /// queue. A write that fails while the process still runs ends it; one
+    /// that fails because it exited is left to the exit's own report.
+    private func enqueue(_ line: @escaping @Sendable () throws -> Data) throws {
         guard let stdin else { throw ControlError("the agent is not running") }
-        var data = try JSONSerialization.data(withJSONObject: object)
-        data.append(0x0A)
-        try stdin.write(contentsOf: data)
+        let generation = generation
+        writer.async { [weak self] in
+            do {
+                var data = try line()
+                data.append(0x0A)
+                try stdin.write(contentsOf: data)
+            } catch {
+                let message = error.localizedDescription
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.writeFailed(message, generation: generation) } }
+            }
+        }
+    }
+
+    private func writeFailed(_ message: String, generation: Int) {
+        guard generation == self.generation, process?.isRunning == true else { return }
+        stop()
+        onEvent?(.exited(message: "Tiller couldn't send to \(kind.displayName): \(message)"))
     }
 
     // MARK: Output

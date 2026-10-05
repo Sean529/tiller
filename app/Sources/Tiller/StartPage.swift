@@ -29,6 +29,13 @@ final class StartPageView: NSView {
     private static let closedLimit = 5
     /// The tiles' width, which the list under them matches.
     private static let width = CGFloat(columns) * SiteTile.width + CGFloat(columns - 1) * 4
+    /// A little above center reads as centered.
+    private static let lift: CGFloat = 40
+    /// Centers the content, lifted by up to `lift` while there is room.
+    private lazy var contentCenter = content.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -Self.lift)
+    /// Whether the closed tabs fit under the tiles. A short window leaves
+    /// them out rather than cutting the page off at top and bottom.
+    private var closedFits = true
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -48,6 +55,10 @@ final class StartPageView: NSView {
         closedList.orientation = .vertical
         closedList.alignment = .width
         closedList.spacing = 2
+        // Rows start a little left of the tiles' squares, so their icons
+        // line up under the heading and the squares' edge.
+        let rowInset = SiteTile.wellInset - Theme.Padding.panel
+        closedList.edgeInsets = NSEdgeInsets(top: 0, left: rowInset, bottom: 0, right: rowInset)
 
         let icon = NSImageView(image: NSApp.applicationIconImage ?? NSImage())
         icon.imageScaling = .scaleProportionallyUpOrDown
@@ -74,13 +85,14 @@ final class StartPageView: NSView {
         for view in [content, emptyHint] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
-            NSLayoutConstraint.activate([
-                view.centerXAnchor.constraint(equalTo: centerXAnchor),
-                // A little above center reads as centered.
-                view.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -40),
-            ])
+            view.centerXAnchor.constraint(equalTo: centerXAnchor).isActive = true
         }
-        show([], closed: [])
+        contentCenter.isActive = true
+        emptyHint.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -Self.lift).isActive = true
+        // Nothing shows until the first query says whether there is history,
+        // so a page with tiles to come doesn't flash the empty hint first.
+        content.isHidden = true
+        emptyHint.isHidden = true
         NotificationCenter.default.addObserver(
             self, selector: #selector(closedTabsChanged(_:)), name: .closedTabsDidChange, object: nil
         )
@@ -117,10 +129,10 @@ final class StartPageView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.backgroundColor = NSColor.windowBackgroundColor.layerColor
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let tint = Theme.accent(dark ? 0.09 : 0.05)
-        glow.colors = [tint.cgColor, NSColor.clear.cgColor]
+        glow.colors = [tint.layerColor, NSColor.clear.layerColor]
     }
 
     override func layout() {
@@ -129,6 +141,37 @@ final class StartPageView: NSView {
         CATransaction.setDisableActions(true)
         glow.frame = bounds
         CATransaction.commit()
+        fitContent()
+    }
+
+    /// The heights of the tiles' and the closed tabs' sections, headings
+    /// included, measured when they change, for `fitContent`.
+    private var tilesHeight: CGFloat = 0
+    private var closedHeight: CGFloat = 0
+
+    /// Leaves the closed tabs out when the page is too short for them under
+    /// the tiles, and lifts the content only as far as the room above it allows.
+    private func fitContent() {
+        let gap = tilesHeight > 0 && closedHeight > 0 ? content.customSpacing(after: grid) : 0
+        let fits = tilesHeight == 0 || tilesHeight + gap + closedHeight <= bounds.height - 2 * Theme.Padding.sheet
+        if fits != closedFits {
+            closedFits = fits
+            updateClosedVisibility()
+        }
+        let height = tilesHeight + (fits ? gap + closedHeight : 0)
+        let lift = min(Self.lift, max(0, (bounds.height - height) / 2 - Theme.Padding.sheet))
+        if contentCenter.constant != -lift { contentCenter.constant = -lift }
+    }
+
+    private func updateClosedVisibility() {
+        let hidden = shownClosed.isEmpty || !closedFits
+        closedHeading.superview?.isHidden = hidden
+        closedList.isHidden = hidden
+    }
+
+    /// A section's height: its heading, the space under it, and `body`.
+    private func sectionHeight(_ heading: NSTextField, _ body: NSView) -> CGFloat {
+        (heading.superview?.fittingSize.height ?? 0) + content.spacing + body.fittingSize.height
     }
 
     // Clicks on the background don't reach the page underneath.
@@ -164,8 +207,6 @@ final class StartPageView: NSView {
         emptyHint.isHidden = !content.isHidden
         heading.superview?.isHidden = sites.isEmpty
         grid.isHidden = sites.isEmpty
-        closedHeading.superview?.isHidden = closed.isEmpty
-        closedList.isHidden = closed.isEmpty
         if closed != shownClosed {
             shownClosed = closed
             closedList.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -173,10 +214,17 @@ final class StartPageView: NSView {
                 let row = ClosedTabRow(tab: tab) { [weak self] disposition in self?.onOpen?(tab.url, disposition) }
                 closedList.addArrangedSubview(row)
             }
+            closedHeight = closed.isEmpty ? 0 : sectionHeight(closedHeading, closedList)
+            needsLayout = true
         }
+        updateClosedVisibility()
         guard sites != shownSites else { return }
         shownSites = sites
+        // Removing a row leaves its views in the grid, where the old tiles
+        // would show through the new ones, so they are taken out too.
+        let old = grid.subviews
         while grid.numberOfRows > 0 { grid.removeRow(at: 0) }
+        old.forEach { $0.removeFromSuperview() }
         let tiles = sites.map { site in
             SiteTile(site: site) { [weak self] disposition in self?.onOpen?(site.url, disposition) }
         }
@@ -184,6 +232,8 @@ final class StartPageView: NSView {
             let row = Array(tiles[start..<min(start + Self.columns, tiles.count)])
             grid.addRow(with: row + Array(repeating: NSGridCell.emptyContentView, count: Self.columns - row.count))
         }
+        tilesHeight = sites.isEmpty ? 0 : sectionHeight(heading, grid)
+        needsLayout = true
         // Tiles arrive a moment after the page, so they fade in rather than pop.
         guard window != nil, !Theme.reduceMotion else { return }
         grid.alphaValue = 0
@@ -220,8 +270,19 @@ private class ClickableView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
     override func mouseDown(with event: NSEvent) { isPressed = true }
+
+    /// Dragged off, the press lets go, as a button's does; dragged back, it holds again.
+    override func mouseDragged(with event: NSEvent) {
+        let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        if isPressed != inside { isPressed = inside }
+    }
 
     override func mouseUp(with event: NSEvent) {
         isPressed = false
@@ -239,6 +300,27 @@ private class ClickableView: NSView {
         return true
     }
 
+    // With Full Keyboard Access on, Tab reaches each tile and row, and
+    // Return or Space opens it. Off, a click leaves the focus where it was.
+    override var acceptsFirstResponder: Bool { NSApp.isFullKeyboardAccessEnabled }
+    override var canBecomeKeyView: Bool { NSApp.isFullKeyboardAccessEnabled }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.charactersIgnoringModifiers {
+        case "\r", " ", "\u{3}": action(.currentTab)
+        default: super.keyDown(with: event)
+        }
+    }
+
+    /// The rounded shape the focus ring follows.
+    var focusShape: (rect: NSRect, radius: CGFloat) { (bounds, Theme.Radius.row) }
+
+    override var focusRingMaskBounds: NSRect { focusShape.rect }
+
+    override func drawFocusRingMask() {
+        let shape = focusShape
+        NSBezierPath(roundedRect: shape.rect, xRadius: shape.radius, yRadius: shape.radius).fill()
+    }
 }
 
 /// One site: its favicon, or its first letter, on a rounded square that
@@ -276,6 +358,8 @@ private final class SiteTile: ClickableView {
         name.textColor = .secondaryLabelColor
         name.alignment = .center
         name.lineBreakMode = .byTruncatingTail
+        // A host a little too long for the tile draws tighter before it is cut.
+        name.allowsDefaultTighteningForTruncation = true
 
         for view in [well, glyph, name] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -319,16 +403,18 @@ private final class SiteTile: ClickableView {
         layer.cornerRadius = Theme.Radius.tile
         layer.cornerCurve = .continuous
         layer.borderWidth = Theme.hairlineWidth
-        layer.borderColor = Theme.hairline.cgColor
+        layer.borderColor = Theme.hairline.layerColor
         let alpha = isPressed ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : Theme.Fill.rest
         // The square lifts under the mouse and settles under a press, except
         // under Reduce Motion, where the fill alone shows it.
         let scale: CGFloat = Theme.reduceMotion ? 1 : isPressed ? 0.97 : isHovered ? 1.04 : 1
         withEasing {
-            layer.backgroundColor = Theme.fill(alpha).cgColor
+            layer.backgroundColor = Theme.fill(alpha).layerColor
             layer.transform = CATransform3DMakeScale(scale, scale, 1)
         }
     }
+
+    override var focusShape: (rect: NSRect, radius: CGFloat) { (well.frame, Theme.Radius.tile) }
 
     override func layout() {
         super.layout()
@@ -358,7 +444,7 @@ private final class ClosedTabRow: ClickableView {
         title.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
         let address = NSTextField(labelWithString: HistoryStore.bare(tab.url))
         address.font = .systemFont(ofSize: Theme.FontSize.secondary)
-        address.textColor = .tertiaryLabelColor
+        address.textColor = .secondaryLabelColor
         address.lineBreakMode = .byTruncatingTail
         address.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let stack = NSStackView(views: [icon, title, address])
@@ -369,9 +455,9 @@ private final class ClosedTabRow: ClickableView {
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 16),
             icon.heightAnchor.constraint(equalToConstant: 16),
-            heightAnchor.constraint(equalToConstant: 32),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+            heightAnchor.constraint(equalToConstant: Theme.RowHeight.standard),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Padding.panel),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Theme.Padding.panel),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         toolTip = tab.url
@@ -384,20 +470,31 @@ private final class ClosedTabRow: ClickableView {
         layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
         let fill = Theme.fill(hovered: isHovered, pressed: isPressed)
-        withEasing { layer?.backgroundColor = fill.cgColor }
+        withEasing { layer?.backgroundColor = fill.layerColor }
     }
 }
 
 /// Noise over the wash: a tile of pixels at random, very low alphas,
 /// repeated. White in dark mode and black in light mode, where white would
-/// not show. Lets the mouse through to what is under it.
+/// not show. Lets the mouse through to what is under it. The tile is the
+/// layer's pattern background, which Core Animation repeats itself, so there
+/// is no page-sized bitmap to paint, nor to repaint on resize.
 private final class GrainView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    override func draw(_ dirtyRect: NSRect) {
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        NSColor(patternImage: dark ? Self.whiteTile : Self.blackTile).setFill()
-        dirtyRect.fill()
+        layer?.backgroundColor = NSColor(patternImage: dark ? Self.whiteTile : Self.blackTile).layerColor
     }
 
     private static let whiteTile = tile(white: true)

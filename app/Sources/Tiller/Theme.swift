@@ -31,8 +31,8 @@ enum Theme {
         static let outline: CGFloat = 0.45
     }
 
-    /// `labelColor` at `alpha`.
-    static func fill(_ alpha: CGFloat) -> NSColor { .labelColor.withAlphaComponent(alpha) }
+    /// `labelColor` at `alpha`, resolved whenever it is drawn.
+    static func fill(_ alpha: CGFloat) -> NSColor { NSColor.labelColor.dynamic(alpha: alpha) }
 
     /// The fill for a row or tile in the given state, or clear at rest.
     static func fill(hovered: Bool, pressed: Bool = false, selected: Bool = false) -> NSColor {
@@ -137,8 +137,9 @@ enum Theme {
 
     /// An icon-only button with no bezel, as in bars and rows. `label` is
     /// both the tooltip and what VoiceOver reads.
+    @MainActor
     static func iconButton(_ name: String, label: String, size: CGFloat = Symbol.bar, frame: CGFloat = ButtonSize.bar) -> NSButton {
-        let button = NSButton()
+        let button = HoverButton()
         button.image = symbol(name, size: size, label: label)
         button.imagePosition = .imageOnly
         button.isBordered = false
@@ -230,7 +231,7 @@ enum Theme {
     /// The outline a filled selection gets under Increase Contrast, where a
     /// faint fill alone would not show.
     static func selectionOutline(selected: Bool) -> NSColor {
-        increaseContrast && selected ? .labelColor.withAlphaComponent(Accent.outline) : .clear
+        increaseContrast && selected ? fill(Accent.outline) : .clear
     }
 }
 
@@ -244,6 +245,123 @@ func withEasing(_ duration: TimeInterval = Theme.Duration.standard, _ changes: (
         context.allowsImplicitAnimation = true
         context.timingFunction = CAMediaTimingFunction(name: .easeOut)
         changes()
+    }
+}
+
+/// A borderless button that shows a faint plate under the mouse and a darker
+/// one while pressed, as rows and tabs do, so a small icon target still
+/// answers the pointer. The button's cell draws over the plate as usual.
+final class HoverButton: NSButton {
+    /// The plate's corner radius; half the side makes it round.
+    var plateRadius = Theme.Radius.small {
+        didSet { layer?.cornerRadius = plateRadius }
+    }
+
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { updatePlate() } }
+    }
+    private var isPressed = false {
+        didSet { if isPressed != oldValue { updatePlate() } }
+    }
+
+    override var isEnabled: Bool {
+        didSet { updatePlate() }
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = plateRadius
+        layer?.cornerCurve = .continuous
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func updatePlate() {
+        let fill = isEnabled ? Theme.fill(hovered: isHovered, pressed: isPressed) : .clear
+        withEasing(Theme.Duration.quick) { layer?.backgroundColor = fill.layerColor }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updatePlate()
+    }
+
+    private var hoverArea: NSTrackingArea?
+
+    // Only its own area is replaced: the others are AppKit's, such as the
+    // tooltip's.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(
+            rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    // Its own area's events stop here. Passed on, they would reach the row
+    // or tab the button sits in, which would take the exit for its own and
+    // drop its hover with the mouse still inside it.
+    override func mouseEntered(with event: NSEvent) {
+        guard event.trackingArea === hoverArea else { return super.mouseEntered(with: event) }
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard event.trackingArea === hoverArea else { return super.mouseExited(with: event) }
+        isHovered = false
+    }
+
+    // `super.mouseDown` tracks the click until the mouse goes up.
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return super.mouseDown(with: event) }
+        isPressed = true
+        super.mouseDown(with: event)
+        isPressed = false
+        isHovered = isMouseInside
+    }
+
+    // A hidden view gets no exit event, so the plate is dropped on hiding and
+    // put back on showing only if the mouse is still there.
+    override func viewDidHide() {
+        super.viewDidHide()
+        isHovered = false
+        isPressed = false
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        isHovered = isMouseInside
+    }
+
+    private var isMouseInside: Bool {
+        guard let window else { return false }
+        return bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+    }
+}
+
+extension NSColor {
+    /// This color at `alpha`, still following light and dark.
+    /// `withAlphaComponent` fixes a system color to whichever appearance is
+    /// current when it is called, which a forced light or dark then misses.
+    func dynamic(alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            var color = self
+            appearance.performAsCurrentDrawingAppearance { color = self.withAlphaComponent(alpha) }
+            return color
+        }
+    }
+
+    /// The color for a layer, resolved for the app's appearance. A plain
+    /// `cgColor` resolves for whichever appearance is current, and outside
+    /// `updateLayer` and `draw` that is the system's, which differs from the
+    /// windows' while Settings forces light or dark: a hover or selection
+    /// fill set from a mouse event would come out in the wrong shade.
+    @MainActor var layerColor: CGColor {
+        var color = cgColor
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance { color = self.cgColor }
+        return color
     }
 }
 

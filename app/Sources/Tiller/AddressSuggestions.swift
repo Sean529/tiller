@@ -12,6 +12,9 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
     private let addressBar: AddressBarView
     private let panel = SuggestionsPanel()
     private let list = NSStackView()
+    /// One row per place in the list, built once and filled in again on each
+    /// keystroke; the ones not needed are hidden.
+    private var pool: [SuggestionRow] = []
     /// What the rows open: a search for the text, then the history pages.
     private var rows: [Suggestion] = []
     private var highlighted: Int?
@@ -41,6 +44,17 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         list.orientation = .vertical
         list.spacing = 0
         list.alignment = .width
+        list.setAccessibilityRole(.list)
+        list.setAccessibilityLabel("Suggestions")
+        pool = (0...Self.limit).map { index in
+            let row = SuggestionRow()
+            row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
+            row.onHover = { [weak self] in self?.highlight(index) }
+            row.onClick = { [weak self] disposition in self?.open(index, disposition) }
+            row.isHidden = true
+            list.addArrangedSubview(row)
+            return row
+        }
         let background = SuggestionsBackground()
         background.material = .popover
         // Blurs what is behind the panel, the page and the toolbar, and stays
@@ -106,9 +120,9 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         }
         switch selector {
         case #selector(NSResponder.moveDown(_:)):
-            highlight(min(rows.count - 1, (highlighted ?? 0) + 1))
+            highlight(min(rows.count - 1, (highlighted ?? 0) + 1), announce: true)
         case #selector(NSResponder.moveUp(_:)):
-            highlight(max(0, (highlighted ?? 0) - 1))
+            highlight(max(0, (highlighted ?? 0) - 1), announce: true)
         case #selector(NSResponder.cancelOperation(_:)):
             hide()
         case #selector(NSResponder.insertNewline(_:)):
@@ -136,13 +150,13 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         shownPages = pages
         rows = [.input(text)] + pages.map(Suggestion.page)
         guard let window = addressBar.window else { return hide() }
-        list.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for (index, suggestion) in rows.enumerated() {
-            let row = SuggestionRow(suggestion, typed: text)
-            row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
-            row.onHover = { [weak self] in self?.highlight(index) }
-            row.onClick = { [weak self] disposition in self?.open(index, disposition) }
-            list.addArrangedSubview(row)
+        for (index, row) in pool.enumerated() {
+            if rows.indices.contains(index) {
+                row.configure(rows[index], typed: text)
+                row.isHidden = false
+            } else {
+                row.isHidden = true
+            }
         }
         let host = pages.first.map { HistoryStore.bare($0.url).lowercased() } ?? ""
         highlight(!host.isEmpty && host.hasPrefix(text.lowercased()) ? 1 : 0)
@@ -155,11 +169,20 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         panel.orderFront(nil)
     }
 
-    private func highlight(_ index: Int?) {
+    /// With `announce`, as when Up or Down moves the highlight, VoiceOver
+    /// reads the new row, since focus stays in the address field.
+    private func highlight(_ index: Int?, announce: Bool = false) {
+        let changed = index != highlighted
         highlighted = index
-        for (offset, row) in list.arrangedSubviews.enumerated() {
-            (row as? SuggestionRow)?.isHighlighted = offset == index
+        for (offset, row) in pool.enumerated() {
+            row.isHighlighted = offset == index
         }
+        guard announce, changed, NSWorkspace.shared.isVoiceOverEnabled,
+              let index, pool.indices.contains(index) else { return }
+        NSAccessibility.post(element: addressBar.field, notification: .announcementRequested, userInfo: [
+            .announcement: pool[index].accessibilityLabel() ?? "",
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
     }
 
     private func open(_ index: Int, _ disposition: OpenDisposition) {
@@ -189,7 +212,7 @@ private final class SuggestionsBackground: NSVisualEffectView {
         guard let layer else { return }
         layer.borderWidth = Theme.hairlineWidth
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer.borderColor = Theme.hairline.cgColor
+            layer.borderColor = Theme.hairline.layerColor
         }
     }
 }
@@ -222,9 +245,8 @@ private final class SuggestionRow: NSView {
         didSet {
             guard isHighlighted != oldValue else { return }
             needsDisplay = true
-            title.attributedStringValue = Self.highlighting(titleText, typed, color: isHighlighted ? .alternateSelectedControlTextColor : .labelColor)
-            url.textColor = isHighlighted ? .alternateSelectedControlTextColor.withAlphaComponent(0.75) : .secondaryLabelColor
-            if !showsFavicon { icon.contentTintColor = isHighlighted ? .alternateSelectedControlTextColor : .secondaryLabelColor }
+            setAccessibilitySelected(isHighlighted)
+            updateColors()
         }
     }
 
@@ -233,60 +255,32 @@ private final class SuggestionRow: NSView {
     }
 
     private let icon = FaviconView()
-    private let showsFavicon: Bool
+    private var showsFavicon = false
     private let title = NSTextField(labelWithString: "")
     private let url = NSTextField(labelWithString: "")
-    private let titleText: String
-    private let typed: String
+    private var titleText = ""
+    private var typed = ""
+    /// What the icon shows, so it is only made again when that changes.
+    private var iconKey = ""
+
+    /// Decoded favicons by site, so typing doesn't decode the same icon
+    /// again on every keystroke.
+    private static let favicons = NSCache<NSString, NSImage>()
 
     private static func symbol(_ name: String, _ description: String) -> NSImage? {
         Theme.symbol(name, size: Theme.Symbol.row, weight: .regular, label: description)
     }
 
-    init(_ suggestion: AddressSuggestions.Suggestion, typed: String) {
-        self.typed = typed
-        var favicon: NSImage?
-        var symbol: NSImage?
-        var address = ""
-        var tip = ""
-        switch suggestion {
-        case .page(let page):
-            titleText = page.displayTitle
-            address = HistoryStore.bare(page.url)
-            favicon = page.icon.flatMap(NSImage.init(data:))
-            symbol = Self.symbol("clock", "History")
-            tip = page.url
-        case .input(let text):
-            let url = AddressInput.url(for: text)
-            let isSearch = url == Settings.searchURL(for: text)
-            titleText = text
-            let engine = Settings.searchEngine
-            address = isSearch ? (engine == .custom ? "Search" : "Search \(engine.displayName)") : HistoryStore.bare(url)
-            symbol = Self.symbol(isSearch ? "magnifyingglass" : "globe", isSearch ? "Search" : "Website")
-            tip = url
-        }
-        showsFavicon = favicon != nil
+    init() {
         super.init(frame: .zero)
-        toolTip = tip
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel(address.isEmpty ? titleText : "\(titleText), \(address)")
-        if let favicon {
-            favicon.size = NSSize(width: 16, height: 16)
-            icon.image = favicon
-        } else {
-            icon.image = symbol
-            icon.contentTintColor = .secondaryLabelColor
-        }
         icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
         icon.setContentHuggingPriority(.required, for: .horizontal)
-        title.attributedStringValue = Self.highlighting(titleText, typed, color: .labelColor)
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
-        url.stringValue = address
         url.font = .systemFont(ofSize: Theme.FontSize.secondary)
-        url.textColor = .secondaryLabelColor
         url.lineBreakMode = .byTruncatingTail
         url.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let stack = NSStackView(views: [icon, title, url])
@@ -299,6 +293,69 @@ private final class SuggestionRow: NSView {
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+    }
+
+    /// Shows `suggestion`, with `typed` in bold where the title matches it.
+    func configure(_ suggestion: AddressSuggestions.Suggestion, typed: String) {
+        self.typed = typed
+        var address = ""
+        var tip = ""
+        switch suggestion {
+        case .page(let page):
+            titleText = page.displayTitle
+            address = HistoryStore.bare(page.url)
+            tip = page.url
+            let site = address.split(separator: "/", maxSplits: 1).first.map(String.init) ?? address
+            if let favicon = Self.favicon(page.icon, site: site) {
+                showFavicon(favicon, key: "page:" + site)
+            } else {
+                showSymbol("clock", "History")
+            }
+        case .input(let text):
+            let url = AddressInput.url(for: text)
+            let isSearch = url == Settings.searchURL(for: text)
+            titleText = text
+            let engine = Settings.searchEngine
+            address = isSearch ? (engine == .custom ? "Search" : "Search \(engine.displayName)") : HistoryStore.bare(url)
+            if isSearch { showSymbol("magnifyingglass", "Search") } else { showSymbol("globe", "Website") }
+            tip = url
+        }
+        toolTip = tip
+        setAccessibilityLabel(address.isEmpty ? titleText : "\(titleText), \(address)")
+        url.stringValue = address
+        updateColors()
+    }
+
+    /// The favicon decoded from `data`, from the cache when this site's
+    /// has been decoded before.
+    private static func favicon(_ data: Data?, site: String) -> NSImage? {
+        guard let data else { return nil }
+        if let cached = favicons.object(forKey: site as NSString) { return cached }
+        guard let favicon = NSImage(data: data) else { return nil }
+        favicon.size = NSSize(width: 16, height: 16)
+        favicons.setObject(favicon, forKey: site as NSString)
+        return favicon
+    }
+
+    private func showFavicon(_ favicon: NSImage, key: String) {
+        guard key != iconKey else { return }
+        iconKey = key
+        showsFavicon = true
+        icon.contentTintColor = nil
+        icon.image = favicon
+    }
+
+    private func showSymbol(_ name: String, _ description: String) {
+        guard name != iconKey else { return }
+        iconKey = name
+        showsFavicon = false
+        icon.image = Self.symbol(name, description)
+    }
+
+    private func updateColors() {
+        title.attributedStringValue = Self.highlighting(titleText, typed, color: isHighlighted ? .alternateSelectedControlTextColor : .labelColor)
+        url.textColor = isHighlighted ? NSColor.alternateSelectedControlTextColor.dynamic(alpha: 0.75) : .secondaryLabelColor
+        if !showsFavicon { icon.contentTintColor = isHighlighted ? .alternateSelectedControlTextColor : .secondaryLabelColor }
     }
 
     required init?(coder: NSCoder) { fatalError() }

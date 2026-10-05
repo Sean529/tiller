@@ -310,7 +310,9 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     @objc private func transcriptScrolled(_ notification: Notification) {
         // At the top the clip's origin sits at minus the top inset.
         let scrolled = scrollView.contentView.bounds.minY > 1 - Self.insets.top
-        if (separator.alphaValue > 0) != scrolled { separator.alphaValue = scrolled ? 1 : 0 }
+        if (separator.alphaValue > 0) != scrolled {
+            withEasing(Theme.Duration.quick) { separator.animator().alphaValue = scrolled ? 1 : 0 }
+        }
         updateScrollDownButton()
     }
 
@@ -444,7 +446,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         conversation.updated = Date()
         save(conversation)
         let session = self.session ?? makeSession()
-        emptyState.isHidden = true
+        hideEmptyState()
         if let schedule { addNote("Scheduled run of “\(schedule.name)”") }
         records.append(.user(text: text, images: images.map(\.url.lastPathComponent)))
         saveRecords()
@@ -457,7 +459,9 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         do {
             try session.send(
                 text, images: images, context: contextOverride ?? context?() ?? "",
-                skill: SkillCompletion.skill(calledBy: text, in: availableSkills)
+                // Only a message starting with / can call a skill, so the
+                // skill folders are read only then.
+                skill: text.hasPrefix("/") ? SkillCompletion.skill(calledBy: text, in: availableSkills) : nil
             )
             if session.isRunning { setStatus("Working…", busy: true) }
             setBusy(true)
@@ -592,14 +596,17 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
 
+    // AppKit calls these on the main thread without saying so.
     override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        panel.dataSource = quickLook
-        panel.reloadData()
-        panel.currentPreviewItemIndex = quickLook.index
+        MainActor.assumeIsolated {
+            panel.dataSource = quickLook
+            panel.reloadData()
+            panel.currentPreviewItemIndex = quickLook.index
+        }
     }
 
     override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        panel.dataSource = nil
+        MainActor.assumeIsolated { panel.dataSource = nil }
     }
 
     // MARK: Agent events
@@ -661,6 +668,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             addError(message)
         case .turnFinished(let error, let stopped):
             keepLiveText()
+            // A call the turn ended without answering won't be answered now.
+            finishToolRows()
             transcript.hideThinking()
             transcript.closeToolGroup()
             if let error { addError(error, action: tryAgain) }
@@ -668,6 +677,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             showIdle()
             readTitle()
             finishRun(error.map { .failed($0) } ?? (stopped ? .stopped : .finished(lastAgentText)))
+            if error == nil { announce(stopped ? "Stopped" : Self.firstLine(of: lastAgentText) ?? "\(kind.displayName) finished") }
         case .exited(let message):
             keepLiveText()
             finishToolRows()
@@ -687,7 +697,14 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             showIdle()
             finishRun(.failed(message ?? "\(kind.displayName) stopped."))
         }
-        if follow { scrollToBottom() }
+        if follow { scrollToBottom() } else { updateScrollDownButtonAfterLayout() }
+    }
+
+    /// New output below the visible part grows the transcript without moving
+    /// the clip, so the button is checked again once the rows are laid out.
+    private func updateScrollDownButtonAfterLayout() {
+        layoutSubtreeIfNeeded()
+        updateScrollDownButton()
     }
 
     // MARK: Scheduled runs
@@ -763,7 +780,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 guard let liveText = self.liveText else { return }
                 let follow = self.transcript.isNearBottom(of: self.scrollView)
                 liveText.text = self.liveTextBuffer
-                if follow { self.scrollToBottom() }
+                if follow { self.scrollToBottom() } else { self.updateScrollDownButtonAfterLayout() }
             }
         }
     }
@@ -774,7 +791,25 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         composer.placeholder = "Ask \(kind.displayName) about this page…"
         composer.shortPlaceholder = "Ask \(kind.displayName)…"
         emptyState.kind = kind
-        emptyState.isHidden = !transcript.isEmpty || !recordsLoaded
+        let showEmpty = transcript.isEmpty && recordsLoaded
+        if showEmpty { emptyState.alphaValue = 1 }
+        emptyState.isHidden = !showEmpty
+    }
+
+    /// Fades the suggestions out as the first message goes in, rather than
+    /// dropping them in the same frame. `showIdle` brings them back at full
+    /// strength, and a fade it overtook leaves them shown.
+    private func hideEmptyState() {
+        guard !emptyState.isHidden else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.reduceMotion ? 0 : Theme.Duration.standard
+            emptyState.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.emptyState.alphaValue == 0 else { return }
+                self.emptyState.isHidden = true
+            }
+        }
     }
 
     private func setBusy(_ busy: Bool) {
@@ -802,6 +837,22 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         records.append(.error(message))
         saveRecords()
         transcript.add(ErrorMessageView(text: message, action: action))
+        announce(message)
+    }
+
+    /// Tells VoiceOver how a turn went, since the reply lands somewhere in
+    /// the transcript with no focus change. Only for the chat in front: a
+    /// scheduled run in another tab or window stays quiet.
+    private func announce(_ text: String) {
+        guard window?.isKeyWindow == true, !isHiddenOrHasHiddenAncestor else { return }
+        NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [
+            .announcement: text,
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
+    }
+
+    private static func firstLine(of text: String?) -> String? {
+        text?.split(whereSeparator: \.isNewline).first { !$0.allSatisfy(\.isWhitespace) }.map(String.init)
     }
 
     /// The last message sent, for trying again after a failure.
@@ -890,32 +941,38 @@ final class EdgeFadeView: NSView {
         gradient.startPoint = CGPoint(x: 0.5, y: edge == .top ? 1 : 0)
         gradient.endPoint = CGPoint(x: 0.5, y: edge == .top ? 0 : 1)
         gradient.colors = [
-            NSColor.windowBackgroundColor.cgColor,
-            NSColor.windowBackgroundColor.withAlphaComponent(0).cgColor,
+            NSColor.windowBackgroundColor.layerColor,
+            NSColor.windowBackgroundColor.dynamic(alpha: 0).layerColor,
         ]
     }
 }
 
 /// A round button with a down arrow that floats over the transcript while
-/// the newest message is out of view. It fades in and out.
+/// the newest message is out of view. It fades in and out, and its plate
+/// darkens under the mouse and while pressed.
 final class ScrollDownButton: NSButton {
     private var shown = false
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
 
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        image = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: "Scroll to Newest")?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
+        image = Theme.symbol("arrow.down", size: Theme.Symbol.row, weight: .semibold, label: "Scroll to Newest")
         imagePosition = .imageOnly
         isBordered = false
         bezelStyle = .accessoryBarAction
         contentTintColor = .labelColor
         toolTip = "Scroll to Newest"
+        setAccessibilityLabel("Scroll to Newest")
         alphaValue = 0
         isHidden = true
+        // A little larger than a bar button, since it floats over text.
+        let side = Theme.ButtonSize.bar + 4
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 30),
-            heightAnchor.constraint(equalToConstant: 30),
+            widthAnchor.constraint(equalToConstant: side),
+            heightAnchor.constraint(equalToConstant: side),
         ])
     }
 
@@ -937,16 +994,46 @@ final class ScrollDownButton: NSButton {
         }
     }
 
+    /// Only this area is replaced, so the ones AppKit keeps for the tooltip stay.
+    private var hoverArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    // A hidden view gets no exit event, so the hover is dropped on hiding.
+    override func viewDidHide() {
+        super.viewDidHide()
+        isHovered = false
+    }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        needsDisplay = true
+    }
+
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
         super.updateLayer()
         guard let layer else { return }
-        layer.cornerRadius = 15
-        layer.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer.cornerRadius = bounds.height / 2
+        // The plate stays opaque over the text, so the hover and pressed
+        // fills are mixed into it rather than laid on top. Mixed here, where
+        // the view's appearance is current.
+        let fill = isHighlighted ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : 0
+        let plate = NSColor.windowBackgroundColor.blended(withFraction: fill, of: .labelColor) ?? .windowBackgroundColor
+        withEasing(Theme.Duration.quick) { layer.backgroundColor = plate.layerColor }
         layer.borderWidth = Theme.hairlineWidth
-        layer.borderColor = Theme.hairline.cgColor
-        layer.shadowColor = NSColor.black.cgColor
+        layer.borderColor = Theme.hairline.layerColor
+        layer.shadowColor = NSColor.black.layerColor
         layer.shadowOpacity = 0.18
         layer.shadowRadius = 4
         layer.shadowOffset = CGSize(width: 0, height: -1)

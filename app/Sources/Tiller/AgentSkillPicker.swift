@@ -65,13 +65,23 @@ final class SkillPicker: NSVisualEffectView {
     func moveSelection(by offset: Int) {
         guard !skills.isEmpty else { return }
         select((selected + offset + skills.count) % skills.count)
+        // The keyboard stays in the message field, so VoiceOver is told
+        // which skill Tab or Return would now insert.
+        NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [
+            .announcement: "/" + skills[selected].name,
+            .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+        ])
     }
 
     var selectedSkill: AgentSkill? { skills.indices.contains(selected) ? skills[selected] : nil }
 
     private func select(_ index: Int) {
         selected = index
-        for (i, row) in rows.enumerated() { row.isSelected = i == index }
+        for (i, row) in rows.enumerated() {
+            row.isSelected = i == index
+            row.setAccessibilitySelected(i == index)
+        }
+        setAccessibilitySelectedChildren(rows.indices.contains(index) ? [rows[index]] : [])
     }
 
     // A material view doesn't reliably call `updateLayer`, so the plate's
@@ -94,7 +104,7 @@ final class SkillPicker: NSVisualEffectView {
         layer.masksToBounds = true
         layer.borderWidth = Theme.hairlineWidth
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer.borderColor = Theme.hairline.cgColor
+            layer.borderColor = Theme.hairline.layerColor
         }
     }
 }
@@ -134,7 +144,7 @@ private final class SkillPickerRow: NSView {
         hint.lineBreakMode = .byTruncatingTail
         hint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         hint.isHidden = !hasHint
-        badge.font = .systemFont(ofSize: 10, weight: .medium)
+        badge.font = .systemFont(ofSize: Theme.FontSize.caption, weight: .medium)
         badge.textColor = .secondaryLabelColor
         badge.isHidden = skill.origin != .library
         let top = NSStackView(views: [name, hint, NSView(), badge])
@@ -189,9 +199,11 @@ private final class SkillPickerRow: NSView {
         let fill: NSColor = isSelected
             ? Theme.accent(isPressed ? Theme.Accent.selectedHover : Theme.Accent.selected)
             : Theme.fill(hovered: false, pressed: isPressed)
-        withEasing(Theme.Duration.quick) { layer?.backgroundColor = fill.cgColor }
+        withEasing(Theme.Duration.quick) { layer?.backgroundColor = fill.layerColor }
         layer?.borderWidth = Theme.hairlineWidth
-        layer?.borderColor = Theme.selectionOutline(selected: isSelected).cgColor
+        layer?.borderColor = Theme.selectionOutline(selected: isSelected).layerColor
+        // Tertiary text is too faint on the accent's wash.
+        hint.textColor = isSelected || Theme.increaseContrast ? .secondaryLabelColor : .tertiaryLabelColor
     }
 
     override func updateTrackingAreas() {

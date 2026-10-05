@@ -54,7 +54,7 @@ final class FaviconView: NSView {
         CATransaction.setDisableActions(true)
         if let luminance, dark ? luminance < 0.22 : luminance > 0.92 {
             plate.isHidden = false
-            plate.backgroundColor = (dark ? NSColor(white: 1, alpha: 0.92) : NSColor(white: 0.25, alpha: 0.9)).cgColor
+            plate.backgroundColor = (dark ? NSColor(white: 1, alpha: 0.92) : NSColor(white: 0.25, alpha: 0.9)).layerColor
         } else {
             plate.isHidden = true
         }

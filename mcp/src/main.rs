@@ -212,7 +212,7 @@ fn content(output: Output) -> Value {
             let text = match value {
                 Value::String(s) => s,
                 Value::Null => "undefined".into(),
-                other => serde_json::to_string_pretty(&other).unwrap_or_default(),
+                other => serde_json::to_string(&other).unwrap_or_default(),
             };
             json!([{ "type": "text", "text": text }])
         }

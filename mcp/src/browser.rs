@@ -402,10 +402,15 @@ const READ_PAGE_JS: &str = r#"(max) => {
     const ref = String(elements.length + 1);
     el.setAttribute('data-tiller-ref', ref);
     const tag = el.tagName.toLowerCase();
-    const label = (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.getAttribute('alt') || '')
+    // A password field's value never goes into the result; `filled` says
+    // whether it holds anything.
+    const secret = tag === 'input' && el.type === 'password';
+    const value = secret ? '' : el.value;
+    const label = (el.getAttribute('aria-label') || el.innerText || value || el.placeholder || el.title || el.getAttribute('alt') || '')
       .replace(/\s+/g, ' ').trim().slice(0, 100);
     const item = { ref, tag, text: label };
     if (tag === 'input') item.type = el.type;
+    if (secret) item.filled = !!el.value;
     if (el.getAttribute('role')) item.role = el.getAttribute('role');
     if (tag === 'a') item.href = el.href;
     if (rect.bottom < 0 || rect.top > innerHeight) item.offscreen = true;
@@ -416,11 +421,12 @@ const READ_PAGE_JS: &str = r#"(max) => {
 }"#;
 
 /// Scrolls the element to the middle of the viewport and returns its center in
-/// viewport coordinates, which is what DevTools mouse events use.
+/// viewport coordinates, which is what DevTools mouse events use. The scroll is
+/// instant even on pages with CSS smooth scrolling, so the rect is the final one.
 const LOCATE_JS: &str = r#"(selector) => {
   const el = document.querySelector(selector);
   if (!el) return null;
-  el.scrollIntoView({ block: 'center', inline: 'center' });
+  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
   const rect = el.getBoundingClientRect();
   const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
   const hit = document.elementFromPoint(x, y);
@@ -432,7 +438,7 @@ const LOCATE_JS: &str = r#"(selector) => {
 const FOCUS_JS: &str = r#"(selector, append) => {
   const el = document.querySelector(selector);
   if (!el) return false;
-  el.scrollIntoView({ block: 'center' });
+  el.scrollIntoView({ block: 'center', behavior: 'instant' });
   el.focus();
   if (append) {
     if (typeof el.setSelectionRange === 'function' && typeof el.value === 'string') {

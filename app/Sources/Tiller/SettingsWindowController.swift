@@ -5,9 +5,11 @@ import UniformTypeIdentifiers
 /// Skills, Scheduled and Profiles panes. Every change is saved as it is made, in the current profile.
 @MainActor
 final class SettingsWindowController: NSWindowController {
-    private let tabs = NSTabViewController()
+    private let tabs = SettingsTabViewController()
 
     init() {
+        // Read before the first tab is added, which selects it and saves it.
+        let lastPane = UserDefaults.standard.string(forKey: SettingsTabViewController.lastPaneKey)
         tabs.tabStyle = .toolbar
         let panes: [(NSViewController, String)] = [
             (GeneralSettingsPane(), "gearshape"),
@@ -28,7 +30,11 @@ final class SettingsWindowController: NSWindowController {
         window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
         window.center()
+        // Reopens where it was left, on the pane last shown.
+        window.setFrameAutosaveName("Settings")
         super.init(window: window)
+        if let lastPane { showPane(titled: lastPane) }
+        tabs.fitWindow(animate: false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -45,9 +51,38 @@ final class SettingsWindowController: NSWindowController {
     }
 }
 
+/// Sizes the window to each pane as it is picked, keeping its top edge in
+/// place and easing the height, as System Settings does. Every pane has the
+/// same width, so only the height moves.
+@MainActor
+final class SettingsTabViewController: NSTabViewController {
+    static let lastPaneKey = "SettingsLastPane"
+
+    override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: item)
+        if let title = item?.viewController?.title {
+            UserDefaults.standard.set(title, forKey: Self.lastPaneKey)
+        }
+        fitWindow(animate: true)
+    }
+
+    /// The window's content takes the selected pane's size. Animates only
+    /// while the window is on screen.
+    func fitWindow(animate: Bool) {
+        guard let window = view.window,
+            let pane = tabView.selectedTabViewItem?.viewController as? ScrollingPaneController
+        else { return }
+        let size = pane.fittedSize(on: window.screen)
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        guard frame != window.frame else { return }
+        window.setFrame(frame, display: true, animate: animate && window.isVisible && !Theme.reduceMotion)
+    }
+}
+
 /// Holds a pane in a scroll view, so a pane taller than the screen scrolls
 /// instead of pushing the window off it. The window takes the pane's own
-/// size whenever it fits.
+/// height whenever it fits, and every pane's width.
 @MainActor
 final class ScrollingPaneController: NSViewController {
     private let pane: NSViewController
@@ -82,28 +117,31 @@ final class ScrollingPaneController: NSViewController {
             pane.view.leadingAnchor.constraint(equalTo: document.leadingAnchor),
             pane.view.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             pane.view.bottomAnchor.constraint(lessThanOrEqualTo: document.bottomAnchor),
+            // The tab view controller fits the window to the pane, so a
+            // form narrower than the lists is held to their width.
+            pane.view.widthAnchor.constraint(greaterThanOrEqualToConstant: SettingsPane.paneWidth),
         ])
         view = scroll
-        fit()
     }
 
-    // The pane gets its own viewWillAppear from the containment.
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        fit()
-    }
+    // The pane's own preferred size stops here. Passed up, the tab view
+    // controller would snap the window to it, at the pane's own width.
+    override func preferredContentSizeDidChange(for viewController: NSViewController) {}
 
-    /// The pane's size, with the height held to what the screen has room for.
-    private func fit() {
+    /// The pane's height, held to what the screen has room for, at the
+    /// width every pane shares. The tab view controller sizes the window to
+    /// it; a preferredContentSize would make the controller snap there instead.
+    func fittedSize(on screen: NSScreen?) -> NSSize {
+        _ = view
         var size = pane.preferredContentSize
         if size == .zero { size = pane.view.fittingSize }
-        let screen = view.window?.screen ?? NSScreen.main
-        if let screen {
+        size.width = max(size.width, SettingsPane.paneWidth)
+        if let screen = screen ?? NSScreen.main {
             // Room under the title bar and toolbar, with a margin.
             let room = screen.visibleFrame.height - 140
             size.height = min(size.height, max(300, room))
         }
-        preferredContentSize = size
+        return size
     }
 }
 
@@ -112,12 +150,58 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// A list pane's table. Delete and Forward Delete send Edit > Delete up the
+/// responder chain, where the pane removes the selected rows after asking.
+final class SettingsTableView: NSTableView {
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .numericPad])
+        let key = event.charactersIgnoringModifiers?.unicodeScalars.first.map { Int($0.value) }
+        if modifiers.isEmpty, key == 0x7F || key == NSDeleteFunctionKey,
+            NSApp.sendAction(#selector(NSText.delete(_:)), to: nil, from: self)
+        {
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+/// A text view in a rounded box. The box's border takes the keyboard focus
+/// color while the text view has focus, as a text field's focus ring does.
+final class BoxedTextView: NSTextView {
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { showFocus(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { showFocus(false) }
+        return resigned
+    }
+
+    private func showFocus(_ focused: Bool) {
+        var view = superview
+        while let current = view, !(current is NSBox) { view = current.superview }
+        guard let box = view as? NSBox else { return }
+        box.borderColor = focused ? .keyboardFocusIndicatorColor : Theme.hairline
+        box.borderWidth = focused ? 2 : Theme.hairlineWidth
+    }
+}
+
 /// A two-column form: right-aligned labels, controls on the right, and short
 /// notes under some controls.
 @MainActor
 class SettingsPane: NSViewController {
     let grid = NSGridView()
     static let controlWidth: CGFloat = 360
+    /// The size of the table in each list pane, so the window keeps one
+    /// width and the button row stays put when switching between them.
+    static let tableWidth: CGFloat = 640
+    static let tableHeight: CGFloat = 280
+    /// The width of every pane: a list pane's table and its margins. Forms
+    /// sit centered in it.
+    static let paneWidth: CGFloat = tableWidth + 2 * Theme.Padding.sheet
 
     init(title: String) {
         super.init(nibName: nil, bundle: nil)
@@ -136,8 +220,8 @@ class SettingsPane: NSViewController {
         NSLayoutConstraint.activate([
             grid.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             grid.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
-            grid.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            grid.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            grid.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
+            grid.centerXAnchor.constraint(equalTo: view.centerXAnchor),
         ])
         self.view = view
         buildRows()
@@ -149,9 +233,18 @@ class SettingsPane: NSViewController {
     /// Subclasses add their rows here.
     func buildRows() {}
 
+    /// A labeled row. VoiceOver reads the label as the control's title; a
+    /// row of several controls links its main one with `linkLabel`.
     @discardableResult
     func addRow(_ label: String, _ control: NSView) -> NSGridRow {
-        grid.addRow(with: [NSTextField(labelWithString: label), control])
+        let title = NSTextField(labelWithString: label)
+        if !(control is NSStackView) { control.setAccessibilityTitleUIElement(title) }
+        return grid.addRow(with: [title, control])
+    }
+
+    /// Gives `control` the label of `row` as its title for VoiceOver.
+    static func linkLabel(of row: NSGridRow, to control: NSView) {
+        control.setAccessibilityTitleUIElement(row.cell(at: 0).contentView)
     }
 
     /// A note under the control in the row above.
@@ -177,6 +270,9 @@ class SettingsPane: NSViewController {
         let label = note()
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 2
+        // A cut third line ends in an ellipsis; `show` puts the whole text
+        // of a warning in the tooltip.
+        label.cell?.truncatesLastVisibleLine = true
         label.preferredMaxLayoutWidth = width
         label.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
         return label
@@ -185,6 +281,34 @@ class SettingsPane: NSViewController {
     static func show(_ text: String, in note: NSTextField, warning: Bool = false) {
         note.stringValue = text
         note.textColor = warning ? .systemRed : .secondaryLabelColor
+        note.toolTip = warning ? text : nil
+    }
+
+    /// A text cell for a list pane's table, reused from `table` when it has
+    /// one. The text is centered in the row, as checkboxes and icons are,
+    /// and comes back with the default color and no tooltip.
+    static func textCell(_ table: NSTableView, _ text: String) -> NSTableCellView {
+        let id = NSUserInterfaceItemIdentifier("text")
+        if let cell = table.makeView(withIdentifier: id, owner: nil) as? NSTableCellView, let label = cell.textField {
+            label.stringValue = text
+            label.textColor = .labelColor
+            label.toolTip = nil
+            return cell
+        }
+        let cell = NSTableCellView()
+        cell.identifier = id
+        let label = NSTextField(labelWithString: text)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        cell.textField = label
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
     }
 
     /// `scroll` with a dimmed label over the middle of its rows, for a table
@@ -263,7 +387,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         defaultBrowserButton.action = #selector(makeDefaultBrowser(_:))
         let defaultBrowser = NSStackView(views: [defaultBrowserButton, defaultBrowserStatus])
         defaultBrowser.spacing = 8
-        addRow("Default browser:", defaultBrowser)
+        Self.linkLabel(of: addRow("Default browser:", defaultBrowser), to: defaultBrowserButton)
         addNote(Self.note("For every profile. Links open in the profile used last."))
         showDefaultBrowserState()
         for name in [NSApplication.didBecomeActiveNotification, .defaultBrowserDidChange] {
@@ -437,16 +561,20 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
 
 // MARK: Passwords
 
-/// Saved passwords: site and username, with buttons to copy a password or
-/// remove logins. Passwords come in through Tiller > Import from Chrome.
-final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
-    private let table = NSTableView()
+/// Saved passwords: site and username, a field to search them, and buttons
+/// to copy a password or remove logins. Passwords come in through Tiller >
+/// Import from Chrome.
+final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
+    private let table = SettingsTableView()
+    private let searchField = NSSearchField()
     private let copyButton = NSButton(title: "Copy Password", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let removeAllButton = NSButton(title: "Remove All…", target: nil, action: nil)
-    private let note = SettingsPane.wrappingNote(width: 560)
+    private let note = SettingsPane.wrappingNote(width: SettingsPane.tableWidth)
     private var placeholder: NSTextField?
     private var entries: [PasswordStore.Entry] { PasswordStore.shared.entries }
+    /// The entries the search matches, which the table shows.
+    private var filtered: [PasswordStore.Entry] = []
 
     init() {
         super.init(nibName: nil, bundle: nil)
@@ -456,7 +584,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        for (id, title, width) in [("site", "Website", 300.0), ("username", "Username", 220.0)] {
+        for (id, title, width) in [("site", "Website", 340.0), ("username", "Username", 240.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = title
             column.width = width
@@ -473,6 +601,11 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         let (tableBox, placeholder) = SettingsPane.withPlaceholder(scroll, "No Saved Passwords")
         self.placeholder = placeholder
 
+        searchField.placeholderString = "Search websites and usernames"
+        searchField.sendsSearchStringImmediately = true
+        searchField.target = self
+        searchField.action = #selector(search(_:))
+
         copyButton.target = self
         copyButton.action = #selector(copyPassword(_:))
         removeButton.target = self
@@ -482,7 +615,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         let buttons = NSStackView(views: [copyButton, removeButton, NSView(), removeAllButton])
         buttons.spacing = 8
 
-        let stack = NSStackView(views: [tableBox, buttons, note])
+        let stack = NSStackView(views: [searchField, tableBox, buttons, note])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -490,8 +623,12 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         let view = NSView()
         view.addSubview(stack)
         NSLayoutConstraint.activate([
-            scroll.widthAnchor.constraint(equalToConstant: 560),
-            scroll.heightAnchor.constraint(equalToConstant: 280),
+            scroll.widthAnchor.constraint(equalToConstant: SettingsPane.tableWidth),
+            // The search field comes out of the table's height, so the pane
+            // is the same size as the other lists.
+            scroll.heightAnchor.constraint(
+                equalToConstant: SettingsPane.tableHeight - searchField.fittingSize.height - stack.spacing),
+            searchField.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -505,16 +642,32 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         reload(nil)
     }
 
+    /// Filters again and keeps the same logins selected, so a selection
+    /// never moves onto rows the user didn't pick.
     @objc private func reload(_ notification: Notification?) {
+        let selectedIDs = Set(selectedEntries.map(\.id))
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespaces)
+        filtered = query.isEmpty
+            ? entries
+            : entries.filter {
+                $0.origin.localizedCaseInsensitiveContains(query) || $0.username.localizedCaseInsensitiveContains(query)
+            }
         table.reloadData()
+        table.selectRowIndexes(
+            IndexSet(filtered.indices.filter { selectedIDs.contains(filtered[$0].id) }), byExtendingSelection: false)
         updateControls()
+    }
+
+    @objc private func search(_ sender: NSSearchField) {
+        reload(nil)
     }
 
     private func updateControls() {
         copyButton.isEnabled = table.selectedRowIndexes.count == 1
         removeButton.isEnabled = !table.selectedRowIndexes.isEmpty
         removeAllButton.isEnabled = !entries.isEmpty
-        placeholder?.isHidden = !entries.isEmpty
+        placeholder?.stringValue = entries.isEmpty ? "No Saved Passwords" : "No Matches"
+        placeholder?.isHidden = !filtered.isEmpty
         SettingsPane.show(
             entries.isEmpty
                 ? "No saved passwords. Bring them over with Tiller > Import from Chrome…"
@@ -523,18 +676,23 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         )
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
-        guard entries.indices.contains(row) else { return nil }
-        let entry = entries[row]
+        guard filtered.indices.contains(row) else { return nil }
+        let entry = filtered[row]
         let text = column?.identifier.rawValue == "site"
             ? HistoryStore.bare(entry.origin)
             : (entry.username.isEmpty ? "(no username)" : entry.username)
-        let label = NSTextField(labelWithString: text)
-        label.lineBreakMode = .byTruncatingTail
-        if column?.identifier.rawValue == "site" { label.toolTip = entry.origin }
-        return label
+        let cell = SettingsPane.textCell(tableView, text)
+        if column?.identifier.rawValue == "site" { cell.textField?.toolTip = entry.origin }
+        return cell
+    }
+
+    /// Typing a site's name selects its row.
+    func tableView(_ tableView: NSTableView, typeSelectStringFor column: NSTableColumn?, row: Int) -> String? {
+        guard filtered.indices.contains(row), column?.identifier.rawValue == "site" else { return nil }
+        return HistoryStore.bare(filtered[row].origin)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -542,16 +700,41 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     }
 
     private var selectedEntries: [PasswordStore.Entry] {
-        table.selectedRowIndexes.compactMap { entries.indices.contains($0) ? entries[$0] : nil }
+        table.selectedRowIndexes.compactMap { filtered.indices.contains($0) ? filtered[$0] : nil }
+    }
+
+    /// Edit > Copy copies the selected login's password.
+    @objc func copy(_ sender: Any?) {
+        copyPassword(sender)
+    }
+
+    /// Edit > Delete and the Delete key remove the selected logins, after asking.
+    @objc func delete(_ sender: Any?) {
+        guard removeButton.isEnabled else { return NSSound.beep() }
+        remove(sender)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(copy(_:)): copyButton.isEnabled
+        case #selector(delete(_:)): removeButton.isEnabled
+        default: true
+        }
     }
 
     @objc private func copyPassword(_ sender: Any?) {
-        guard let entry = selectedEntries.first else { return }
+        guard table.selectedRowIndexes.count == 1, let entry = selectedEntries.first else { return }
         Task {
             do {
                 let password = try await PasswordStore.shared.password(for: entry)
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(password, forType: .string)
+                // Marked concealed and transient, so clipboard managers leave
+                // it out of their history, and kept off Universal Clipboard.
+                let pasteboard = NSPasteboard.general
+                pasteboard.prepareForNewContents(with: .currentHostOnly)
+                pasteboard.setString(password, forType: .string)
+                for marker in ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"] {
+                    pasteboard.setString("", forType: NSPasteboard.PasteboardType(marker))
+                }
                 SettingsPane.show("Copied the password for \(HistoryStore.bare(entry.origin)).", in: note)
             } catch {
                 SettingsPane.show(error.localizedDescription, in: note, warning: true)
@@ -559,11 +742,30 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         }
     }
 
+    /// Asks first: a removed password comes back only with another import.
     @objc private func remove(_ sender: Any?) {
-        do {
-            try PasswordStore.shared.remove(Set(selectedEntries.map(\.id)))
-        } catch {
-            SettingsPane.show(error.localizedDescription, in: note, warning: true)
+        let picked = selectedEntries
+        guard !picked.isEmpty, let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = picked.count == 1
+            ? "Remove the password for \(HistoryStore.bare(picked[0].origin))?"
+            : "Remove \(picked.count) saved passwords?"
+        alert.informativeText = "Removes \(picked.count == 1 ? "it" : "them") from Tiller. Chrome keeps its own."
+        alert.addButton(withTitle: "Remove")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                do {
+                    try PasswordStore.shared.remove(Set(picked.map(\.id)))
+                    self.table.deselectAll(nil)
+                    self.updateControls()
+                } catch {
+                    SettingsPane.show(error.localizedDescription, in: self.note, warning: true)
+                }
+            }
         }
     }
 
@@ -594,15 +796,15 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
 /// The profile's extensions, with switches to turn them on and pin them to
 /// the toolbar, and buttons to add, configure and remove them. Chromium loads
 /// extensions at launch, so turning one on or off applies at the next launch.
-final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     static let paneTitle = "Extensions"
 
-    private let table = NSTableView()
+    private let table = SettingsTableView()
     private let addFolderButton = NSButton(title: "Add Folder…", target: nil, action: nil)
     private let addCRXButton = NSButton(title: "Add CRX File…", target: nil, action: nil)
     private let optionsButton = NSButton(title: "Options", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
-    private let note = SettingsPane.wrappingNote(width: 600)
+    private let note = SettingsPane.wrappingNote(width: SettingsPane.tableWidth)
     private var placeholder: NSTextField?
     private var store: ExtensionStore { .shared }
 
@@ -657,8 +859,8 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
         let view = NSView()
         view.addSubview(stack)
         NSLayoutConstraint.activate([
-            scroll.widthAnchor.constraint(equalToConstant: 600),
-            scroll.heightAnchor.constraint(equalToConstant: 280),
+            scroll.widthAnchor.constraint(equalToConstant: SettingsPane.tableWidth),
+            scroll.heightAnchor.constraint(equalToConstant: SettingsPane.tableHeight),
             buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -729,11 +931,11 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
             stack.spacing = 6
             return stack
         case "version":
-            return NSTextField(labelWithString: (try? manifest.get().version) ?? "")
+            return SettingsPane.textCell(tableView, (try? manifest.get().version) ?? "")
         default:
-            let label = NSTextField(labelWithString: status(of: entry, manifest))
+            let cell = SettingsPane.textCell(tableView, status(of: entry, manifest))
+            guard let label = cell.textField else { return cell }
             label.textColor = .secondaryLabelColor
-            label.lineBreakMode = .byTruncatingTail
             if case .failure(let error) = manifest {
                 label.textColor = .systemRed
                 label.toolTip = error.localizedDescription
@@ -741,7 +943,7 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
                 label.textColor = .systemRed
                 label.toolTip = error
             }
-            return label
+            return cell
         }
     }
 
@@ -814,6 +1016,16 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
                 }
             }
         }
+    }
+
+    /// Edit > Delete and the Delete key remove the selected extensions, after asking.
+    @objc func delete(_ sender: Any?) {
+        guard removeButton.isEnabled else { return NSSound.beep() }
+        remove(sender)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(delete(_:)) ? removeButton.isEnabled : true
     }
 
     @objc private func openOptions(_ sender: Any?) {
@@ -902,7 +1114,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         shortcutRecorder.widthAnchor.constraint(equalToConstant: 140).isActive = true
         let shortcutRow = NSStackView(views: [shortcutRecorder, restoreShortcutButton])
         shortcutRow.spacing = 8
-        addRow("Show and hide:", shortcutRow)
+        Self.linkLabel(of: addRow("Show and hide:", shortcutRow), to: shortcutRecorder)
         addNote(shortcutNote)
         showShortcutState()
 
@@ -917,7 +1129,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         let pathRow = NSStackView(views: [kindPopUp, pathField, choosePath])
         pathRow.spacing = 8
         pathField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        addRow("Command:", Self.fixWidth(pathRow, Self.wideControlWidth))
+        Self.linkLabel(of: addRow("Command:", Self.fixWidth(pathRow, Self.wideControlWidth)), to: pathField)
         addNote(pathNote)
         loadPathField()
 
@@ -948,11 +1160,11 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseFolder(_:)))
         let folderRow = NSStackView(views: [Self.fixWidth(folderField, Self.wideControlWidth - 90), choose])
         folderRow.spacing = 8
-        addRow("Working folder:", folderRow)
+        Self.linkLabel(of: addRow("Working folder:", folderRow), to: folderField)
         addNote(folderNote)
         showFolderState()
 
-        let scroll = NSTextView.scrollableTextView()
+        let scroll = BoxedTextView.scrollableTextView()
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -974,6 +1186,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.textContainerInset = NSSize(width: 2, height: 4)
         textView.delegate = self
+        textView.setAccessibilityLabel("Extra instructions")
         instructionsView = textView
         let row = addRow("Extra instructions:", Self.fixWidth(box, Self.wideControlWidth))
         row.rowAlignment = .none
@@ -1157,16 +1370,16 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 /// Tiller's skill library: skills every agent can call with `/name`, with a
 /// switch for each and buttons to add, reveal and remove them. Agents load the
 /// library when they start, so a change applies from a chat's next start.
-final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     static let paneTitle = "Skills"
 
-    private let table = NSTableView()
+    private let table = SettingsTableView()
     private let addFolderButton = NSButton(title: "Add Folder…", target: nil, action: nil)
     private let addArchiveButton = NSButton(title: "Add Archive…", target: nil, action: nil)
     private let addGitButton = NSButton(title: "Add from Git…", target: nil, action: nil)
     private let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
-    private let note = SettingsPane.wrappingNote(width: 600)
+    private let note = SettingsPane.wrappingNote(width: SettingsPane.tableWidth)
     private var placeholder: NSTextField?
     private var isInstalling = false {
         didSet { updateControls() }
@@ -1224,8 +1437,8 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
         let view = NSView()
         view.addSubview(stack)
         NSLayoutConstraint.activate([
-            scroll.widthAnchor.constraint(equalToConstant: 600),
-            scroll.heightAnchor.constraint(equalToConstant: 280),
+            scroll.widthAnchor.constraint(equalToConstant: SettingsPane.tableWidth),
+            scroll.heightAnchor.constraint(equalToConstant: SettingsPane.tableHeight),
             buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -1277,21 +1490,19 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
             checkbox.setAccessibilityLabel("\(entry.name) On")
             return checkbox
         case "name":
-            let label = NSTextField(labelWithString: entry.name)
-            label.lineBreakMode = .byTruncatingTail
-            label.toolTip = store.folder(for: entry.name)
-            return label
+            let cell = SettingsPane.textCell(tableView, entry.name)
+            cell.textField?.toolTip = store.folder(for: entry.name)
+            return cell
         case "description":
-            let label = NSTextField(labelWithString: skill?.description ?? "SKILL.md is missing")
-            label.textColor = skill == nil ? .systemRed : .secondaryLabelColor
-            label.lineBreakMode = .byTruncatingTail
-            label.toolTip = skill?.description
-            return label
+            let cell = SettingsPane.textCell(tableView, skill?.description ?? "SKILL.md is missing")
+            cell.textField?.textColor = skill == nil ? .systemRed : .secondaryLabelColor
+            cell.textField?.toolTip = skill?.description
+            return cell
         default:
-            let label = NSTextField(labelWithString: entry.source.displayName)
-            label.textColor = .secondaryLabelColor
-            label.toolTip = entry.origin.isEmpty ? nil : entry.origin
-            return label
+            let cell = SettingsPane.textCell(tableView, entry.source.displayName)
+            cell.textField?.textColor = .secondaryLabelColor
+            cell.textField?.toolTip = entry.origin.isEmpty ? nil : entry.origin
+            return cell
         }
     }
 
@@ -1373,6 +1584,16 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
+    /// Edit > Delete and the Delete key remove the selected skills, after asking.
+    @objc func delete(_ sender: Any?) {
+        guard removeButton.isEnabled else { return NSSound.beep() }
+        remove(sender)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(delete(_:)) ? removeButton.isEnabled : true
+    }
+
     @objc private func reveal(_ sender: Any?) {
         guard table.selectedRowIndexes.count == 1, store.entries.indices.contains(table.selectedRow) else { return }
         let folder = store.folder(for: store.entries[table.selectedRow].name)
@@ -1406,15 +1627,15 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
 
 /// Every profile, with buttons to open, add, rename and delete them. Each open
 /// profile is a separate Tiller.
-final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     static let paneTitle = "Profiles"
 
-    private let table = NSTableView()
+    private let table = SettingsTableView()
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
     private let addButton = NSButton(title: "New Profile…", target: nil, action: nil)
     private let renameButton = NSButton(title: "Rename…", target: nil, action: nil)
     private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
-    private let note = SettingsPane.wrappingNote(width: 560)
+    private let note = SettingsPane.wrappingNote(width: SettingsPane.tableWidth)
     private var profiles: [Profile] = []
 
     init() {
@@ -1425,7 +1646,7 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        for (id, title, width) in [("name", "Name", 320.0), ("status", "Status", 200.0)] {
+        for (id, title, width) in [("name", "Name", 380.0), ("status", "Status", 200.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = title
             column.width = width
@@ -1461,8 +1682,8 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
         let view = NSView()
         view.addSubview(stack)
         NSLayoutConstraint.activate([
-            scroll.widthAnchor.constraint(equalToConstant: 560),
-            scroll.heightAnchor.constraint(equalToConstant: 220),
+            scroll.widthAnchor.constraint(equalToConstant: SettingsPane.tableWidth),
+            scroll.heightAnchor.constraint(equalToConstant: SettingsPane.tableHeight),
             buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -1520,10 +1741,9 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
         } else {
             text = Profiles.runningProcess(profile.id) != nil ? "Open" : ""
         }
-        let label = NSTextField(labelWithString: text)
-        label.lineBreakMode = .byTruncatingTail
-        if column?.identifier.rawValue == "status" { label.textColor = .secondaryLabelColor }
-        return label
+        let cell = SettingsPane.textCell(tableView, text)
+        if column?.identifier.rawValue == "status" { cell.textField?.textColor = .secondaryLabelColor }
+        return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -1546,6 +1766,16 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
         ProfileNamePrompt.run("Rename \(profile.name)", button: "Rename", initial: profile.name, on: view.window) { name in
             try Profiles.rename(profile.id, to: name)
         }
+    }
+
+    /// Edit > Delete and the Delete key delete the selected profile, after asking.
+    @objc func delete(_ sender: Any?) {
+        guard deleteButton.isEnabled else { return NSSound.beep() }
+        deleteProfile(sender)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(delete(_:)) ? deleteButton.isEnabled : true
     }
 
     @objc private func deleteProfile(_ sender: Any?) {

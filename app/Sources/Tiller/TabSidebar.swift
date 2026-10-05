@@ -8,7 +8,7 @@ final class TabSidebarView: NSView {
     static let widthRange: ClosedRange<CGFloat> = 80...400
     static let defaultWidth: CGFloat = 220
 
-    let collapseButton = NSButton()
+    let collapseButton = Theme.iconButton("sidebar.left", label: "Collapse Tabs")
     var isCollapsed = false {
         didSet {
             let label = isCollapsed ? "Expand Tabs" : "Collapse Tabs"
@@ -27,13 +27,9 @@ final class TabSidebarView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        collapseButton.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Collapse Tabs")
-        collapseButton.isBordered = false
-        collapseButton.bezelStyle = .accessoryBarAction
-        collapseButton.imagePosition = .imageOnly
-        collapseButton.contentTintColor = .secondaryLabelColor
-        collapseButton.toolTip = "Collapse Tabs"
-        collapseButton.setAccessibilityLabel("Collapse Tabs")
+        // Placed by `layout` with frames, so its size constraints go.
+        NSLayoutConstraint.deactivate(collapseButton.constraints.filter { $0.secondItem == nil })
+        collapseButton.translatesAutoresizingMaskIntoConstraints = true
         addSubview(collapseButton)
     }
 
@@ -48,9 +44,11 @@ final class TabSidebarView: NSView {
 
     override func layout() {
         super.layout()
-        let size: CGFloat = 28
+        let size = Theme.ButtonSize.bar
+        // Expanded, the glyph sits over the tabs' icons, which start 10pt
+        // into a tab and are 16pt wide.
         collapseButton.frame = NSRect(
-            x: isCollapsed ? ((bounds.width - size) / 2).rounded() : Self.inset + 2,
+            x: isCollapsed ? ((bounds.width - size) / 2).rounded() : Self.inset + 10 + 8 - size / 2,
             y: (Self.headerHeight - size) / 2, width: size, height: size
         )
         guard let strip, strip.superview === self else { return }

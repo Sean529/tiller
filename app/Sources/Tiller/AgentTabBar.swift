@@ -38,6 +38,14 @@ final class AgentTabBar: NSView {
         schedulesButton.action = #selector(schedules(_:))
         let buttons = NSStackView(views: [toolsButton, newTabButton, newChatButton, historyButton, schedulesButton])
         buttons.spacing = 4
+        // When the tabs and buttons don't fit the panel's width, the bar gives
+        // way rather than holding the panel wider: scheduled prompts, then
+        // tools, drop out first.
+        buttons.setVisibilityPriority(.init(300), for: schedulesButton)
+        buttons.setVisibilityPriority(.init(400), for: toolsButton)
+        // Only the buttons give way. The tabs hold the panel as wide as they
+        // need, so none ends up under the buttons.
+        buttons.setClippingResistancePriority(.defaultLow, for: .horizontal)
         for view in [tabStack, buttons] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -64,6 +72,8 @@ final class AgentTabBar: NSView {
             button.onClose = { [weak self] in self?.onClose?(index) }
             tabStack.addArrangedSubview(button)
         }
+        // Many tabs sit closer together, to leave the buttons room.
+        tabStack.spacing = tabs.count > 5 ? 2 : 6
         for (index, (view, tab)) in zip(tabStack.arrangedSubviews, tabs).enumerated() {
             guard let button = view as? TabNumberButton else { continue }
             button.title = tab.title
@@ -107,6 +117,9 @@ private final class TabNumberButton: NSView {
     var isSelected = false {
         didSet {
             guard isSelected != oldValue else { return }
+            // A tab just selected under the mouse keeps its number until the
+            // mouse comes back, so a double-click doesn't close it.
+            closeArmed = false
             setAccessibilityValue(isSelected)
             setAccessibilitySelected(isSelected)
             updateLabel()
@@ -132,10 +145,12 @@ private final class TabNumberButton: NSView {
         }
     }
     private var isPressed = false { didSet { needsDisplay = true } }
+    /// Whether the mouse came onto the tab while it was already selected.
+    private var closeArmed = false
 
     /// Whether a click closes the tab rather than selecting it. Not while
     /// its agent works: closing would end the turn, so that takes the menu.
-    private var offersClose: Bool { isSelected && isHovered && !isBusy }
+    private var offersClose: Bool { isSelected && isHovered && closeArmed && !isBusy }
 
     private func updateLabel() {
         label.isHidden = offersClose
@@ -155,7 +170,7 @@ private final class TabNumberButton: NSView {
         closeIcon.isHidden = true
         busyDot.wantsLayer = true
         busyDot.layer?.cornerRadius = Theme.busyDot / 2
-        busyDot.layer?.backgroundColor = Theme.accentColor.cgColor
+        busyDot.layer?.backgroundColor = Theme.accentColor.layerColor
         busyDot.isHidden = true
         for view in [label, closeIcon, busyDot] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -194,13 +209,13 @@ private final class TabNumberButton: NSView {
         let fill: NSColor = isSelected
             ? Theme.accent(isHovered || isPressed ? Theme.Accent.selectedHover : Theme.Accent.selected)
             : Theme.fill(isPressed ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : Theme.Fill.rest)
-        withEasing(Theme.Duration.quick) { layer?.backgroundColor = fill.cgColor }
+        withEasing(Theme.Duration.quick) { layer?.backgroundColor = fill.layerColor }
         // The selected tab always has its accent edge; under Increase
         // Contrast the others get a hairline, as a faint fill alone won't show.
         layer?.borderWidth = isSelected || Theme.increaseContrast ? Theme.hairlineWidth : 0
-        layer?.borderColor = (isSelected ? Theme.accent(Theme.Accent.outline) : Theme.hairline).cgColor
+        layer?.borderColor = (isSelected ? Theme.accent(Theme.Accent.outline) : Theme.hairline).layerColor
         label.textColor = isSelected ? .labelColor : .secondaryLabelColor
-        busyDot.layer?.backgroundColor = Theme.accentColor.cgColor
+        busyDot.layer?.backgroundColor = Theme.accentColor.layerColor
     }
 
     override func updateTrackingAreas() {
@@ -209,9 +224,13 @@ private final class TabNumberButton: NSView {
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
 
-    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseEntered(with event: NSEvent) {
+        closeArmed = isSelected
+        isHovered = true
+    }
 
     override func mouseExited(with event: NSEvent) {
+        closeArmed = false
         isHovered = false
         isPressed = false
     }
@@ -469,8 +488,8 @@ private final class HistoryRowView: NSTableRowView {
         let apply = { [fill] in
             // Resolved here, so the colors follow light and dark mode.
             fill.effectiveAppearance.performAsCurrentDrawingAppearance {
-                fill.layer?.backgroundColor = color.cgColor
-                fill.layer?.borderColor = Theme.selectionOutline(selected: filled).cgColor
+                fill.layer?.backgroundColor = color.layerColor
+                fill.layer?.borderColor = Theme.selectionOutline(selected: filled).layerColor
             }
             fill.layer?.borderWidth = Theme.hairlineWidth
         }

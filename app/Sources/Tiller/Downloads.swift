@@ -181,12 +181,16 @@ final class DownloadsButton: NSButton {
                 Theme.accentColor.setStroke()
                 done.stroke()
             }
+            // A template symbol drawn by hand paints its own black, so the
+            // arrow takes its color from a palette, which resolves for the
+            // appearance the image is drawn in.
             if let arrow = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 8, weight: .bold))
+                .withSymbolConfiguration(
+                    NSImage.SymbolConfiguration(pointSize: 8, weight: .bold)
+                        .applying(NSImage.SymbolConfiguration(paletteColors: [.labelColor])))
             {
                 let size = arrow.size
                 let origin = NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
-                NSColor.labelColor.set()
                 arrow.draw(in: NSRect(origin: origin, size: size), from: .zero, operation: .sourceOver, fraction: 1)
             }
             return true
@@ -365,22 +369,22 @@ private final class DownloadRowView: NSView {
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.RowHeight.twoLine),
+            fixedHeight,
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 32),
             icon.heightAnchor.constraint(equalToConstant: 32),
             text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
             text.trailingAnchor.constraint(equalTo: action.leadingAnchor, constant: -6),
-            text.topAnchor.constraint(equalTo: topAnchor, constant: 7),
-            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+            text.centerYAnchor.constraint(equalTo: centerYAnchor),
+            text.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 7),
+            text.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -7),
             progress.widthAnchor.constraint(equalTo: text.widthAnchor),
             action.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             action.centerYAnchor.constraint(equalTo: centerYAnchor),
             action.widthAnchor.constraint(equalToConstant: Self.actionSize),
             action.heightAnchor.constraint(equalToConstant: Self.actionSize),
         ])
-        setAccessibilityRole(.button)
         update(download, force: true)
     }
 
@@ -426,6 +430,8 @@ private final class DownloadRowView: NSView {
                 action.isHidden = true
             }
             toolTip = download.url
+            // Only a finished download opens when pressed, so only it is a button.
+            setAccessibilityRole(download.state == .complete ? .button : .group)
             needsDisplay = true
         }
         setAccessibilityLabel("\(download.name), \(text)")
@@ -434,6 +440,17 @@ private final class DownloadRowView: NSView {
     /// The cancel and Finder buttons' square, big enough to hit beside a
     /// two-line row.
     private static let actionSize: CGFloat = 24
+
+    /// Tall enough for a download under way, with its progress bar, so a row
+    /// keeps its height when the download ends and the bar goes. The text
+    /// sits in the middle either way.
+    private static let height: CGFloat = 62
+    private lazy var fixedHeight: NSLayoutConstraint = {
+        let constraint = heightAnchor.constraint(equalToConstant: Self.height)
+        // Larger text than expected grows the row rather than clipping it.
+        constraint.priority = .defaultHigh
+        return constraint
+    }()
 
     private func setAction(_ symbol: String, _ label: String, _ selector: Selector) {
         action.image = Theme.symbol(symbol, size: 16, weight: .medium, label: label)
@@ -517,10 +534,10 @@ private final class DownloadRowView: NSView {
         let clickable = download.state == .complete
         let hover = isHovered && clickable
         let fill = Theme.fill(hovered: hover, pressed: isPressed && clickable)
-        withEasing(Theme.Duration.quick) { layer.backgroundColor = fill.cgColor }
+        withEasing(Theme.Duration.quick) { layer.backgroundColor = fill.layerColor }
         // Under Increase Contrast the row under the mouse gets an outline too.
         layer.borderWidth = Theme.hairlineWidth
-        layer.borderColor = Theme.selectionOutline(selected: hover).cgColor
+        layer.borderColor = Theme.selectionOutline(selected: hover).layerColor
     }
 
     override func updateTrackingAreas() {

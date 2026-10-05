@@ -174,7 +174,7 @@ final class UserMessageView: NSView, TranscriptRow {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        bubble.layer?.backgroundColor = Theme.accent(Theme.Accent.bubble).cgColor
+        bubble.layer?.backgroundColor = Theme.accent(Theme.Accent.bubble).layerColor
     }
 }
 
@@ -265,6 +265,7 @@ private final class ThumbnailView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         toolTip = "Click to preview"
+        setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel(label)
         guard removable else { return }
@@ -312,7 +313,7 @@ private final class ThumbnailView: NSView {
         layer.cornerRadius = Theme.Radius.row
         layer.cornerCurve = .continuous
         layer.borderWidth = 1
-        layer.borderColor = Theme.hairline.cgColor
+        layer.borderColor = Theme.hairline.layerColor
     }
 
     override func mouseDown(with event: NSEvent) {}
@@ -348,10 +349,15 @@ private final class ThumbnailRemoveButton: NSButton {
             .withSymbolConfiguration(.init(paletteColors: [.white, plate]))
     }
 
+    /// Only this area is replaced, so the ones AppKit keeps for the tooltip stay.
+    private var hoverArea: NSTrackingArea?
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
@@ -374,8 +380,17 @@ final class ToolRowView: NSView, TranscriptRow {
     /// Called when a disclosure row is clicked.
     var onToggle: (() -> Void)?
     var isExpanded = false {
-        didSet { chevron?.image = Self.chevronImage(expanded: isExpanded) }
+        didSet {
+            chevron?.image = Self.chevronImage(expanded: isExpanded)
+            if chevron != nil { setAccessibilityExpanded(isExpanded) }
+        }
     }
+
+    /// The icon column and the text column that the Thinking row and error
+    /// boxes share, so their icons and text line up down the transcript.
+    static let iconLeading: CGFloat = 9
+    static let iconWidth: CGFloat = 14
+    static let textLeading = iconLeading + iconWidth + 7
 
     private let spinner = NSProgressIndicator()
     private let icon = NSImageView()
@@ -407,13 +422,13 @@ final class ToolRowView: NSView, TranscriptRow {
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.iconLeading),
             icon.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            icon.widthAnchor.constraint(equalToConstant: 14),
-            icon.heightAnchor.constraint(equalToConstant: 14),
+            icon.widthAnchor.constraint(equalToConstant: Self.iconWidth),
+            icon.heightAnchor.constraint(equalToConstant: Self.iconWidth),
             spinner.centerXAnchor.constraint(equalTo: icon.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.textLeading),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 5),
             label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
         ])
@@ -428,6 +443,9 @@ final class ToolRowView: NSView, TranscriptRow {
                 label.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -6),
             ])
             label.isSelectable = false
+            // VoiceOver reads the row as one disclosure control, not its parts.
+            setAccessibilityElement(true)
+            label.setAccessibilityElement(false)
             setAccessibilityRole(.disclosureTriangle)
         } else {
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9).isActive = true
@@ -446,6 +464,22 @@ final class ToolRowView: NSView, TranscriptRow {
         heading = Self.heading(tool: tool, detail: detail)
         label.attributedStringValue = heading
         setAccessibilityLabel(heading.string)
+    }
+
+    /// A group header spins only while one of its calls runs; between
+    /// calls it shows an empty circle.
+    func setRunning(_ running: Bool) {
+        guard outcome == .running else { return }
+        if running {
+            icon.isHidden = true
+            spinner.startAnimation(nil)
+        } else {
+            spinner.stopAnimation(nil)
+            icon.image = NSImage(systemSymbolName: "circle.dashed", accessibilityDescription: "Waiting")?
+                .withSymbolConfiguration(.init(pointSize: Theme.Symbol.row, weight: .medium))
+            icon.contentTintColor = .tertiaryLabelColor
+            icon.isHidden = false
+        }
     }
 
     /// A nil `isError` means the call never finished: the agent stopped first.
@@ -487,9 +521,16 @@ final class ToolRowView: NSView, TranscriptRow {
         return chevron != nil && hit != nil ? self : hit
     }
 
-    override func mouseDown(with event: NSEvent) {}
+    override func mouseDown(with event: NSEvent) {
+        if chevron != nil { isPressed = true }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if chevron != nil { isPressed = bounds.contains(convert(event.locationInWindow, from: nil)) }
+    }
 
     override func mouseUp(with event: NSEvent) {
+        isPressed = false
         if chevron != nil, bounds.contains(convert(event.locationInWindow, from: nil)) { onToggle?() }
     }
 
@@ -499,28 +540,59 @@ final class ToolRowView: NSView, TranscriptRow {
         return true
     }
 
+    // A disclosure row takes keyboard focus, and Space or Return toggles it.
+    // Only under Full Keyboard Access, as a button does: otherwise a click
+    // on the row would take the keyboard from the message field.
+    override var acceptsFirstResponder: Bool { chevron != nil && NSApp.isFullKeyboardAccessEnabled }
+
+    override func keyDown(with event: NSEvent) {
+        // Space, Return and the keypad's Enter.
+        if chevron != nil, [49, 36, 76].contains(event.keyCode) {
+            onToggle?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds, xRadius: Theme.Radius.row, yRadius: Theme.Radius.row).fill()
+    }
+
     override var wantsUpdateLayer: Bool { true }
 
-    /// A clickable header darkens a little under the mouse.
+    /// A clickable header darkens a little under the mouse, and more while pressed.
     private var isHovered = false {
         didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
+
+    private var isPressed = false {
+        didSet { if isPressed != oldValue { needsDisplay = true } }
     }
 
     override func updateLayer() {
         layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
-        let alpha = chevron != nil && isHovered ? Theme.Fill.hover : Theme.Fill.rest
-        withEasing { layer?.backgroundColor = Theme.fill(alpha).cgColor }
+        let alpha = chevron == nil ? Theme.Fill.rest
+            : isPressed ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : Theme.Fill.rest
+        withEasing { layer?.backgroundColor = Theme.fill(alpha).layerColor }
         // A fill this faint goes with Increase Contrast; an edge stays.
         layer?.borderWidth = Theme.increaseContrast ? 1 : 0
-        layer?.borderColor = Theme.hairline.cgColor
+        layer?.borderColor = Theme.hairline.layerColor
     }
+
+    /// Only this area is replaced, so the ones AppKit keeps for the tooltip stay.
+    private var hoverArea: NSTrackingArea?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        hoverArea = nil
         guard chevron != nil else { return }
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
@@ -694,7 +766,15 @@ final class ToolGroupView: NSView, TranscriptRow {
     private func updateHeader() {
         // One call has no header to reopen it from, so it stays in view.
         header.isHidden = calls.count < 2
-        rows.isHidden = !header.isExpanded && calls.count > 1
+        let hideRows = !header.isExpanded && calls.count > 1
+        if rows.isHidden && !hideRows {
+            // Shown again from the header, the calls fade in rather than pop.
+            rows.alphaValue = 0
+            rows.isHidden = false
+            withEasing(Theme.Duration.quick) { rows.animator().alphaValue = 1 }
+        } else {
+            rows.isHidden = hideRows
+        }
         var names: [String] = []
         for call in calls {
             let name = ToolRowView.displayName(of: call.tool).lowercased()
@@ -705,7 +785,10 @@ final class ToolGroupView: NSView, TranscriptRow {
             name: "\(calls.count) steps" + (failed > 0 ? " · \(failed) failed" : ""),
             detail: names.joined(separator: ", ")
         )
-        guard !isOpen else { return }
+        guard !isOpen else {
+            header.setRunning(calls.contains { $0.outcome == .running })
+            return
+        }
         let settled = calls.allSatisfy { $0.outcome == .done || $0.outcome == .failed }
         header.finish(isError: failed > 0 ? true : settled ? false : nil, summary: "")
     }
@@ -726,16 +809,20 @@ final class ThinkingRowView: NSView {
         let label = NSTextField(labelWithString: "Thinking…")
         label.font = .systemFont(ofSize: 12)
         label.textColor = .secondaryLabelColor
-        let row = NSStackView(views: [spinner, label])
-        row.spacing = 7
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        for view in [spinner, label] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        // The spinner and text sit in a tool row's columns, so the spinner
+        // stays put when the next step's row takes this one's place.
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            spinner.centerXAnchor.constraint(equalTo: leadingAnchor, constant: ToolRowView.iconLeading + ToolRowView.iconWidth / 2),
+            spinner.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            spinner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
             spinner.widthAnchor.constraint(equalToConstant: 16),
             spinner.heightAnchor.constraint(equalToConstant: 16),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: ToolRowView.textLeading),
+            label.centerYAnchor.constraint(equalTo: spinner.centerYAnchor),
         ])
         setAccessibilityLabel("Thinking")
     }
@@ -748,12 +835,20 @@ final class NoteView: NSView {
     init(text: String) {
         super.init(frame: .zero)
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 11, weight: .medium)
-        label.textColor = .tertiaryLabelColor
+        label.font = .systemFont(ofSize: Theme.FontSize.caption, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        // A long one, such as a scheduled run's name, loses its middle and
+        // keeps the whole text in its tooltip.
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingMiddle
+        label.toolTip = text
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
             label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             label.topAnchor.constraint(equalTo: topAnchor),
             label.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
@@ -784,9 +879,9 @@ final class ErrorMessageView: NSView, TranscriptRow {
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: ToolRowView.iconLeading),
             icon.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 32),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: ToolRowView.textLeading),
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 8),
         ])
@@ -812,7 +907,7 @@ final class ErrorMessageView: NSView, TranscriptRow {
     @objc private func run(_ sender: Any?) { action?() }
 
     func fit(width: CGFloat) {
-        label.preferredMaxLayoutWidth = width - 42
+        label.preferredMaxLayoutWidth = width - ToolRowView.textLeading - 10
     }
 
     override var wantsUpdateLayer: Bool { true }
@@ -820,9 +915,9 @@ final class ErrorMessageView: NSView, TranscriptRow {
     override func updateLayer() {
         layer?.cornerRadius = Theme.Radius.card
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.1).cgColor
+        layer?.backgroundColor = NSColor.systemRed.dynamic(alpha: 0.1).layerColor
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.25).cgColor
+        layer?.borderColor = NSColor.systemRed.dynamic(alpha: 0.25).layerColor
     }
 }
 
@@ -1376,7 +1471,7 @@ final class MarkdownTableView: NSView, TranscriptRow {
         mask.startPoint = CGPoint(x: 0, y: 0.5)
         mask.endPoint = CGPoint(x: 1, y: 0.5)
         let fade = min(0.2, 28 / max(1, visible.width))
-        let clear = NSColor.clear.cgColor, opaque = NSColor.black.cgColor
+        let clear = NSColor.clear.layerColor, opaque = NSColor.black.layerColor
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         mask.frame = scroll.bounds
@@ -1401,6 +1496,9 @@ final class MarkdownTableContentView: NSView {
     private var labels: [[TranscriptLinkLabel]] = []
     /// Each label's width when its text is on one line, measured once.
     private var naturalWidths: [ObjectIdentifier: CGFloat] = [:]
+    /// Each label's height at the column width it was last measured for, so
+    /// a row streaming in doesn't measure every row above it again.
+    private var heights: [ObjectIdentifier: (width: CGFloat, height: CGFloat)] = [:]
     private var width: CGFloat = 0
     private(set) var tableSize = NSSize.zero
     /// Where each row starts, and the bottom of the last.
@@ -1424,6 +1522,7 @@ final class MarkdownTableContentView: NSView {
                         let label = labels[r][c]
                         label.attributedStringValue = rendered
                         naturalWidths[ObjectIdentifier(label)] = nil
+                        heights[ObjectIdentifier(label)] = nil
                     } else {
                         let label = TranscriptLinkLabel(wrappingLabelWithString: "")
                         label.isSelectable = true
@@ -1442,6 +1541,7 @@ final class MarkdownTableContentView: NSView {
 
     private func remove(_ label: TranscriptLinkLabel) {
         naturalWidths[ObjectIdentifier(label)] = nil
+        heights[ObjectIdentifier(label)] = nil
         label.removeFromSuperview()
     }
 
@@ -1467,6 +1567,14 @@ final class MarkdownTableContentView: NSView {
         let width = measure(label, width: .greatestFiniteMagnitude).width
         naturalWidths[key] = width
         return width
+    }
+
+    private func height(of label: TranscriptLinkLabel, width: CGFloat) -> CGFloat {
+        let key = ObjectIdentifier(label)
+        if let cached = heights[key], cached.width == width { return cached.height }
+        let height = measure(label, width: width).height
+        heights[key] = (width, height)
+        return height
     }
 
     private func arrange() {
@@ -1497,7 +1605,7 @@ final class MarkdownTableContentView: NSView {
         var y: CGFloat = 0
         rowEdges = [0]
         for row in labels {
-            let heights = row.enumerated().map { measure($1, width: widths[min($0, columns - 1)]).height }
+            let heights = row.enumerated().map { self.height(of: $1, width: widths[min($0, columns - 1)]) }
             let height = heights.max() ?? 0
             var x: CGFloat = 0
             for (column, label) in row.enumerated() where column < columns {
@@ -1544,6 +1652,9 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     private let document = NSView()
     private let label = NSTextField(labelWithString: "")
     private var code = ""
+    /// The text's size, measured when it changes: it doesn't wrap, so a new
+    /// width leaves it as it was.
+    private var textSize = NSSize.zero
     private var width: CGFloat = 0
     private lazy var height = heightAnchor.constraint(equalToConstant: 0)
     private var copiedReset: DispatchWorkItem?
@@ -1643,6 +1754,10 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         guard code != self.code else { return }
         self.code = code
         label.stringValue = code.isEmpty ? " " : code
+        let measured = label.intrinsicContentSize
+        // Rounded up, plus the cell's 2pt inset on each side: a fractional or
+        // inset-less width clips the last glyph of the longest line.
+        textSize = NSSize(width: ceil(measured.width) + Self.cellInset, height: ceil(measured.height))
         relayout()
     }
 
@@ -1656,10 +1771,7 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     /// padding around it, and the block is as tall as the text.
     private func relayout() {
         let p = Self.padding
-        let measured = label.intrinsicContentSize
-        // Rounded up, plus the cell's 2pt inset on each side: a fractional or
-        // inset-less width clips the last glyph of the longest line.
-        let size = NSSize(width: ceil(measured.width) + Self.cellInset, height: ceil(measured.height))
+        let size = textSize
         let documentWidth = max(size.width + p.left + p.right, width)
         document.frame = NSRect(x: 0, y: 0, width: documentWidth, height: size.height + p.top + p.bottom)
         // The document isn't flipped, so the bottom padding is the origin.
@@ -1687,7 +1799,7 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         mask.startPoint = CGPoint(x: 0, y: 0.5)
         mask.endPoint = CGPoint(x: 1, y: 0.5)
         let fade = min(0.2, 28 / max(1, visible.width))
-        let clear = NSColor.clear.cgColor, opaque = NSColor.black.cgColor
+        let clear = NSColor.clear.layerColor, opaque = NSColor.black.layerColor
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         mask.frame = scroll.bounds
@@ -1708,6 +1820,10 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         copyButton.image = Self.copiedImage
         copyButton.contentTintColor = .systemGreen
         copyButton.toolTip = "Copied"
+        NSAccessibility.post(element: copyButton, notification: .announcementRequested, userInfo: [
+            .announcement: "Copied",
+            .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+        ])
         copiedReset?.cancel()
         let reset = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
@@ -1739,16 +1855,21 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     override func updateLayer() {
         layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = Theme.fill(Theme.Fill.rest).cgColor
+        layer?.backgroundColor = Theme.fill(Theme.Fill.rest).layerColor
         layer?.borderWidth = 1
-        layer?.borderColor = Theme.hairline.cgColor
-        rule.layer?.backgroundColor = Theme.hairline.cgColor
+        layer?.borderColor = Theme.hairline.layerColor
+        rule.layer?.backgroundColor = Theme.hairline.layerColor
     }
+
+    /// Only this area is replaced, so the ones AppKit keeps for tooltips stay.
+    private var hoverArea: NSTrackingArea?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
@@ -1819,7 +1940,7 @@ final class MarkdownQuoteView: NSView, TranscriptRow {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        bar.layer?.backgroundColor = NSColor.tertiaryLabelColor.cgColor
+        bar.layer?.backgroundColor = NSColor.tertiaryLabelColor.layerColor
     }
 }
 
@@ -1836,7 +1957,7 @@ final class MarkdownRuleView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = Theme.hairline.cgColor
+        layer?.backgroundColor = Theme.hairline.layerColor
     }
 }
 

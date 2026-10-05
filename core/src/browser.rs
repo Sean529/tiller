@@ -317,12 +317,32 @@ wrap_request_handler! {
 const MENU_OPEN_LINK: i32 = sys::cef_menu_id_t::MENU_ID_USER_FIRST as i32;
 const MENU_OPEN_LINK_BACKGROUND: i32 = MENU_OPEN_LINK + 1;
 const MENU_COPY_LINK: i32 = MENU_OPEN_LINK + 2;
+const MENU_OPEN_IMAGE: i32 = MENU_OPEN_LINK + 3;
+const MENU_COPY_IMAGE_ADDRESS: i32 = MENU_OPEN_LINK + 4;
+const MENU_INSPECT: i32 = MENU_OPEN_LINK + 5;
+
+/// Opens Chromium's developer tools for the browser in a window of their own,
+/// or brings that window forward, inspecting the element at `inspect_at` in
+/// view coordinates when given.
+pub fn show_dev_tools(host: &BrowserHost, inspect_at: Option<&Point>) {
+    let window_info = WindowInfo { bounds: Rect { x: 120, y: 120, width: 1100, height: 760 }, ..Default::default() };
+    host.show_dev_tools(Some(&window_info), None, Some(&BrowserSettings::default()), inspect_at);
+}
+
+/// Hands `text` to the Swift side for the pasteboard.
+fn copy_text(browser: Option<&mut Browser>, text: &CefString) {
+    if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.copy_text {
+        let text = to_cstring(Some(text));
+        unsafe { f(cb.ctx, text.as_ptr()) };
+    }
+}
 
 wrap_context_menu_handler! {
     struct TillerContextMenuHandler;
 
     impl ContextMenuHandler {
-        /// Puts the link items above CEF's own when the menu is for a link.
+        /// Puts the link and image items above CEF's own when the menu is for
+        /// a link or an image, and Inspect Element at the bottom of every menu.
         fn on_before_context_menu(
             &self,
             _browser: Option<&mut Browser>,
@@ -331,21 +351,29 @@ wrap_context_menu_handler! {
             model: Option<&mut MenuModel>,
         ) {
             let (Some(params), Some(model)) = (params, model) else { return };
+            let flags = params.type_flags().as_ref().0;
             let link = sys::cef_context_menu_type_flags_t::CM_TYPEFLAG_LINK.0;
-            if params.type_flags().as_ref().0 & link == 0 {
-                return;
+            let media = sys::cef_context_menu_type_flags_t::CM_TYPEFLAG_MEDIA.0;
+            let mut items = Vec::new();
+            if flags & link != 0 {
+                items.push((MENU_OPEN_LINK, "Open Link in New Tab"));
+                items.push((MENU_OPEN_LINK_BACKGROUND, "Open Link in Background"));
+                items.push((MENU_COPY_LINK, "Copy Link"));
             }
-            let items = [
-                (MENU_OPEN_LINK, "Open Link in New Tab"),
-                (MENU_OPEN_LINK_BACKGROUND, "Open Link in Background"),
-                (MENU_COPY_LINK, "Copy Link"),
-            ];
+            if flags & media != 0 && params.media_type() == ContextMenuMediaType::IMAGE {
+                items.push((MENU_OPEN_IMAGE, "Open Image in New Tab"));
+                items.push((MENU_COPY_IMAGE_ADDRESS, "Copy Image Address"));
+            }
             for (index, (id, label)) in items.iter().enumerate() {
                 model.insert_item_at(index, *id, Some(&CefString::from(*label)));
             }
-            if model.count() > items.len() {
+            if !items.is_empty() && model.count() > items.len() {
                 model.insert_separator_at(items.len());
             }
+            if model.count() > 0 {
+                model.add_separator();
+            }
+            model.add_item(MENU_INSPECT, Some(&CefString::from("Inspect Element")));
         }
 
         fn on_context_menu_command(
@@ -357,14 +385,16 @@ wrap_context_menu_handler! {
             _event_flags: EventFlags,
         ) -> i32 {
             let Some(params) = params else { return 0 };
-            let url = CefString::from(&params.link_url());
             match command_id {
-                MENU_OPEN_LINK => open_in_tab(browser, Some(&url), false),
-                MENU_OPEN_LINK_BACKGROUND => open_in_tab(browser, Some(&url), true),
-                MENU_COPY_LINK => {
-                    if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.copy_text {
-                        let url = to_cstring(Some(&url));
-                        unsafe { f(cb.ctx, url.as_ptr()) };
+                MENU_OPEN_LINK => open_in_tab(browser, Some(&CefString::from(&params.link_url())), false),
+                MENU_OPEN_LINK_BACKGROUND => open_in_tab(browser, Some(&CefString::from(&params.link_url())), true),
+                MENU_COPY_LINK => copy_text(browser, &CefString::from(&params.link_url())),
+                // A foreground tab, as Safari and Chrome open it.
+                MENU_OPEN_IMAGE => open_in_tab(browser, Some(&CefString::from(&params.source_url())), false),
+                MENU_COPY_IMAGE_ADDRESS => copy_text(browser, &CefString::from(&params.source_url())),
+                MENU_INSPECT => {
+                    if let Some(host) = browser.and_then(|b| b.host()) {
+                        show_dev_tools(&host, Some(&Point { x: params.xcoord(), y: params.ycoord() }));
                     }
                 }
                 _ => return 0,

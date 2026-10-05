@@ -13,15 +13,15 @@ How Tiller's browser features behave. Settings and storage are covered in [Setti
 | Cmd+Shift+] / Cmd+Shift+[, Cmd+Option+Right / Cmd+Option+Left, Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Cmd+1 to Cmd+8, Cmd+9 | That tab, last tab |
 | Middle click on a tab | Close it |
-| Right-click on a tab | New Tab, Reload, Duplicate Tab, Close Tab, Close Other Tabs and Close Tabs to the Right |
+| Right-click on a tab | New Tab, Reload, Duplicate Tab, Close Tab, Close Other Tabs and Close Tabs to the Right (Close Tabs Below in the sidebar) |
 | Drag a tab | Move it along the row or the sidebar |
 | Cmd+Shift+L | Move the tabs between the toolbar and the sidebar |
 
 Menu shortcuts take priority over the page, except Edit menu keys (Cmd+Z, Cmd+A, Cmd+C and so on), which the page gets first so editors in it keep their own handling.
 
-Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view.
+Tabs share the row equally. When there are too many for their titles, they show only their icons, and past that the row scrolls to keep the selected tab in view; scroll or swipe over the row to see the rest, and its ends fade where tabs are cut off. Closing tabs keeps the others at their width until the mouse leaves the row, so the next close button stays under the pointer.
 
-Settings > General > Show tabs, or View > Show Tab Sidebar, moves the tabs into a sidebar on the left. The address bar then takes their place in the toolbar, and the page sits as a card between the sidebar and the agent panel. A New Tab row follows the last tab, and the list scrolls when it is longer than the window. Drag the sidebar's edge to resize it, between 80 and 400 points. The button at its top collapses it to icons and expands it again. The width and the collapsed state are kept per profile.
+Settings > General > Show tabs, or View > Show Tab Sidebar, moves the tabs into a sidebar on the left. The address bar then takes their place in the toolbar, and the page sits as a card between the sidebar and the agent panel. A New Tab row follows the last tab, and the list scrolls when it is longer than the window. Drag the sidebar's edge to resize it, between 80 and 400 points. The button at its top, or View > Collapse Tab Sidebar (Ctrl+Cmd+S), collapses it to icons and expands it again. The width and the collapsed state are kept per profile.
 
 Tiller saves its open tabs as they change and opens them again at the next launch, whether it quit through Cmd+Q, a closed window, a closed last tab or a crash. Each tab reloads its last URL when you first select it, so a launch with many tabs loads only the one in front. Listing the tabs from an agent or the `tiller` tool loads them all. Back/forward history, scroll position and form contents aren't kept. A session of only blank tabs opens the homepage instead. Tabs are still saved when Settings says to open the homepage, so switching back restores the last run's tabs.
 
@@ -36,7 +36,7 @@ Both are stored in `session.json` in the [profile's folder](settings-and-data.md
 | Click | In the same tab |
 | Cmd+click or middle click | In a new tab behind the current one |
 | Cmd+Shift+click or Shift+click | In a new tab, selected |
-| Right-click | A menu with Open Link in New Tab, Open Link in Background and Copy Link above Chromium's own items |
+| Right-click | A menu with Open Link in New Tab, Open Link in Background and Copy Link on a link, and Open Image in New Tab and Copy Image Address on an image, above Chromium's own items, with Inspect Element at the bottom |
 
 New tabs go right after the tab they came from. The same clicks work on the start page's tiles and the address bar's suggestions. In the address bar, Cmd+Return opens what you typed in a new selected tab and Cmd+Shift+Return opens it behind the current one.
 
@@ -69,14 +69,14 @@ Find shortcuts go to the menu before the page, like the other non-Edit shortcuts
 
 The address bar shows the full URL with everything but the site dimmed, after a lock for https pages or a warning sign for http ones. Clicking it or pressing Cmd+L selects the URL, and Escape puts it back after you've typed over it. Reload, which turns into Stop while a page loads, is in the toolbar next to Back and Forward. While a page loads, the bar fills with a faint tint from the left.
 
-A blank tab shows your most visited sites as tiles, one per site, each opening that site's most visited page, and under them the tabs closed most recently. Favicons for the tiles are kept in `history.sqlite` alongside history. With no history and no closed tabs yet, it shows a hint to use the address bar. The tiles are only rebuilt when history has changed since the last new tab.
+A blank tab shows your most visited sites as tiles, one per site, each opening that site's most visited page, and under them the tabs closed most recently, when the window is tall enough for both. Favicons for the tiles are kept in `history.sqlite` alongside history. With no history and no closed tabs yet, it shows a hint to use the address bar. The tiles are only rebuilt when history has changed since the last new tab. Going somewhere from a blank tab keeps this page up until the new page arrives, instead of a white page in between, and in dark mode a tab opened on a link stays dark until its page has had a moment to draw.
 
 ## History
 
 Tiller keeps its own history in `history.sqlite` in its data folder. Chromium's History file can't be used: CEF has no API for it and holds it locked. A page is saved once it finishes loading, and again when its URL or title changes after that.
 
 - Typing in the address bar lists what you typed, as a search or a site, then the matching pages, with the part of each title that matches in bold. Up and Down move through the list, Return opens the highlighted row, Escape closes the list. The typed row starts highlighted, unless the best match's address starts with what you typed, in which case that page does, so Return goes there instead of searching. While you type, the bar shows a magnifying glass in place of the page's lock.
-- The History menu lists the 15 most recent pages. History > Clear History… empties it, along with the start page's saved favicons and the recently closed tabs.
+- The History menu lists the 15 most recent pages with their sites' favicons. Choosing one opens it in the current tab; Cmd opens it in a new tab behind the current one and Cmd+Shift in a new selected tab. History > Clear History… empties it, along with the start page's saved favicons and the recently closed tabs.
 
 ## Saved passwords
 
@@ -84,7 +84,7 @@ Passwords come from the Chrome import; Tiller doesn't offer to save new ones. On
 
 Tiller never fills on its own. The agent's tools can read anything on the page, so a password you fill can be read by the agent until the page navigates away.
 
-Settings > Passwords lists the saved logins, with buttons to copy a password or remove logins.
+Settings > Passwords lists the saved logins, with a field to search them by site or username and buttons to copy a password or remove logins. Tiller asks before removing any. A copied password is marked so clipboard managers leave it out of their history, and it stays off Universal Clipboard.
 
 Storage: `passwords.json` in the data folder, readable only by you. Sites and usernames are stored in the clear, as Chrome stores them, so Tiller knows which pages have a login without unlocking anything. Each password is sealed with AES-GCM under a key kept in the login keychain as "Tiller Saved Passwords", one per profile: account `key` for the default profile and `key.<id>` for the others. Tiller is ad-hoc signed, so after a rebuild macOS may ask before the new binary can read that key.
 

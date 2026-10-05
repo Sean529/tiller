@@ -4,15 +4,15 @@ import AppKit
 
 /// Settings > Scheduled: the profile's scheduled prompts, with buttons to
 /// add, edit, run and remove them.
-final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     static let paneTitle = "Scheduled"
 
-    private let table = NSTableView()
+    private let table = SettingsTableView()
     private let addButton = NSButton(title: "Add…", target: nil, action: nil)
     private let editButton = NSButton(title: "Edit…", target: nil, action: nil)
     private let runButton = NSButton(title: "Run Now", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
-    private let note = SettingsPane.wrappingNote(width: 680)
+    private let note = SettingsPane.wrappingNote(width: SettingsPane.tableWidth)
     private var placeholder: NSTextField?
     /// The editor sheet while it is open.
     private var editorWindow: NSWindow?
@@ -37,7 +37,7 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     override func loadView() {
         for (id, title, width) in [
             ("on", "On", 30.0), ("name", "Name", 130.0), ("rule", "Runs", 140.0), ("next", "Next Run", 120.0),
-            ("last", "Last Run", 220.0),
+            ("last", "Last Run", 180.0),
         ] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = title
@@ -78,8 +78,8 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         let view = NSView()
         view.addSubview(stack)
         NSLayoutConstraint.activate([
-            scroll.widthAnchor.constraint(equalToConstant: 680),
-            scroll.heightAnchor.constraint(equalToConstant: 260),
+            scroll.widthAnchor.constraint(equalToConstant: SettingsPane.tableWidth),
+            scroll.heightAnchor.constraint(equalToConstant: SettingsPane.tableHeight),
             buttons.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -116,7 +116,7 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         SettingsPane.show(
             "Each run sends its prompt in a new chat in the agent panel, while this profile's Tiller is open. "
                 + "A run missed while Tiller was closed or the Mac slept happens once when it's back. "
-                + "Agents can also create and change these when you ask them to in a chat.",
+                + "Agents can also create and change these when asked in a chat.",
             in: note
         )
     }
@@ -126,12 +126,11 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         guard schedules.indices.contains(row) else { return nil }
         let schedule = schedules[row]
-        func label(_ text: String, secondary: Bool = true) -> NSTextField {
-            let label = NSTextField(labelWithString: text)
-            label.lineBreakMode = .byTruncatingTail
-            label.textColor = secondary ? .secondaryLabelColor : .labelColor
-            label.toolTip = text
-            return label
+        func label(_ text: String, secondary: Bool = true) -> NSTableCellView {
+            let cell = SettingsPane.textCell(tableView, text)
+            cell.textField?.textColor = secondary ? .secondaryLabelColor : .labelColor
+            cell.textField?.toolTip = text
+            return cell
         }
         switch column?.identifier.rawValue {
         case "on":
@@ -142,7 +141,7 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
             return checkbox
         case "name":
             let name = label(schedule.name, secondary: false)
-            name.toolTip = schedule.prompt
+            name.textField?.toolTip = schedule.prompt
             return name
         case "rule":
             return label(schedule.rule.displayText)
@@ -153,7 +152,7 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
             guard let date = schedule.lastRun else { return label("Never") }
             let text = Self.dateFormatter.string(from: date) + (schedule.lastResult.map { " · " + $0.displayText } ?? "")
             let last = label(text)
-            if schedule.lastResult?.isProblem == true { last.textColor = .systemRed }
+            if schedule.lastResult?.isProblem == true { last.textField?.textColor = .systemRed }
             return last
         }
     }
@@ -169,6 +168,16 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
 
     @objc private func add(_ sender: Any?) {
         presentEditor(for: nil)
+    }
+
+    /// Edit > Delete and the Delete key remove the selected schedules, after asking.
+    @objc func delete(_ sender: Any?) {
+        guard removeButton.isEnabled else { return NSSound.beep() }
+        remove(sender)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(delete(_:)) ? removeButton.isEnabled : true
     }
 
     @objc private func edit(_ sender: Any?) {
@@ -234,6 +243,16 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
 }
 
 // MARK: Editor
+
+/// A button that lets its key equivalent through to the focused view while
+/// `passesKeyEquivalent` says so.
+final class PassingButton: NSButton {
+    var passesKeyEquivalent: () -> Bool = { false }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        passesKeyEquivalent() ? false : super.performKeyEquivalent(with: event)
+    }
+}
 
 /// The sheet that adds or edits a scheduled prompt: its name, agent, tools,
 /// when it runs and the prompt, where `/` picks a skill as in the panel.
@@ -340,7 +359,9 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         unitPopUp.action = #selector(ruleChanged(_:))
         let intervalStack = NSStackView(views: [intervalField, unitPopUp])
         intervalStack.spacing = 8
-        intervalRow = addRow("Every:", intervalStack)
+        let intervalRow = addRow("Every:", intervalStack)
+        SettingsPane.linkLabel(of: intervalRow, to: intervalField)
+        self.intervalRow = intervalRow
 
         timePicker.datePickerStyle = .textFieldAndStepper
         timePicker.datePickerElements = .hourMinute
@@ -375,7 +396,7 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         }
         rulePopUp.selectItem(withTag: ruleKind.rawValue)
 
-        let scroll = NSTextView.scrollableTextView()
+        let scroll = BoxedTextView.scrollableTextView()
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -408,8 +429,13 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         addNote(SettingsPane.note("Start with /name to call a skill. Type / to pick one."))
         grid.column(at: 0).xPlacement = .trailing
 
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
+        // Escape closes the skill picker while it shows, and the sheet otherwise.
+        let cancel = PassingButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
         cancel.keyEquivalent = "\u{1b}"
+        cancel.passesKeyEquivalent = { [weak self] in
+            guard let self else { return false }
+            return !self.completion.picker.isHidden && self.view.window?.firstResponder === self.promptView
+        }
         // Return adds a line in the prompt, so saving takes Cmd+Return.
         let save = NSButton(title: "Save", target: self, action: #selector(save(_:)))
         save.keyEquivalent = "\r"
@@ -434,7 +460,8 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
             grid.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             grid.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             grid.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            buttons.topAnchor.constraint(equalTo: grid.bottomAnchor, constant: 16),
+            // At least: the sheet keeps extra room here while it eases to a new height.
+            buttons.topAnchor.constraint(greaterThanOrEqualTo: grid.bottomAnchor, constant: 16),
             buttons.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             buttons.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             buttons.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -454,9 +481,12 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         view.window?.makeFirstResponder(original == nil ? nameField : promptView)
     }
 
+    /// A labeled row; VoiceOver reads the label as the control's title.
     @discardableResult
     private func addRow(_ label: String, _ control: NSView) -> NSGridRow {
-        grid.addRow(with: [NSTextField(labelWithString: label), control])
+        let title = NSTextField(labelWithString: label)
+        if !(control is NSStackView) { control.setAccessibilityTitleUIElement(title) }
+        return grid.addRow(with: [title, control])
     }
 
     private func addNote(_ note: NSTextField) {
@@ -501,10 +531,32 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         }
     }
 
+    /// A new kind of rule shows other rows, so the sheet eases to the new
+    /// height with its top edge in place. The interval's unit and the time
+    /// change only the note.
     @objc private func ruleChanged(_ sender: Any?) {
+        guard sender as? NSPopUpButton === rulePopUp, let window = view.window else { return showRuleRows() }
+        let rows = [intervalRow, timeRow, cronRow]
+        let wasHidden = rows.map { $0?.isHidden ?? true }
         showRuleRows()
-        view.layoutSubtreeIfNeeded()
-        view.window?.setContentSize(view.fittingSize)
+        let size = view.fittingSize
+        // Rows that need more room than the sheet has show once it has grown,
+        // since they can't be squeezed meanwhile.
+        let grows = size.height > view.frame.height
+        if grows {
+            for (row, hidden) in zip(rows, wasHidden) { row?.isHidden = hidden }
+        }
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.reduceMotion ? 0 : Theme.Duration.panel
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().setFrame(frame, display: true)
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                if grows { self?.showRuleRows() }
+            }
+        }
     }
 
     @objc private func kindChanged(_ sender: Any?) {

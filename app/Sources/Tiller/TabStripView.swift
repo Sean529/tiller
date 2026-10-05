@@ -29,6 +29,8 @@ final class TabStripView: NSView {
             guard orientation != oldValue else { return }
             drag = nil
             scrollOffset = 0
+            frozenLength = nil
+            userScrolled = false
             newTabRow.isHidden = !isVertical
             layoutItems(animated: false)
         }
@@ -40,6 +42,7 @@ final class TabStripView: NSView {
     private static let minTabWidth: CGFloat = 34
     private static let rowHeight: CGFloat = 34
     private static let animationDuration = Theme.Duration.slide
+    private static let edgeFadeLength: CGFloat = 16
 
     private var items: [TabItemView] = []
     private var selectedItem: TabItemView?
@@ -49,12 +52,28 @@ final class TabStripView: NSView {
     private var drag: (item: TabItemView, start: CGFloat, origin: CGFloat, moved: Bool)?
     /// Follows the last tab of a column.
     private let newTabRow = NewTabRowView()
+    /// The tab width held while tabs close under the mouse, so the next
+    /// close button stays where the last one was, as in Safari. Let go when
+    /// the mouse leaves the row.
+    private var frozenLength: CGFloat?
+    /// The user scrolled the row, so a layout doesn't scroll it back to the
+    /// selected tab until the selection changes.
+    private var userScrolled = false
+    /// Fades the ends of a row that is scrolled past them.
+    private let edgeFade = CAGradientLayer()
 
     override var isFlipped: Bool { true }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         clipsToBounds = true
+        wantsLayer = true
+        edgeFade.startPoint = CGPoint(x: 0, y: 0.5)
+        edgeFade.endPoint = CGPoint(x: 1, y: 0.5)
+        // VoiceOver reads the tabs as one group, with each one's place in it.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.tabGroup)
+        setAccessibilityLabel("Tabs")
         newTabRow.isHidden = true
         newTabRow.onClick = { [weak self] in self.map { $0.delegate?.tabStripNewTab($0) } }
         addSubview(newTabRow)
@@ -67,6 +86,8 @@ final class TabStripView: NSView {
     func update(tabs: [Tab], selected: Tab?) {
         // The row changed under a drag; the drag's order no longer holds.
         drag = nil
+        let lengthBefore = tabLength
+        let selectedBefore = selectedItem
         var existing = Dictionary(uniqueKeysWithValues: items.map { (ObjectIdentifier($0.tab), $0) })
         var added: [TabItemView] = []
         items = tabs.map { tab in
@@ -81,6 +102,12 @@ final class TabStripView: NSView {
         }
         existing.values.forEach { $0.removeFromSuperview() }
         selectedItem = items.first { $0.tab === selected }
+        if selectedItem !== selectedBefore { userScrolled = false }
+        if !added.isEmpty {
+            frozenLength = nil
+        } else if !existing.isEmpty, !isVertical, isMouseInside {
+            frozenLength = frozenLength ?? lengthBefore
+        }
         // Selection changes redraw the two tabs concerned on their own; a tab
         // whose title or icon changed came through `refresh(_:)` already.
         for item in items { item.isSelected = item === selectedItem }
@@ -95,15 +122,48 @@ final class TabStripView: NSView {
 
     override func layout() {
         super.layout()
-        // A column stays where the user scrolled it.
-        layoutItems(animated: false, reveal: !isVertical)
+        // A column, or a row the user scrolled, stays where it was put.
+        layoutItems(animated: false, reveal: !isVertical && !userScrolled)
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard isVertical else { return super.scrollWheel(with: event) }
-        scrollOffset -= event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 1 : 10)
+        var delta = event.scrollingDeltaY
+        if !isVertical {
+            guard overflows else { return super.scrollWheel(with: event) }
+            // A trackpad swipes sideways; a plain mouse wheel only turns.
+            if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) { delta = event.scrollingDeltaX }
+            userScrolled = true
+        }
+        scrollOffset -= delta * (event.hasPreciseScrollingDeltas ? 1 : 10)
         layoutItems(animated: false, reveal: false)
     }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard frozenLength != nil else { return }
+        frozenLength = nil
+        layoutItems(animated: true, reveal: !userScrolled)
+    }
+
+    private var isMouseInside: Bool {
+        guard let window else { return false }
+        return bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+    }
+
+    // MARK: Accessibility
+
+    // In the order shown, which the subviews lose while a tab is dragged.
+    override func accessibilityChildren() -> [Any]? {
+        isVertical ? items as [NSView] + [newTabRow] : items
+    }
+
+    override func accessibilityTabs() -> [Any]? { items }
 
     // MARK: Layout
 
@@ -115,9 +175,16 @@ final class TabStripView: NSView {
     /// A tab's size along the row or column.
     private var tabLength: CGFloat {
         if isVertical { return Self.rowHeight }
+        if let frozenLength { return frozenLength }
         let count = CGFloat(max(1, items.count))
         let fit = (bounds.width - spacing * (count - 1)) / count
         return min(Self.maxTabWidth, max(Self.minTabWidth, fit)).rounded(.down)
+    }
+
+    /// The tabs, and a column's New Tab row, take more room than there is.
+    private var overflows: Bool {
+        let slots = CGFloat(items.count + (isVertical ? 1 : 0))
+        return slots * (tabLength + spacing) - spacing > extent
     }
 
     private func slot(_ index: Int, length: CGFloat) -> NSRect {
@@ -146,6 +213,7 @@ final class TabStripView: NSView {
             }
             scrollOffset = min(max(0, scrollOffset), total - extent)
         }
+        updateEdgeFade(overflowing: total > extent, total: total)
         for item in fadeIn {
             item.frame = slot(items.firstIndex(of: item) ?? 0, length: length)
             item.alphaValue = 0
@@ -174,6 +242,28 @@ final class TabStripView: NSView {
                 newTabRow.frame = frame
             }
         }
+    }
+
+    /// Fades a row's leading end when tabs are scrolled past it and its
+    /// trailing end when more follow, so clipped tabs show they are there.
+    private func updateEdgeFade(overflowing: Bool, total: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard !isVertical, overflowing, bounds.width > 0 else {
+            layer?.mask = nil
+            return
+        }
+        let fade = min(Self.edgeFadeLength / bounds.width, 0.5)
+        let opaque = CGColor(gray: 0, alpha: 1)
+        let clear = CGColor(gray: 0, alpha: 0)
+        edgeFade.colors = [
+            scrollOffset > 0.5 ? clear : opaque, opaque, opaque,
+            scrollOffset < total - extent - 0.5 ? clear : opaque,
+        ]
+        edgeFade.locations = [0, NSNumber(value: Double(fade)), NSNumber(value: Double(1 - fade)), 1]
+        edgeFade.frame = bounds
+        if layer?.mask !== edgeFade { layer?.mask = edgeFade }
     }
 
     // MARK: Dragging
@@ -265,8 +355,8 @@ final class TabItemView: NSView {
     private let icon = FaviconView()
     private let spinner = NSProgressIndicator()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let closeButton = NSButton()
-    private var isHovered = false { didSet { updateAppearance() } }
+    private let closeButton = HoverButton()
+    private var isHovered = false { didSet { if isHovered != oldValue { updateAppearance() } } }
     private var isPressed = false { didSet { updateAppearance() } }
     private var iconLeading: NSLayoutConstraint!
     private var iconCentered: NSLayoutConstraint!
@@ -276,6 +366,7 @@ final class TabItemView: NSView {
 
     private static let globe = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
     private static let closeImage = Theme.closeImage(size: 9, label: "Close Tab")
+    private static let closeSize: CGFloat = 18
 
     init(tab: Tab) {
         self.tab = tab
@@ -310,6 +401,8 @@ final class TabItemView: NSView {
         closeButton.target = self
         closeButton.action = #selector(closeClicked)
         closeButton.toolTip = "Close Tab"
+        // A round plate under the mouse, as in Safari.
+        closeButton.plateRadius = Self.closeSize / 2
 
         for view in [icon, spinner, titleLabel, closeButton] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -333,8 +426,8 @@ final class TabItemView: NSView {
             spinner.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
             closeOverIcon,
             closeButton.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
-            closeButton.widthAnchor.constraint(equalToConstant: 18),
-            closeButton.heightAnchor.constraint(equalToConstant: 18),
+            closeButton.widthAnchor.constraint(equalToConstant: Self.closeSize),
+            closeButton.heightAnchor.constraint(equalToConstant: Self.closeSize),
 
             titleLeading,
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
@@ -360,10 +453,10 @@ final class TabItemView: NSView {
     private func updateAppearance() {
         let fill = Theme.fill(hovered: isHovered, pressed: isPressed, selected: isSelected)
         // The fill eases between rest, hover and selected rather than snapping.
-        withEasing { layer?.backgroundColor = fill.cgColor }
+        withEasing { layer?.backgroundColor = fill.layerColor }
         // Under Increase Contrast the selected tab gets an outline too.
         layer?.borderWidth = Theme.hairlineWidth
-        layer?.borderColor = Theme.selectionOutline(selected: isSelected).cgColor
+        layer?.borderColor = Theme.selectionOutline(selected: isSelected).layerColor
         // Unselected titles in secondary gray read as disabled; the weight
         // alone marks the selected one.
         titleLabel.textColor = .labelColor
@@ -395,6 +488,11 @@ final class TabItemView: NSView {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(
             rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+        // A tab that slides under a still mouse, or out from under it, gets
+        // no enter or exit event.
+        if let window, NSApp.isActive {
+            isHovered = bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        }
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
@@ -509,7 +607,7 @@ final class NewTabRowView: NSView {
     override func updateLayer() {
         super.updateLayer()
         let fill = Theme.fill(hovered: isHovered, pressed: isPressed)
-        withEasing { layer?.backgroundColor = fill.cgColor }
+        withEasing { layer?.backgroundColor = fill.layerColor }
     }
 
     override func updateTrackingAreas() {

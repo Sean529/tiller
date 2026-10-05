@@ -42,6 +42,9 @@ struct SwiftHandler {
 enum Reply {
     /// The JSON text of `{"result": ...}` or `{"error": ...}`, ready to send.
     Text(String),
+    /// The app's reply as the bytes it sent, turned into text on the
+    /// connection's thread.
+    Bytes(Vec<u8>),
     /// A DevTools message as Chromium sent it, split into result or error on
     /// the connection's thread.
     DevTools(Vec<u8>),
@@ -201,6 +204,7 @@ fn dispatch(request: Request) -> String {
     }
     match rx.recv_timeout(REPLY_TIMEOUT) {
         Ok(Reply::Text(reply)) => reply,
+        Ok(Reply::Bytes(reply)) => String::from_utf8(reply).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
         Ok(Reply::DevTools(message)) => devtools_reply(&message),
         Err(_) => {
             take(token);
@@ -261,6 +265,12 @@ pub fn reply(token: u64, reply: Value) {
 /// Like `reply`, with the reply already as JSON text.
 pub fn reply_raw(token: u64, reply: String) {
     send(token, Reply::Text(reply));
+}
+
+/// Like `reply_raw`, with the reply as JSON bytes, which are checked for
+/// UTF-8 on the waiting thread rather than here.
+pub fn reply_bytes(token: u64, reply: Vec<u8>) {
+    send(token, Reply::Bytes(reply));
 }
 
 /// Answers `token` with a DevTools message, which is read on the waiting

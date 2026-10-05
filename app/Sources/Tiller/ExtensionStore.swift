@@ -280,12 +280,15 @@ final class ExtensionStore {
         }
         self.loaded = loaded
         launchPaths = loaded.map(\.folder)
-        // Deleting folders can take a while; the window needn't wait for it.
-        let unused = unusedFolders()
-        if !unused.isEmpty {
-            Task.detached(priority: .utility) {
-                for folder in unused { try? FileManager.default.removeItem(atPath: folder) }
-            }
+        Self.removeLater(unusedFolders())
+    }
+
+    /// Deletes folders off the main thread. An unpacked extension can be
+    /// thousands of files; the window needn't wait for them.
+    private nonisolated static func removeLater(_ folders: [String]) {
+        guard !folders.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for folder in folders { try? FileManager.default.removeItem(atPath: folder) }
         }
     }
 
@@ -402,7 +405,7 @@ final class ExtensionStore {
             let entry = entries.remove(at: index)
             manifests[entry.path] = nil
             if entry.source.owned && !launchPaths.contains(entry.path) {
-                try? FileManager.default.removeItem(atPath: entry.path)
+                Self.removeLater([entry.path])
             }
         }
         save()
@@ -456,13 +459,13 @@ final class ExtensionStore {
         }
         let old = entries[index]
         guard old.source.owned else {
-            try? FileManager.default.removeItem(atPath: folder)
+            Self.removeLater([folder])
             throw ExtensionError.alreadyAdded(manifest.name)
         }
         entries[index].path = folder
         entries[index].source = source
         manifests[old.path] = nil
-        if !launchPaths.contains(old.path) { try? FileManager.default.removeItem(atPath: old.path) }
+        if !launchPaths.contains(old.path) { Self.removeLater([old.path]) }
         save()
         return manifest
     }

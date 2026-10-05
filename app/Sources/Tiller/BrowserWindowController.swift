@@ -36,6 +36,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let backButton = NSButton()
     private let forwardButton = NSButton()
     private let reloadButton = NSButton()
+    private var reloadItem: NSToolbarItem?
+    /// Whether the reload button shows Stop, or nil before the first tab.
+    private var showsStop: Bool?
     private let newTabButton = NSButton()
     /// Names the profile and opens the Profiles menu. Hidden with one profile.
     private let profileButton = NSButton()
@@ -58,6 +61,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         bar.onClose = { [weak self] in self?.hideFindBar(focusPage: true) }
         return bar
     }()
+    /// Whether the find bar is up. It stays in the view while it fades out.
+    private var findBarShown = false
     /// Shown over the selected tab while it is blank.
     private lazy var startPage: StartPageView = {
         let view = StartPageView()
@@ -371,16 +376,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         showLoading(tab.isLoading)
         backButton.isEnabled = tab.canGoBack
         forwardButton.isEnabled = tab.canGoForward
-        window?.title = tab.displayTitle
+        updateWindowTitle()
         addressBar.keyButton.isHidden = savedLogins(for: tab).isEmpty
         addressBar.showZoom(tab.zoomFactor)
         updateStartPage(for: tab)
     }
 
     /// Puts the start page over `tab` while it is blank, and takes it away once
-    /// the tab goes somewhere.
+    /// the page it goes to has arrived.
     private func updateStartPage(for tab: Tab) {
-        if tab.isBlank {
+        if tab.isBlank || tab.isLeavingBlank {
             guard startPage.superview !== tab.hostView else { return }
             startPage.frame = tab.hostView.bounds
             startPage.autoresizingMask = [.width, .height]
@@ -424,7 +429,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func tab(_ tab: Tab, foundMatches count: Int, active: Int, final: Bool) {
-        guard tab === selectedTab, findBar.superview != nil, !findBar.text.isEmpty else { return }
+        guard tab === selectedTab, findBarShown, !findBar.text.isEmpty else { return }
         findBar.showCount((count, active))
     }
 
@@ -617,7 +622,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         let others = MenuActionItem(title: "Close Other Tabs") { [weak self] in self?.closeTabs { $0 !== tab } }
         others.isEnabled = tabs.count > 1
         menu.addItem(others)
-        let right = MenuActionItem(title: "Close Tabs to the Right") { [weak self] in
+        // Stacked in the sidebar, the later tabs are below this one.
+        let right = MenuActionItem(title: tabLayout == .vertical ? "Close Tabs Below" : "Close Tabs to the Right") { [weak self] in
             guard let self, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
             self.closeTabs { candidate in self.tabs.firstIndex { $0 === candidate }.map { $0 > index } ?? false }
         }
@@ -722,13 +728,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     @objc func showFindBar(_ sender: Any?) {
         guard selectedTab != nil else { return }
-        if findBar.superview == nil {
+        if !findBarShown {
+            findBarShown = true
+            // Put back on top, in case a tab was selected over it while it
+            // faded out.
+            findBar.removeFromSuperview()
             findBar.translatesAutoresizingMaskIntoConstraints = false
+            findBar.alphaValue = 0
             contentView.addSubview(findBar, positioned: .above, relativeTo: nil)
             NSLayoutConstraint.activate([
-                findBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
-                findBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+                findBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Padding.row),
+                findBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Padding.panel),
+                // A narrow page squeezes the bar rather than cutting off its left side.
+                findBar.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: Theme.Padding.panel),
             ])
+            withEasing(Theme.Duration.quick) { findBar.animator().alphaValue = 1 }
             if !findBar.text.isEmpty { find(findBar.text) }
         }
         window?.makeFirstResponder(findBar.field)
@@ -750,13 +764,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     private func findAgain(forward: Bool) {
         guard let tab = selectedTab, !findBar.text.isEmpty else { return showFindBar(nil) }
-        if findBar.superview == nil { showFindBar(nil) }
+        if !findBarShown { showFindBar(nil) }
         tab.find(findBar.text, forward: forward, next: true)
     }
 
+    /// Fades the bar out and takes it away, unless it is shown again first.
+    /// The search stops and the focus moves at once.
     private func hideFindBar(focusPage: Bool) {
-        guard findBar.superview != nil else { return }
-        findBar.removeFromSuperview()
+        guard findBarShown else { return }
+        findBarShown = false
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.reduceMotion ? 0 : Theme.Duration.quick
+            findBar.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.findBarShown else { return }
+                self.findBar.removeFromSuperview()
+            }
+        }
         selectedTab?.stopFinding()
         findBar.showCount(nil)
         if focusPage { selectedTab?.focus() }
@@ -773,8 +798,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         updateAgentBadge()
         agentToggleCount += 1
         let count = agentToggleCount
-        roundPage()
+        // The page's corner by the panel rounds before the panel slides in
+        // and squares once it has slid out, so the page never shows a square,
+        // unoutlined edge beside an empty gap.
         if agentPanelShown {
+            roundPage()
             agentPanel.isHidden = false
             splitView.adjustSubviews()
             window?.makeFirstResponder(agentPanel.input)
@@ -784,6 +812,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             slideAgentPanel(to: agentPanel.bounds.width, count: count) { [weak self] in
                 self?.agentPanel.isHidden = true
                 self?.splitView.adjustSubviews()
+                self?.roundPage()
             }
         }
     }
@@ -812,7 +841,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         let animation = CABasicAnimation(keyPath: "transform.translation.x")
         animation.fromValue = start
         animation.toValue = offset
-        animation.duration = 0.2
+        animation.duration = Theme.Duration.panel
         animation.timingFunction = CAMediaTimingFunction(name: offset == 0 ? .easeOut : .easeIn)
         // Stays at the end until `finish` hides the panel, so it doesn't flash back.
         animation.fillMode = .forwards
@@ -828,7 +857,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// tooltip, which can't see the dot.
     private func updateAgentBadge() {
         let shown = agentPanel.isBusy && !agentPanelShown
-        agentBadge.isHidden = !shown
+        withEasing(Theme.Duration.quick) { agentBadge.animator().alphaValue = shown ? 1 : 0 }
         let label = shown ? "Agent (working)" : "Agent"
         agentButton.toolTip = label
         agentButton.setAccessibilityLabel(label)
@@ -915,8 +944,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         if item.action == #selector(toggleTabSidebar(_:)) {
             item.title = tabLayout == .vertical ? "Hide Tab Sidebar" : "Show Tab Sidebar"
         }
+        if item.action == #selector(toggleSidebarCollapsed(_:)) {
+            item.title = sidebar.isCollapsed ? "Expand Tab Sidebar" : "Collapse Tab Sidebar"
+        }
         return switch item.action {
         case #selector(toggleAgentPanel(_:)), #selector(toggleTabSidebar(_:)): fullscreenTab == nil
+        case #selector(toggleSidebarCollapsed(_:)): tabLayout == .vertical && fullscreenTab == nil
         case #selector(stopLoading(_:)): selectedTab?.isLoading ?? false
         case #selector(printPage(_:)), #selector(showDevTools(_:)), #selector(viewPageSource(_:)):
             selectedTab.map { !$0.isBlank } ?? false
@@ -1079,7 +1112,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         splitView.setPosition(width, ofDividerAt: 0)
     }
 
-    @objc private func toggleSidebarCollapsed(_ sender: Any?) {
+    /// Collapses the sidebar to icons or expands it, from its button or the
+    /// View menu.
+    @objc func toggleSidebarCollapsed(_ sender: Any?) {
+        guard tabLayout == .vertical, fullscreenTab == nil else { return }
         sidebar.isCollapsed.toggle()
         Settings.sidebarCollapsed = sidebar.isCollapsed
         fitSidebar()
@@ -1093,10 +1129,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         Settings.defaults.set(Double(sidebarWidth), forKey: Self.sidebarWidthKey)
     }
 
+    private static let reloadImage = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Reload")
+    private static let stopImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Stop")
+
+    /// Turns Reload into Stop while the page loads. Only a change of state
+    /// touches the button, since this runs on every update of the selected tab.
     private func showLoading(_ loading: Bool) {
-        reloadButton.image = NSImage(
-            systemSymbolName: loading ? "xmark" : "arrow.clockwise", accessibilityDescription: loading ? "Stop" : "Reload")
-        reloadButton.toolTip = loading ? "Stop" : "Reload"
+        guard loading != showsStop else { return }
+        showsStop = loading
+        reloadButton.image = loading ? Self.stopImage : Self.reloadImage
+        let label = loading ? "Stop" : "Reload"
+        reloadButton.toolTip = label
+        reloadItem?.label = label
     }
 
     /// Shows the profile's name in the toolbar and window title, or hides it
@@ -1105,8 +1149,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         profileName = name
         profileButton.title = name ?? ""
         profileItem?.isHidden = name == nil
-        window?.title = name.map { "Tiller – \($0)" } ?? "Tiller"
+        updateWindowTitle()
         fitTabStrip()
+    }
+
+    /// The selected page's title, then the profile's name when there are
+    /// several, for the Window menu, Mission Control and VoiceOver, where two
+    /// profiles' windows need telling apart.
+    private func updateWindowTitle() {
+        let page = selectedTab?.displayTitle ?? "Tiller"
+        window?.title = profileName.map { "\(page) – \($0)" } ?? page
     }
 
     @objc private func showProfilesMenu(_ sender: NSButton) {
@@ -1161,7 +1213,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         profileButton.action = #selector(showProfilesMenu(_:))
         agentButton.setButtonType(.pushOnPushOff)
         agentButton.state = agentPanel.isHidden ? .off : .on
-        agentBadge.isHidden = true
+        // Faded out rather than hidden, so it can ease in and out.
+        agentBadge.alphaValue = 0
         agentBadge.translatesAutoresizingMaskIntoConstraints = false
         agentButton.addSubview(agentBadge)
         NSLayoutConstraint.activate([
@@ -1243,7 +1296,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         switch id {
         case Item.back: item.view = backButton; item.label = "Back"
         case Item.forward: item.view = forwardButton; item.label = "Forward"
-        case Item.reload: item.view = reloadButton; item.label = "Reload"
+        case Item.reload:
+            item.view = reloadButton
+            item.label = showsStop == true ? "Stop" : "Reload"
+            reloadItem = item
         case Item.newTab: item.view = newTabButton; item.label = "New Tab"
         case Item.agent: item.view = agentButton; item.label = "Agent"
         case Item.extensions:
@@ -1539,12 +1595,10 @@ extension BrowserWindowController {
 
 extension BrowserWindowController {
     /// A page from the History menu. The URL is the item's represented object.
+    /// Cmd and Cmd+Shift open it in a new tab, as a click on a link does.
     @objc func openHistoryItem(_ sender: Any?) {
         guard let url = (sender as? NSMenuItem)?.representedObject as? String else { return }
-        guard let tab = selectedTab else { return }
-        tab.load(url)
-        tab.focus()
-        tabDidChange(tab)
+        open(url, .click(OpenDisposition.currentFlags))
     }
 
     @objc func clearHistory(_ sender: Any?) {
@@ -1649,9 +1703,9 @@ final class StatusBubbleView: NSView {
         layer.cornerRadius = Theme.Radius.row
         layer.cornerCurve = .continuous
         layer.maskedCorners = [.layerMaxXMaxYCorner]
-        layer.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
+        layer.backgroundColor = NSColor.windowBackgroundColor.dynamic(alpha: 0.96).layerColor
         layer.borderWidth = Theme.hairlineWidth
-        layer.borderColor = Theme.hairline.cgColor
+        layer.borderColor = Theme.hairline.layerColor
     }
 
     /// Shows `text`, or hides the bubble when it is empty. The URL loses its
@@ -1740,7 +1794,7 @@ final class PageCardView: NSView {
         outline.isHidden = !isCard
         outline.cornerRadius = Theme.Radius.card
         outline.maskedCorners = corners
-        outline.borderColor = Theme.hairline.cgColor
+        outline.borderColor = Theme.hairline.layerColor
         CATransaction.commit()
         if outline.superlayer == nil { layer.addSublayer(outline) }
     }
@@ -1776,8 +1830,11 @@ private final class AgentBadgeView: NSView {
 
     override func updateLayer() {
         layer?.cornerRadius = Theme.busyDot / 2
-        layer?.backgroundColor = Theme.accentColor.cgColor
+        layer?.backgroundColor = Theme.accentColor.layerColor
     }
+
+    // Faded out, it is still there; clicks go to the button under it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// A menu item that runs a closure.

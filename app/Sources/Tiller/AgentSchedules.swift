@@ -256,10 +256,17 @@ final class AgentScheduleStore {
         schedules.first { $0.id == id }
     }
 
-    /// Adds or replaces `schedule`, timing its next run from now.
+    /// Adds or replaces `schedule`, timing its next run from now when it is
+    /// new, turned on or given a new rule. Renaming it or changing its prompt
+    /// keeps the run already due, so an edit doesn't restart the countdown.
     func save(_ schedule: ScheduledPrompt) {
         var schedule = schedule
-        schedule.nextRun = schedule.enabled ? schedule.rule.nextDate(after: Date()) : nil
+        if let old = self.schedule(schedule.id), old.enabled, schedule.enabled, old.rule == schedule.rule,
+            let next = old.nextRun {
+            schedule.nextRun = next
+        } else {
+            schedule.nextRun = schedule.enabled ? schedule.rule.nextDate(after: Date()) : nil
+        }
         if let index = schedules.firstIndex(where: { $0.id == schedule.id }) {
             schedules[index] = schedule
         } else {

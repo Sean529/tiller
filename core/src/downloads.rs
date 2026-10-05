@@ -237,9 +237,21 @@ wrap_download_handler! {
                 return;
             }
             CALLBACKS.with_borrow_mut(|map| map.remove(&id));
-            RESERVED.with_borrow_mut(|map| map.remove(&id));
+            let first = RESERVED.with_borrow_mut(|map| map.remove(&id)).is_some();
             THROTTLE.with_borrow_mut(|map| map.remove(&id));
+            if first && item.is_complete() != 0 {
+                bounce_downloads_stack(&CefString::from(&item.full_path()).to_string());
+            }
             report(browser, item);
         }
     }
+}
+
+/// Tells the Dock that `path` finished downloading, as Safari and Chrome do,
+/// which bounces the Downloads stack.
+fn bounce_downloads_stack(path: &str) {
+    use objc2_foundation::{NSDistributedNotificationCenter, NSString};
+    let name = NSString::from_str("com.apple.DownloadFileFinished");
+    let path = NSString::from_str(path);
+    unsafe { NSDistributedNotificationCenter::defaultCenter().postNotificationName_object(&name, Some(&path)) };
 }

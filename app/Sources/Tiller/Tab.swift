@@ -57,7 +57,20 @@ final class Tab {
     /// The favicon last saved for the start page.
     var recordedIcon: Data?
 
-    var isBlank: Bool { url.isEmpty || url == "about:blank" }
+    var isBlank: Bool { Self.isBlank(url) }
+
+    private static func isBlank(_ url: String) -> Bool { url.isEmpty || url == "about:blank" }
+
+    /// True from a load requested on the blank page until that page has had
+    /// time to paint. Chromium shows its white blank page meanwhile, so the
+    /// window keeps the start page up, which in dark mode saves a white flash.
+    private(set) var isLeavingBlank = false
+    /// Covers a browser created in dark mode until its first page has had
+    /// time to paint, for the same reason.
+    private var paintCover: NSView?
+    private var paintWait: DispatchWorkItem?
+    /// From a page's arrival to its likely first paint.
+    private static let paintDelay: TimeInterval = 0.25
 
     var displayTitle: String {
         if !title.isEmpty && title != url { return title }
@@ -158,11 +171,41 @@ final class Tab {
         )
         let view = Unmanaged.passUnretained(hostView).toOpaque()
         browserID = tiller_browser_create(view, Int32(size.width), Int32(size.height), url, callbacks)
+        let dark = hostView.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        if dark && !isBlank {
+            let cover = PaintCoverView(frame: hostView.bounds)
+            hostView.addSubview(cover, positioned: .above, relativeTo: nil)
+            paintCover = cover
+        }
+    }
+
+    /// The page being waited for arrived: gives it a moment to paint, then
+    /// shows it.
+    private func pageArrived() {
+        guard (isLeavingBlank || paintCover != nil), paintWait == nil else { return }
+        let wait = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.showPage() }
+        }
+        paintWait = wait
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.paintDelay, execute: wait)
+    }
+
+    /// Stops waiting for a first paint, when it has likely happened or the
+    /// load ended without one.
+    private func showPage() {
+        paintWait?.cancel()
+        paintWait = nil
+        paintCover?.removeFromSuperview()
+        paintCover = nil
+        guard isLeavingBlank else { return }
+        isLeavingBlank = false
+        delegate?.tabDidChange(self)
     }
 
     // MARK: Commands
 
     func load(_ url: String) {
+        if isBlank && !Self.isBlank(url) && Self.isBlank(committedURL) { isLeavingBlank = true }
         self.url = url
         tiller_browser_load_url(browserID, url)
     }
@@ -173,6 +216,7 @@ final class Tab {
     func dropPendingLoad(of urls: [String]) {
         guard urls.contains(url), committedURL != url else { return }
         url = committedURL
+        isLeavingBlank = false
         delegate?.tabDidChange(self)
     }
 
@@ -246,6 +290,7 @@ final class Tab {
         MainActor.assumeIsolated {
             self.url = url
             committedURL = url
+            if !Self.isBlank(url) { pageArrived() }
             delegate?.tabDidChange(self)
         }
     }
@@ -261,9 +306,12 @@ final class Tab {
         MainActor.assumeIsolated {
             // A new load starts from nothing rather than the last one's end.
             if loading && !isLoading { progress = 0 }
+            let ended = isLoading && !loading
             isLoading = loading
             canGoBack = back
             canGoForward = forward
+            // A load that ended, loaded or not, has nothing more to wait for.
+            if ended { showPage() }
             delegate?.tabDidChange(self)
         }
     }
@@ -328,6 +376,18 @@ final class Tab {
 }
 
 /// Hosts CEF's view and keeps it the size of the tab area.
+/// The window's background over a page that hasn't painted yet.
+private final class PaintCoverView: NSView {
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.windowBackgroundColor.layerColor
+    }
+
+    // Clicks wait for the page rather than landing on what can't be seen.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 final class BrowserHostView: NSView {
     override var acceptsFirstResponder: Bool { true }
 

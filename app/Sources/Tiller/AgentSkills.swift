@@ -495,16 +495,6 @@ enum AgentSkillCatalog {
         }
     }
 
-    /// Finds a skill by name in the library, then the CLIs' folders.
-    static func find(_ name: String) -> AgentSkill? {
-        if let entry = AgentSkillStore.shared.entries.first(where: { $0.name == name }),
-            let skill = AgentSkillStore.shared.skill(for: entry)
-        {
-            return skill
-        }
-        return userSkills(for: nil, workFolder: Settings.agentFolderPath).first { $0.name == name }
-    }
-
     nonisolated private static func folders(in root: String) -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? [])
             .filter { !$0.hasPrefix(".") }
@@ -530,28 +520,43 @@ enum AgentSkillCatalog {
                         "editable": true, "enabled": entry.enabled]
             }
             let names = Set(AgentSkillStore.shared.entries.map(\.name))
-            let user = userSkills(for: nil, workFolder: Settings.agentFolderPath).filter { !names.contains($0.name) }.map {
-                ["name": $0.name, "description": $0.description, "path": $0.path ?? "", "editable": false, "enabled": true] as [String: Any]
+            let workFolder = Settings.agentFolderPath
+            // The CLIs' folders are read off the main thread.
+            return deferred {
+                userSkills(for: nil, workFolder: workFolder).filter { !names.contains($0.name) }
+            } then: { user in
+                ["skills": library + user.map {
+                    ["name": $0.name, "description": $0.description, "path": $0.path ?? "", "editable": false, "enabled": true] as [String: Any]
+                }]
             }
-            return ["skills": library + user]
         case "skills.read":
             guard let name = params["name"] as? String, !name.isEmpty else { throw ControlError("read_skill needs a name") }
-            guard let skill = find(name), let path = skill.path, let folder = skill.folder else {
-                throw ControlError(SkillError.unknown(name).localizedDescription)
-            }
-            let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-            var files: [String] = []
-            if let walker = FileManager.default.enumerator(atPath: folder) {
-                while let file = walker.nextObject() as? String, files.count < 200 {
-                    if file.hasPrefix(".") || file.contains("/.") { walker.skipDescendants(); continue }
-                    var isDirectory: ObjCBool = false
-                    if FileManager.default.fileExists(atPath: folder + "/" + file, isDirectory: &isDirectory), !isDirectory.boolValue {
-                        files.append(file)
+            let editable = AgentSkillStore.shared.entries.contains { $0.name == name }
+            // The library's skill is known here; the CLIs' folders, the file
+            // and the folder's listing are read off the main thread.
+            let library = AgentSkillStore.shared.entries.first { $0.name == name }.flatMap(AgentSkillStore.shared.skill(for:))
+            let workFolder = Settings.agentFolderPath
+            return deferred { () throws -> (name: String, path: String, content: String, files: [String]) in
+                guard let skill = library ?? userSkills(for: nil, workFolder: workFolder).first(where: { $0.name == name }),
+                    let path = skill.path, let folder = skill.folder
+                else {
+                    throw ControlError(SkillError.unknown(name).localizedDescription)
+                }
+                let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+                var files: [String] = []
+                if let walker = FileManager.default.enumerator(atPath: folder) {
+                    while let file = walker.nextObject() as? String, files.count < 200 {
+                        if file.hasPrefix(".") || file.contains("/.") { walker.skipDescendants(); continue }
+                        var isDirectory: ObjCBool = false
+                        if FileManager.default.fileExists(atPath: folder + "/" + file, isDirectory: &isDirectory), !isDirectory.boolValue {
+                            files.append(file)
+                        }
                     }
                 }
+                return (name: skill.name, path: path, content: content, files: files)
+            } then: { found in
+                ["name": found.name, "path": found.path, "editable": editable, "content": found.content, "files": found.files] as [String: Any]
             }
-            let editable = AgentSkillStore.shared.entries.contains { $0.name == name }
-            return ["name": skill.name, "path": path, "editable": editable, "content": content, "files": files]
         case "skills.save":
             guard let name = params["name"] as? String, !name.isEmpty else { throw ControlError("save_skill needs a name") }
             guard let content = params["content"] as? String, !content.isEmpty else { throw ControlError("save_skill needs content") }
@@ -576,6 +581,23 @@ enum AgentSkillCatalog {
             }
         default:
             throw ControlError("unknown method \(method)")
+        }
+    }
+
+    /// Answers later with what `finish` makes, on the main actor, of what
+    /// `work` found off it.
+    private static func deferred<T: Sendable>(
+        _ work: @escaping @Sendable () throws -> T, then finish: @escaping (T) -> Any
+    ) -> ControlDeferred {
+        ControlDeferred { reply in
+            Task { @MainActor in
+                do {
+                    let value = try await Task.detached(priority: .userInitiated) { try work() }.value
+                    reply(.success(finish(value)))
+                } catch {
+                    reply(.failure(error as? ControlError ?? ControlError(error.localizedDescription)))
+                }
+            }
         }
     }
 }

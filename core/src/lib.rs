@@ -245,8 +245,7 @@ pub extern "C" fn tiller_browser_print(id: c_int) {
 #[unsafe(no_mangle)]
 pub extern "C" fn tiller_browser_show_dev_tools(id: c_int) {
     if let Some(host) = browser::get(id).and_then(|b| b.host()) {
-        let window_info = WindowInfo { bounds: Rect { x: 120, y: 120, width: 1100, height: 760 }, ..Default::default() };
-        host.show_dev_tools(Some(&window_info), None, Some(&BrowserSettings::default()), None);
+        browser::show_dev_tools(&host, None);
     }
 }
 
@@ -332,12 +331,16 @@ pub unsafe extern "C" fn tiller_ipc_start(socket_path: *const c_char, ctx: *mut 
 /// `reply_json` must be a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tiller_ipc_reply(token: u64, reply_json: *const c_char) {
-    let reply = unsafe { cstr(reply_json) };
+    if reply_json.is_null() {
+        return ipc::reply_error(token, "bad reply from app: not a JSON object");
+    }
     // The app serializes the reply itself, so only its shape is checked here,
-    // on the UI thread, rather than every byte of it.
-    let body = reply.trim();
-    if body.starts_with('{') && body.ends_with('}') {
-        ipc::reply_raw(token, reply);
+    // on the UI thread, rather than every byte of it. The bytes are copied
+    // once and turned into text on the connection's thread.
+    let reply = unsafe { CStr::from_ptr(reply_json) }.to_bytes();
+    let body = reply.trim_ascii();
+    if body.first() == Some(&b'{') && body.last() == Some(&b'}') {
+        ipc::reply_bytes(token, reply.to_vec());
     } else {
         ipc::reply_error(token, "bad reply from app: not a JSON object");
     }
