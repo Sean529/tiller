@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/1960eca0-6cb0-460b-bb6f-b292b739a147
 - **Import from Chrome.** Cookies, saved passwords, history, extensions, search engine and homepage.
 - **Chrome extensions.** Add unpacked folders or CRX files, or bring Chrome's over. Content scripts, background workers and popups run; Chrome's tab and window APIs don't see Tiller's tabs.
 - **Profiles.** Each profile has its own site data, history, passwords, settings and chats, and runs as its own app instance.
-- **Agent panel.** Chat with Qoder CLI, Claude Code or Codex in a side panel that controls the browser, and call skills with `/`, from your own folders or a skill library each agent shares. Prompts can also run on a schedule, skills included, set up in Settings or by asking the agent.
+- **Agent panel.** Chat with Qoder CLI, Claude Code, Codex or Antigravity CLI in a side panel that controls the browser, and call skills with `/`, from your own folders or a skill library each agent shares. Prompts can also run on a schedule, skills included, set up in Settings or by asking the agent.
 - **Browser tools.** A stdio MCP server and the `tiller` command-line tool expose the same tools to external agents and scripts.
 
 ## Requirements

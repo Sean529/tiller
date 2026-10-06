@@ -99,7 +99,8 @@ struct AgentSkill: Equatable, Sendable {
 /// `skills.json` lists the skills, `library/<name>` holds each one, and
 /// `exposed` links the enabled ones where the CLIs look. Claude Code and
 /// Qoder CLI get `exposed` with `--add-dir` and read its `.claude/skills` and
-/// `.qoder/skills`; Codex gets `exposed/skills` as an extra skills root.
+/// `.qoder/skills`, and Antigravity CLI its `.agents/skills`; Codex gets
+/// `exposed/skills` as an extra skills root.
 @MainActor
 final class AgentSkillStore {
     static let shared = AgentSkillStore()
@@ -134,7 +135,7 @@ final class AgentSkillStore {
 
     nonisolated static let root = DataDirectory.path + "/agent-skills"
     nonisolated private static let libraryFolder = root + "/library"
-    /// Passed to Claude Code and Qoder CLI with `--add-dir`.
+    /// Passed to Claude Code, Qoder CLI and Antigravity CLI with `--add-dir`.
     nonisolated static let exposedFolder = root + "/exposed"
     /// Codex's extra skills root.
     nonisolated static let exposedSkills = exposedFolder + "/skills"
@@ -335,12 +336,13 @@ final class AgentSkillStore {
     }
 
     /// Links each enabled skill into `exposed/skills`, and points
-    /// `exposed/.claude/skills` and `exposed/.qoder/skills` at it.
+    /// `exposed/.claude/skills`, `exposed/.qoder/skills` and
+    /// `exposed/.agents/skills` at it.
     private func syncExposed() {
         let manager = FileManager.default
         let skillsFolder = Self.exposedSkills
         try? manager.createDirectory(atPath: skillsFolder, withIntermediateDirectories: true)
-        for cli in [".claude", ".qoder"] {
+        for cli in [".claude", ".qoder", ".agents"] {
             let folder = Self.exposedFolder + "/" + cli
             let link = folder + "/skills"
             try? manager.createDirectory(atPath: folder, withIntermediateDirectories: true)
@@ -485,6 +487,7 @@ enum AgentSkillCatalog {
             case .claude: roots += [claude + "/skills"] + (workFolder.map { [$0 + "/.claude/skills"] } ?? [])
             case .qodercli: roots += [home + "/.agents/skills", home + "/.qoder/skills"] + (workFolder.map { [$0 + "/.qoder/skills"] } ?? [])
             case .codex: roots += [home + "/.agents/skills"] + (workFolder.map { [$0 + "/.agents/skills"] } ?? [])
+            case .agy: roots += [home + "/.gemini/config/skills"] + (workFolder.map { [$0 + "/.agents/skills"] } ?? [])
             }
         }
         var seen = Set<String>()

@@ -506,6 +506,12 @@ enum AgentScheduleControl {
         var isScheduledRun = false
     }
 
+    /// The tools a schedule's runs have. Antigravity CLI can't be limited,
+    /// so its runs have them all.
+    private static func effectiveTools(of schedule: ScheduledPrompt) -> Set<AgentTool> {
+        schedule.kind == .agy ? Set(AgentTool.allCases) : Set(schedule.tools)
+    }
+
     private static var store: AgentScheduleStore { .shared }
 
     static func control(_ method: String, params: [String: Any]) throws -> Any {
@@ -535,7 +541,8 @@ enum AgentScheduleControl {
     private static func caller(_ chat: String?) -> Caller {
         guard let chat, let conversation = AgentHistoryStore.shared.conversation(chat) else { return Caller() }
         return Caller(
-            kind: conversation.kind, tools: Set(conversation.tools ?? Settings.agentTools),
+            kind: conversation.kind,
+            tools: conversation.kind == .agy ? Set(AgentTool.allCases) : Set(conversation.tools ?? Settings.agentTools),
             isScheduledRun: conversation.scheduleID != nil
         )
     }
@@ -571,8 +578,8 @@ enum AgentScheduleControl {
             schedule = original
             let changesWhatRuns = (prompt != nil && prompt != original.prompt) || (kind != nil && kind != original.kind)
                 || (tools != nil && Set(tools!) != Set(original.tools))
-            if changesWhatRuns, !Set(original.tools).isSubset(of: caller.tools) {
-                throw ControlError("“\(original.name)” can \(names(Set(original.tools).subtracting(caller.tools))), which this chat can't, so its prompt, agent and tools can only be changed in Settings > Scheduled. Its name, timing and whether it is on can still be changed here.")
+            if changesWhatRuns, !effectiveTools(of: original).isSubset(of: caller.tools) {
+                throw ControlError("“\(original.name)” can \(names(effectiveTools(of: original).subtracting(caller.tools))), which this chat can't, so its prompt, agent and tools can only be changed in Settings > Scheduled. Its name, timing and whether it is on can still be changed here.")
             }
         } else {
             guard let prompt, !prompt.isEmpty else { throw ControlError("prompt is required for a new schedule.") }
@@ -595,6 +602,9 @@ enum AgentScheduleControl {
             schedule.name = name
         }
         if let enabled = params["enabled"] as? Bool { schedule.enabled = enabled }
+        if schedule.kind == .agy, !effectiveTools(of: schedule).isSubset(of: caller.tools) {
+            throw ControlError("\(AgentKind.agy.displayName) always has every tool, and this chat can't \(names(effectiveTools(of: schedule).subtracting(caller.tools))), so it can't schedule it. The user can in Settings > Scheduled.")
+        }
         do {
             try schedule.validate()
         } catch {

@@ -226,7 +226,8 @@ final class AgentPanelView: NSView {
     // MARK: Tools
 
     /// The selected chat's built-in tools, each a checkmark item. Codex can
-    /// always read and run read-only commands, so only writing changes for it.
+    /// always read and run read-only commands, so only writing changes for
+    /// it, and Antigravity CLI always has them all.
     /// Locked while a turn runs, since a change restarts the agent.
     private func showTools(from button: NSView) {
         let chat = active
@@ -237,7 +238,7 @@ final class AgentPanelView: NSView {
             let item = NSMenuItem(title: tool.displayName, action: #selector(toggleTool(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = tool.rawValue
-            let alwaysOn = chat.kind == .codex && tool != .write
+            let alwaysOn = chat.kind.alwaysAllows(tool)
             item.state = alwaysOn || chat.tools.contains(tool) ? .on : .off
             item.isEnabled = !alwaysOn && !chat.isBusy
             menu.addItem(item)

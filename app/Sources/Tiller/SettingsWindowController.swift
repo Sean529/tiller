@@ -1148,7 +1148,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         toolsRow.cell(at: 0).yPlacement = .top
         let toolsNote = Self.note(
             "They run without asking, and pages can try to steer the agent. Codex always reads and runs "
-                + "read-only commands. Defaults for new chats; each chat can change its own from the tools button."
+                + "read-only commands, and Antigravity CLI always has them all. Defaults for new chats; each chat can change its own from the tools button."
         )
         toolsNote.lineBreakMode = .byWordWrapping
         toolsNote.preferredMaxLayoutWidth = Self.wideControlWidth

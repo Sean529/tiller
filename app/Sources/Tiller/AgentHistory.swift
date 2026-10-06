@@ -244,7 +244,7 @@ enum AgentSessionTitle {
             home = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] ?? NSHomeDirectory() + "/.claude"
         case .qodercli:
             home = NSHomeDirectory() + "/.qoder"
-        case .codex:
+        case .codex, .agy:
             return nil
         }
         // Both name a project's folder after its path, with every character

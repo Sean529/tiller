@@ -3,19 +3,32 @@ import os
 
 /// The agent CLIs Tiller can run. Qoder CLI and Claude Code speak the same
 /// stream-json protocol over stdio in print mode. Codex runs its app server,
-/// which speaks JSON-RPC over stdio. All are limited to Tiller's MCP tools plus
-/// the built-in tools turned on in Settings, except that Codex always keeps a
-/// shell, confined to a read-only sandbox unless writing is on.
+/// which speaks JSON-RPC over stdio. Antigravity CLI has a stream-json of its
+/// own. Qoder CLI and Claude Code are limited to Tiller's MCP tools plus the
+/// built-in tools turned on in Settings. Codex always keeps a shell, confined
+/// to a read-only sandbox unless writing is on. Antigravity CLI can't be
+/// limited, so it keeps all of its tools and is only told to use Tiller's.
 enum AgentKind: String, CaseIterable, Codable {
     case qodercli
     case claude
     case codex
+    case agy
 
     var displayName: String {
         switch self {
         case .qodercli: "Qoder CLI"
         case .claude: "Claude Code"
         case .codex: "Codex"
+        case .agy: "Antigravity CLI"
+        }
+    }
+
+    /// Whether the agent has `tool` whatever the chat allows.
+    func alwaysAllows(_ tool: AgentTool) -> Bool {
+        switch self {
+        case .qodercli, .claude: false
+        case .codex: tool != .write
+        case .agy: true
         }
     }
 
@@ -38,6 +51,21 @@ enum AgentKind: String, CaseIterable, Codable {
     /// Tiller's skill library, whose `.claude/skills` and `.qoder/skills` the
     /// CLIs read.
     func arguments(mcpConfig: String, systemPrompt: String, tools: [AgentTool], resume: String?) -> [String] {
+        if self == .agy {
+            // -p takes the prompt as its value, which comes on stdin instead.
+            // The MCP server comes from Tiller's plugin, and the prompt goes in
+            // the first message, since agy has no flags for either. It has no
+            // way to limit its tools, so it runs them all without asking.
+            var arguments = [
+                "-p=",
+                "--input-format", "stream-json",
+                "--output-format", "stream-json",
+                "--dangerously-skip-permissions",
+                "--add-dir", AgentSkillStore.exposedFolder,
+            ]
+            if let resume { arguments += ["--conversation", resume] }
+            return arguments
+        }
         let toolNames = tools.flatMap(\.toolNames)
         let allowed = (["mcp__tiller"] + toolNames).joined(separator: ",")
         var common = [
@@ -72,6 +100,8 @@ enum AgentKind: String, CaseIterable, Codable {
             // The MCP server, sandbox and prompt go in thread/start or
             // thread/resume instead.
             return ["app-server"]
+        case .agy:
+            return []
         }
     }
 }
@@ -147,6 +177,13 @@ final class AgentSession {
     /// hasn't exited yet.
     private var resumeRetries = 0
 
+    // Antigravity CLI state.
+    /// Whether the next message carries the system prompt, which agy has no flag for.
+    private var agyNeedsPrompt = false
+    /// The step whose text is streaming, and its text so far.
+    private var agyTextStep: Int?
+    private var agyText = ""
+
     /// `sessionID` resumes that saved conversation in `directory`, the folder
     /// it was started in, since the CLIs keep sessions by folder. `chat` is
     /// the chat's id, which tiller_mcp passes on so Tiller knows who asks.
@@ -170,6 +207,7 @@ final class AgentSession {
         }
         // Creates the skill folders that --add-dir and Codex's skills root name.
         _ = AgentSkillStore.shared
+        if kind == .agy { try AgentEnvironment.writeAgyPlugin() }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = kind.arguments(
@@ -219,13 +257,15 @@ final class AgentSession {
         self.process = process
         stdin = input.fileHandleForWriting
         if kind == .codex { try startCodexThread(cwd: directory) }
+        agyNeedsPrompt = kind == .agy
     }
 
     /// Sends one user turn. `context` goes before the text, for the agent only.
     /// Images go before both. Claude Code and Qoder CLI run a slash command
     /// only at the very start of the message, so one goes before the context.
     /// For Codex, `skill` is attached as its own input, and the text calls it
-    /// with `$`, as Codex writes it.
+    /// with `$`, as Codex writes it. Antigravity CLI gets the images' paths,
+    /// and Tiller's prompt with the first message of each process.
     func send(_ text: String, images: [AgentAttachment] = [], context: String, skill: AgentSkill? = nil) throws {
         try start()
         var prompt = text.isEmpty ? context : context + "\n\n" + text
@@ -236,6 +276,15 @@ final class AgentSession {
                 prompt = context + "\n\n$" + text.dropFirst()
             }
             try startCodexTurn(input + [["type": "text", "text": prompt]])
+        } else if kind == .agy {
+            var parts = [context]
+            if agyNeedsPrompt { parts.insert(AgentEnvironment.systemPrompt(tools: tools, kind: kind), at: 0) }
+            // A slash command only works at the very start.
+            if text.hasPrefix("/") { parts.insert(text, at: 0) } else if !text.isEmpty { parts.append(text) }
+            if !images.isEmpty { parts.append("Attached images:\n" + images.map(\.url.path).joined(separator: "\n")) }
+            prompt = parts.joined(separator: "\n\n")
+            agyNeedsPrompt = false
+            try write(["event": "user", "message": ["role": "user", "content": prompt]])
         } else {
             if text.hasPrefix("/") { prompt = text + "\n\n" + context }
             // The images run to megabytes, so they are encoded on the
@@ -260,6 +309,13 @@ final class AgentSession {
         if kind == .codex {
             interruptCodexTurn()
             guard isBusy else { return }
+        } else if kind == .agy {
+            // agy has no interrupt on stdin, so the process ends. The next
+            // message continues the saved conversation.
+            finishAgyText()
+            finishTurn(error: nil)
+            stop()
+            return
         } else {
             try? write([
                 "type": "control_request",
@@ -303,6 +359,9 @@ final class AgentSession {
         queuedInput = nil
         reportedToolFailure = false
         resumeRetries = 0
+        agyNeedsPrompt = false
+        agyTextStep = nil
+        agyText = ""
     }
 
     private func write(_ object: [String: Any]) throws {
@@ -339,7 +398,11 @@ final class AgentSession {
     private func received(_ messages: [JSONLineParser.Message], generation: Int) {
         guard generation == self.generation else { return }
         for message in messages {
-            if kind == .codex { handleCodex(message.object) } else { handle(message.object) }
+            switch kind {
+            case .codex: handleCodex(message.object)
+            case .agy: handleAgy(message.object)
+            case .qodercli, .claude: handle(message.object)
+            }
         }
     }
 
@@ -628,6 +691,89 @@ final class AgentSession {
         }
     }
 
+    // MARK: Antigravity CLI
+
+    private func handleAgy(_ message: [String: Any]) {
+        switch message["event"] as? String {
+        case "init":
+            if let id = message["conversation_id"] as? String, !id.isEmpty { started(id) }
+            onEvent?(.ready(model: nil))
+        case "step_update":
+            guard let step = message["step_update"] as? [String: Any] else { return }
+            handleAgyStep(step)
+        case "result":
+            let result = message["result"] as? [String: Any] ?? [:]
+            finishAgyText()
+            var error: String?
+            if let status = result["status"] as? String, status != "SUCCESS" {
+                error = (result["error"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? status
+            }
+            finishTurn(error: error)
+        default:
+            break
+        }
+    }
+
+    /// Text streams as deltas of an `agent_response` step and ends with the
+    /// step. A tool step comes as ACTIVE, then DONE or a failure.
+    private func handleAgyStep(_ step: [String: Any]) {
+        let index = step["step_index"] as? Int ?? 0
+        let state = step["state"] as? String
+        switch step["step_type"] as? String {
+        case "agent_response":
+            if agyTextStep != index {
+                finishAgyText()
+                agyTextStep = index
+            }
+            if let delta = step["text_delta"] as? String, !delta.isEmpty {
+                if agyText.isEmpty { onEvent?(.textStarted) }
+                agyText += delta
+                onEvent?(.textDelta(delta))
+            }
+            if state != "ACTIVE" { finishAgyText() }
+        case "tool":
+            finishAgyText()
+            let info = step["tool_info"] as? [String: Any] ?? [:]
+            let id = "\(index)"
+            if state == "ACTIVE" {
+                let (name, input) = Self.agyTool(
+                    info["name"] as? String ?? step["tool_name"] as? String ?? "tool",
+                    info["parameters"] as? [String: Any] ?? [:]
+                )
+                onEvent?(.toolUse(id: id, name: name, input: input))
+            } else {
+                let error = info["error"] as? String
+                onEvent?(.toolResult(id: id, isError: state != "DONE", summary: error ?? Self.summary(of: info["output"])))
+            }
+        default:
+            break
+        }
+    }
+
+    private func finishAgyText() {
+        agyTextStep = nil
+        guard !agyText.isEmpty else { return }
+        let text = agyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        agyText = ""
+        onEvent?(.text(text))
+    }
+
+    /// agy calls every MCP tool through call_mcp_tool, and names a plugin's
+    /// server `<plugin>_<server>`, so Tiller's is `tiller_tiller`. Its own
+    /// tools' parameters are renamed to the keys the transcript shows.
+    private static func agyTool(_ name: String, _ parameters: [String: Any]) -> (String, [String: Any]) {
+        if name == "call_mcp_tool" {
+            let server = parameters["ServerName"] as? String ?? ""
+            let tool = parameters["ToolName"] as? String ?? "tool"
+            let arguments = parameters["Arguments"] as? [String: Any] ?? [:]
+            return (server == "tiller_tiller" ? tool : "\(server).\(tool)", arguments)
+        }
+        let keys = ["CommandLine": "command", "AbsolutePath": "file_path", "TargetFile": "file_path", "Url": "url", "Query": "pattern"]
+        var input: [String: Any] = [:]
+        for (key, value) in parameters { input[keys[key] ?? key] = value }
+        return (name, input)
+    }
+
     /// Tiller can't ask the user, so approvals and questions are declined.
     private func answerCodex(id: Any, method: String) {
         let result: [String: Any]? = switch method {
@@ -728,9 +874,18 @@ enum AgentEnvironment {
         """
 
     /// Tiller's prompt, a line on the file and shell tools if any are on, then
-    /// the extra instructions from Settings.
-    static func systemPrompt(tools: [AgentTool]) -> String {
+    /// the extra instructions from Settings. Antigravity CLI has every tool,
+    /// its own browser included, so it is told to leave that alone.
+    static func systemPrompt(tools: [AgentTool], kind: AgentKind? = nil) -> String {
         var parts = [basePrompt]
+        var tools = tools
+        if kind == .agy {
+            tools = AgentTool.allCases
+            parts.append("""
+                Tiller's tools are the MCP server tiller_tiller, called with call_mcp_tool. Never use your \
+                own browser tools: the user's browser is Tiller, and only the tiller tools reach it.
+                """)
+        }
         if !tools.isEmpty {
             let can = tools.map { $0.displayName.lowercased() }.joined(separator: ", ")
             parts.append("""
@@ -829,6 +984,24 @@ enum AgentEnvironment {
         env["TILLER_CHAT"] = chat
         if kind == .codex { env["CODEX_HOME"] = try codexHome() }
         return env
+    }
+
+    /// The plugin that gives Antigravity CLI Tiller's MCP server, in the
+    /// user's agy config, since agy has no flag for one. Its server gets the
+    /// socket and chat id from agy's environment. Rewritten only when it
+    /// changes, such as when Tiller moves.
+    static func writeAgyPlugin() throws {
+        let folder = (ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()) + "/.gemini/config/plugins/tiller"
+        let files: [String: [String: Any]] = [
+            "plugin.json": ["name": "tiller", "description": "Tiller's browser tools, for chats in Tiller's agent panel."],
+            "mcp_config.json": ["mcpServers": ["tiller": ["command": mcpServerPath, "args": [String]()]]],
+        ]
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        for (name, object) in files {
+            let url = URL(fileURLWithPath: folder + "/" + name)
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+            if (try? Data(contentsOf: url)) != data { try data.write(to: url) }
+        }
     }
 
     /// Codex's own folder for Tiller, so the user's config.toml, MCP servers,

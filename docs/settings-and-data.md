@@ -17,7 +17,7 @@ Tiller > Settings… (Cmd+,) has seven panes: General, Passwords, Extensions (se
 | General | Accent color: Match System, Graphite, Blue, Teal, Green, Orange or Pink, for Tiller's selections, chat bubbles, busy dots and the start page. Buttons, focus rings and text selection keep the system accent | Match System | right away |
 | General | Search engine: Google, Bing, DuckDuckGo or Custom | Google | next search |
 | General | Custom search URL, with `%s` for the query | empty | next search; Google is used while it isn't a valid http(s) URL with `%s` |
-| Agent | New chats use: Qoder CLI, Claude Code or Codex | Qoder CLI | next new chat; same as the picker in the panel |
+| Agent | New chats use: Qoder CLI, Claude Code, Codex or Antigravity CLI | Qoder CLI | next new chat; same as the picker in the panel |
 | Agent | Chat tabs: how many chats the panel keeps open at once, 1 to 9 | 3 | right away; tabs already open stay |
 | Agent | Show and hide shortcut: click, then press a combination with Cmd or Ctrl. Delete clears it; one already in a menu is refused | Cmd+Shift+S | right away |
 | Agent | Command: pick a CLI, then the file to run it from | empty, meaning look it up | next new chat |

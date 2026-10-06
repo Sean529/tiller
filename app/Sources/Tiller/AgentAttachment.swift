@@ -15,7 +15,8 @@ struct AttachmentSource: @unchecked Sendable {
 }
 
 /// An image attached to an agent message, scaled down and saved to a file.
-/// Claude Code and Qoder CLI get its bytes; Codex and Quick Look read the file.
+/// Claude Code and Qoder CLI get its bytes; Codex, Antigravity CLI and Quick
+/// Look read the file.
 /// Made off the main thread; nothing changes it after.
 struct AgentAttachment: @unchecked Sendable {
     let url: URL

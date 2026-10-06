@@ -175,7 +175,7 @@ fn tools() -> Value {
                         "cron": { "type": "string" },
                     },
                 },
-                "agent": { "type": "string", "enum": ["qodercli", "claude", "codex"], "description": "Which CLI runs it. Defaults to this chat's." },
+                "agent": { "type": "string", "enum": ["qodercli", "claude", "codex", "agy"], "description": "Which CLI runs it. Defaults to this chat's." },
                 "tools": { "type": "array", "items": { "type": "string", "enum": ["read", "write", "shell"] }, "description": "Built-in tools besides Tiller's: read files, write and edit files, run commands. At most this chat's own. Default none." },
                 "enabled": { "type": "boolean", "description": "Whether it runs. Default true for a new one." },
             } },
