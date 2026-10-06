@@ -414,6 +414,8 @@ final class AgentPanelView: NSView {
         case "tools": tabBar.toolsForTesting()
         case "model": tabBar.modelForTesting()
         case "focus": window?.makeFirstResponder(input)
+        case "enter": active.submitForTesting(direct: false)
+        case "ctrlEnter": active.submitForTesting(direct: true)
         default:
             if action.hasPrefix("tab"), let index = Int(action.dropFirst(3)), chats.indices.contains(index - 1) {
                 select(index - 1, focus: true)
@@ -777,6 +779,11 @@ final class Composer: NSView {
         didSet { updateSendButton() }
     }
 
+    /// Messages wait to be sent, which an empty field can send.
+    var hasQueued = false {
+        didSet { updateSendButton() }
+    }
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
@@ -861,12 +868,14 @@ final class Composer: NSView {
 
     private func updateSendButton() {
         let empty = textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty
-        sendButton.image = isBusy ? Self.stopImage : Self.sendImage
-        sendButton.toolTip = isBusy ? "Stop (⎋)" : "Send (↩)"
+        // While a turn runs, a written message is queued instead.
+        let stops = isBusy && empty
+        sendButton.image = stops ? Self.stopImage : Self.sendImage
+        sendButton.toolTip = stops ? "Stop (⎋)" : isBusy ? "Queue (↩) · Stop and Send (⌃↩)" : "Send (↩)"
         // A disabled button fades its image itself, so an empty field's
         // arrow starts from secondary rather than fading twice.
-        sendButton.contentTintColor = isBusy ? .labelColor : empty ? .secondaryLabelColor : Theme.accentColor
-        sendButton.isEnabled = isBusy || !empty
+        sendButton.contentTintColor = stops ? .labelColor : empty && !hasQueued ? .secondaryLabelColor : Theme.accentColor
+        sendButton.isEnabled = isBusy || !empty || hasQueued
     }
 
     override var wantsUpdateLayer: Bool { true }
@@ -919,6 +928,170 @@ final class Composer: NSView {
         isDropTarget = false
         return takeImages(from: sender.draggingPasteboard)
     }
+}
+
+// MARK: Queued messages
+
+/// The messages written while a turn runs, above the tab bar: one row each,
+/// which a click takes back into the field and its close button removes.
+/// Empty, it takes no room.
+final class QueuedMessagesView: NSView {
+    var onEdit: ((Int) -> Void)?
+    var onRemove: ((Int) -> Void)?
+    var onSendNow: (() -> Void)?
+
+    private let stack = NSStackView()
+    private let header = NSStackView()
+    private let headerLabel = NSTextField(labelWithString: "")
+    private let sendNowButton = NSButton(title: "Send Now", target: nil, action: nil)
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        headerLabel.font = .systemFont(ofSize: Theme.FontSize.caption, weight: .medium)
+        headerLabel.textColor = .secondaryLabelColor
+        headerLabel.lineBreakMode = .byTruncatingTail
+        headerLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sendNowButton.bezelStyle = .accessoryBarAction
+        sendNowButton.controlSize = .small
+        sendNowButton.font = .systemFont(ofSize: Theme.FontSize.caption, weight: .medium)
+        sendNowButton.target = self
+        sendNowButton.action = #selector(sendNow(_:))
+        header.orientation = .horizontal
+        header.spacing = 6
+        header.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 0)
+        header.setViews([headerLabel, sendNowButton], in: .leading)
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Each message's text and how many images it has.
+    func show(_ messages: [(text: String, images: Int)], paused: Bool) {
+        for view in stack.arrangedSubviews { view.removeFromSuperview() }
+        // Room from the transcript only while there is something to show.
+        stack.edgeInsets = NSEdgeInsets(top: messages.isEmpty ? 0 : 6, left: 0, bottom: 0, right: 0)
+        guard !messages.isEmpty else { return }
+        headerLabel.stringValue = paused ? "Queued · paused" : "Queued · sends when this turn finishes"
+        sendNowButton.isHidden = !paused
+        stack.addArrangedSubview(header)
+        for (index, message) in messages.enumerated() {
+            let row = QueuedMessageRow(text: message.text, images: message.images)
+            row.onEdit = { [weak self] in self?.onEdit?(index) }
+            row.onRemove = { [weak self] in self?.onRemove?(index) }
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+    }
+
+    @objc private func sendNow(_ sender: Any?) { onSendNow?() }
+}
+
+/// A queued message's first line, with its image count and a close button.
+private final class QueuedMessageRow: NSView {
+    var onEdit: (() -> Void)?
+    var onRemove: (() -> Void)?
+
+    private let closeButton = HoverButton()
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
+
+    init(text: String, images: Int) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = Theme.Radius.row
+        layer?.cornerCurve = .continuous
+
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        let imageNote = images == 0 ? nil : images == 1 ? "1 image" : "\(images) images"
+        let label = NSTextField(labelWithString: firstLine.isEmpty ? imageNote ?? "" : firstLine)
+        label.font = .systemFont(ofSize: Theme.FontSize.secondary)
+        label.textColor = firstLine.isEmpty ? .secondaryLabelColor : .labelColor
+        label.lineBreakMode = .byTruncatingTail
+        label.cell?.truncatesLastVisibleLine = true
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let count = NSTextField(labelWithString: firstLine.isEmpty ? "" : imageNote ?? "")
+        count.font = .systemFont(ofSize: Theme.FontSize.caption)
+        count.textColor = .secondaryLabelColor
+        count.isHidden = count.stringValue.isEmpty
+
+        closeButton.image = Theme.closeImage(size: 8, label: "Remove from Queue")
+        closeButton.isBordered = false
+        closeButton.bezelStyle = .accessoryBarAction
+        closeButton.imagePosition = .imageOnly
+        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.toolTip = "Remove from Queue"
+        closeButton.plateRadius = 8
+        closeButton.target = self
+        closeButton.action = #selector(remove(_:))
+
+        for view in [label, count, closeButton] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 26),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            count.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
+            count.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.leadingAnchor.constraint(greaterThanOrEqualTo: count.trailingAnchor, constant: 4),
+            closeButton.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 16),
+            closeButton.heightAnchor.constraint(equalToConstant: 16),
+        ])
+
+        toolTip = "Click to edit"
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Queued: " + (firstLine.isEmpty ? imageNote ?? "" : firstLine))
+        setAccessibilityHelp("Takes the message back into the field to edit")
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = Theme.fill(isHovered ? Theme.Fill.hover : Theme.Fill.rest).layerColor
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.hairline.layerColor
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onEdit?() }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onEdit?()
+        return true
+    }
+
+    @objc private func remove(_ sender: Any?) { onRemove?() }
 }
 
 /// The images Quick Look shows for the panel.

@@ -77,6 +77,23 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private let quickLook = QuickLookItems()
     /// Brings the newest message back into view after scrolling up.
     private let scrollDownButton = ScrollDownButton()
+    private let queueView = QueuedMessagesView()
+
+    private typealias Message = (text: String, images: [AgentAttachment])
+    /// Messages written while a turn runs. They go together as one message
+    /// once it finishes, except that one starting with `/` goes on its own,
+    /// since a skill is called only at the very start.
+    private var queued: [Message] = [] {
+        didSet { updateQueue() }
+    }
+    /// Set when a turn ends without finishing, by Stop, an error or the agent
+    /// exiting, so the queue waits for Enter or Send Now.
+    private var queuePaused = false {
+        didSet { updateQueue() }
+    }
+    /// Ctrl+Enter's message, sent ahead of the queue once the turn it
+    /// interrupted has ended.
+    private var pendingDirect: Message?
 
     private var folder: URL { AgentHistoryStore.shared.folder(for: id) }
     /// A saved chat opens at its newest message once it has a size.
@@ -196,8 +213,12 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         transcript.hideThinking()
         transcript.closeToolGroup()
         endSession()
-        for attachment in composer.attachments { try? FileManager.default.removeItem(at: attachment.url) }
+        let unsent = composer.attachments + queued.flatMap(\.images) + (pendingDirect?.images ?? [])
+        for attachment in unsent { try? FileManager.default.removeItem(at: attachment.url) }
         composer.attachments = []
+        queued = []
+        queuePaused = false
+        pendingDirect = nil
         AgentHistoryStore.shared.discardUnsaved(id)
     }
 
@@ -242,7 +263,11 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         scrollDownButton.target = self
         scrollDownButton.action = #selector(scrollDown(_:))
 
-        for view in [scrollView, topFade, bottomFade, separator, emptyState, scrollDownButton, tabBarHost, composer, skillCompletion.picker] as [NSView] {
+        queueView.onEdit = { [weak self] index in self?.editQueued(at: index) }
+        queueView.onRemove = { [weak self] index in self?.removeQueued(at: index) }
+        queueView.onSendNow = { [weak self] in self?.submit() }
+
+        for view in [scrollView, topFade, bottomFade, separator, emptyState, scrollDownButton, queueView, tabBarHost, composer, skillCompletion.picker] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -258,7 +283,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             scrollView.topAnchor.constraint(equalTo: separator.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: tabBarHost.topAnchor, constant: -4),
+            scrollView.bottomAnchor.constraint(equalTo: queueView.topAnchor),
 
             transcript.topAnchor.constraint(equalTo: clip.topAnchor),
             transcript.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
@@ -281,6 +306,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
             scrollDownButton.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             scrollDownButton.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: -10),
+
+            queueView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            queueView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            queueView.bottomAnchor.constraint(equalTo: tabBarHost.topAnchor, constant: -4),
 
             tabBarHost.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             tabBarHost.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -355,7 +384,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     // MARK: Sending
 
     #if DEBUG
-    func stopForTesting() { sendOrStop(nil) }
+    func stopForTesting() { stopTurn() }
+
+    /// Enter, or with `direct` Ctrl+Enter, in the message field.
+    func submitForTesting(direct: Bool) { submit(direct: direct) }
 
     /// Replaces the message field's text, as typing would, so the skill
     /// picker follows it.
@@ -378,17 +410,30 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
     #endif
 
+    /// While a turn runs, the button queues what is written, or stops the
+    /// turn when nothing is.
     @objc private func sendOrStop(_ sender: Any?) {
-        if isBusy {
-            session?.interrupt()
-            setStatus("Stopping…", busy: true)
+        if isBusy, composerIsEmpty {
+            stopTurn()
         } else {
             submit()
         }
     }
 
-    /// Enter sends. Option+Enter or Shift+Enter adds a line. Escape stops a
-    /// running turn.
+    private func stopTurn() {
+        guard isBusy else { return }
+        session?.interrupt()
+        // Antigravity CLI and Grok Build have already stopped.
+        if isBusy { setStatus("Stopping…", busy: true) }
+    }
+
+    private var composerIsEmpty: Bool {
+        composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && composer.attachments.isEmpty
+    }
+
+    /// Enter sends, or queues while a turn runs. Ctrl+Enter stops the turn
+    /// and sends right away. Option+Enter or Shift+Enter adds a line. Escape
+    /// stops a running turn.
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         if skillCompletion.handle(selector) { return true }
         switch selector {
@@ -400,12 +445,16 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 submit()
             }
             return true
+        // What Ctrl+Return is bound to.
+        case #selector(NSResponder.insertLineBreak(_:)):
+            submit(direct: true)
+            return true
         case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
             textView.insertNewlineIgnoringFieldEditor(nil)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             guard isBusy else { return false }
-            sendOrStop(nil)
+            stopTurn()
             return true
         default:
             return false
@@ -429,14 +478,83 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         composer.undoManager
     }
 
-    private func submit() {
+    /// While a turn runs, the message is queued, or with `direct` sent as
+    /// soon as the turn is stopped. Otherwise it goes after anything queued.
+    private func submit(direct: Bool = false) {
         let text = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let images = composer.attachments
-        guard !text.isEmpty || !images.isEmpty, !isBusy else { return }
+        let written = !text.isEmpty || !images.isEmpty
+        guard written || (!isBusy && !queued.isEmpty) else { return }
         composer.text = ""
         composer.attachments = []
         skillCompletion.hide()
-        send(text, images: images)
+        if isBusy {
+            if direct {
+                // A second Ctrl+Enter before the turn has stopped joins the first.
+                pendingDirect = pendingDirect.map { Self.merged([$0, (text, images)]) } ?? (text, images)
+                stopTurn()
+            } else {
+                queued.append((text, images))
+            }
+            return
+        }
+        if written { queued.append((text, images)) }
+        queuePaused = false
+        sendQueued()
+    }
+
+    // MARK: Queue
+
+    /// Sends Ctrl+Enter's message if there is one, else what is queued,
+    /// unless the queue is paused. Called once a turn has ended.
+    private func sendQueued() {
+        guard !isBusy else { return }
+        if let direct = pendingDirect {
+            pendingDirect = nil
+            send(direct.text, images: direct.images)
+            return
+        }
+        guard !queuePaused, !queued.isEmpty else { return }
+        // Up to the next message that calls a skill.
+        let count = queued.dropFirst().firstIndex { $0.text.hasPrefix("/") } ?? queued.count
+        let batch = Self.merged(Array(queued.prefix(count)))
+        queued.removeFirst(count)
+        send(batch.text, images: batch.images)
+    }
+
+    private static func merged(_ messages: [Message]) -> Message {
+        (messages.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n"), messages.flatMap(\.images))
+    }
+
+    /// A turn that didn't finish pauses the queue. What is next is sent
+    /// after the event that ended the turn has been handled, since that may
+    /// still be stopping the process.
+    private func turnEnded(finished: Bool) {
+        if !finished, !queued.isEmpty { queuePaused = true }
+        guard pendingDirect != nil || !queued.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.sendQueued() } }
+    }
+
+    /// Takes a queued message back into the field, after what is written there.
+    private func editQueued(at index: Int) {
+        guard queued.indices.contains(index) else { return }
+        let message = queued.remove(at: index)
+        let written = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        composer.text = written.isEmpty ? message.text : written + "\n\n" + message.text
+        composer.attachments += message.images
+        window?.makeFirstResponder(composer.textView)
+        composer.textView.setSelectedRange(NSRange(location: (composer.text as NSString).length, length: 0))
+    }
+
+    private func removeQueued(at index: Int) {
+        guard queued.indices.contains(index) else { return }
+        for image in queued.remove(at: index).images { try? FileManager.default.removeItem(at: image.url) }
+    }
+
+    private func updateQueue() {
+        if queued.isEmpty, queuePaused { queuePaused = false }
+        queueView.show(queued.map { ($0.text, $0.images.count) }, paused: queuePaused)
+        composer.hasQueued = !queued.isEmpty
     }
 
     /// `contextOverride` replaces the selected tab's description, and
@@ -480,12 +598,14 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             endSession()
             showIdle()
             finishRun(.failed(error.message))
+            turnEnded(finished: false)
         } catch {
             let message = (error as? ControlError)?.message ?? error.localizedDescription
             addError(message, action: tryAgain)
             endSession()
             showIdle()
             finishRun(.failed(message))
+            turnEnded(finished: false)
         }
         scrollToBottom()
     }
@@ -709,6 +829,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             readTitle()
             finishRun(error.map { .failed($0) } ?? (stopped ? .stopped : .finished(lastAgentText)))
             if error == nil { announce(stopped ? "Stopped" : Self.firstLine(of: lastAgentText) ?? "\(kind.displayName) finished") }
+            turnEnded(finished: error == nil && !stopped)
         case .exited(let message):
             keepLiveText()
             finishToolRows()
@@ -727,6 +848,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             resuming = false
             showIdle()
             finishRun(.failed(message ?? "\(kind.displayName) stopped."))
+            turnEnded(finished: false)
         }
         if follow { scrollToBottom() } else { updateScrollDownButtonAfterLayout() }
     }
