@@ -43,6 +43,10 @@ final class AgentPanelView: NSView {
         NotificationCenter.default.addObserver(
             self, selector: #selector(tabLimitChanged(_:)), name: .agentTabsDidChange, object: nil
         )
+        // A new chat follows Settings' options, and the button names the models.
+        for name in [Notification.Name.agentModelOptionsDidChange, .agentModelsDidChange] {
+            NotificationCenter.default.addObserver(self, selector: #selector(tabLimitChanged(_:)), name: name, object: nil)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -52,11 +56,14 @@ final class AgentPanelView: NSView {
     override func viewDidUnhide() {
         super.viewDidUnhide()
         AgentEnvironment.warmUp(active.kind)
+        AgentModelCatalog.refreshAll()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil, !isHiddenOrHasHiddenAncestor { AgentEnvironment.warmUp(active.kind) }
+        guard window != nil, !isHiddenOrHasHiddenAncestor else { return }
+        AgentEnvironment.warmUp(active.kind)
+        AgentModelCatalog.refreshAll()
     }
 
     /// Ends every tab's agent and saves the chats. Called when the window closes.
@@ -95,6 +102,7 @@ final class AgentPanelView: NSView {
         tabBar.onNewChat = { [weak self] in self?.newChat() }
         tabBar.onHistory = { [weak self] button in self?.showHistory(from: button) }
         tabBar.onTools = { [weak self] button in self?.showTools(from: button) }
+        tabBar.onModel = { [weak self] button in self?.showModelOptions(from: button) }
         tabBar.onSchedules = { (NSApp.delegate as? AppDelegate)?.showScheduledSettings() }
 
         for view in [agentPicker, status, chatArea] as [NSView] {
@@ -219,8 +227,23 @@ final class AgentPanelView: NSView {
             tabs: chats.map { (title: $0.title, busy: $0.isBusy) },
             selected: activeIndex,
             canAddTab: chats.count < Settings.agentTabs,
-            tools: chat.tools
+            tools: chat.tools,
+            model: (chat.modelOptions.summary(for: chat.kind), chat.modelOptions.isDefault)
         )
+    }
+
+    // MARK: Model
+
+    /// The selected chat's model, effort, context and fast mode. Locked while
+    /// a turn runs, since a change restarts the agent.
+    private func showModelOptions(from button: NSView) {
+        let chat = active
+        AgentModelMenu.popUp(
+            below: button, kind: chat.kind, options: chat.modelOptions, locked: chat.isBusy,
+            note: chat.isBusy ? "Stop the agent to change the model." : "Settings sets them for new chats."
+        ) { [weak chat] options in
+            chat?.setModelOptions(options)
+        }
     }
 
     // MARK: Tools
@@ -350,6 +373,7 @@ final class AgentPanelView: NSView {
         case "closeTab": closeTab(activeIndex)
         case "history": tabBar.historyForTesting()
         case "tools": tabBar.toolsForTesting()
+        case "model": tabBar.modelForTesting()
         case "focus": window?.makeFirstResponder(input)
         default:
             if action.hasPrefix("tab"), let index = Int(action.dropFirst(3)), chats.indices.contains(index - 1) {
@@ -380,7 +404,7 @@ final class AgentPanelView: NSView {
     /// `completion` gets the chat's id and how its turn ended.
     func runScheduled(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String? {
         guard let index = tabForScheduledRun() else { return nil }
-        let chat = AgentChatView(kind: schedule.kind, tools: schedule.tools)
+        let chat = AgentChatView(kind: schedule.kind, tools: schedule.tools, modelOptions: schedule.modelOptions)
         if index == chats.count {
             add(chat)
             refresh()

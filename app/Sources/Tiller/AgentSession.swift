@@ -53,8 +53,13 @@ enum AgentKind: String, CaseIterable, Codable {
     /// `tools`, only the `tiller` MCP server, and all of those allowed without
     /// asking. `resume` continues that saved session. `--add-dir` brings in
     /// Tiller's skill library, whose `.claude/skills` and `.qoder/skills` the
-    /// CLIs read. `prompt` is the message, for Grok Build only.
-    func arguments(mcpConfig: String, systemPrompt: String, tools: [AgentTool], resume: String?, prompt: String? = nil) -> [String] {
+    /// CLIs read. `prompt` is the message, for Grok Build only. `options`
+    /// adds the model, effort, context and fast mode flags the CLI has.
+    func arguments(
+        mcpConfig: String, systemPrompt: String, tools: [AgentTool], resume: String?, prompt: String? = nil,
+        options: AgentModelOptions = AgentModelOptions()
+    ) -> [String] {
+        let modelFlags = modelArguments(options)
         if self == .grok {
             // -p takes the message, since grok reads no stdin. The MCP server
             // and skill library come from Tiller's block in its config.toml,
@@ -70,7 +75,7 @@ enum AgentKind: String, CaseIterable, Codable {
                 "--always-approve",
             ]
             if let resume { arguments += ["--resume", resume] }
-            return arguments
+            return arguments + modelFlags
         }
         if self == .agy {
             // -p takes the prompt as its value, which comes on stdin instead.
@@ -85,7 +90,7 @@ enum AgentKind: String, CaseIterable, Codable {
                 "--add-dir", AgentSkillStore.exposedFolder,
             ]
             if let resume { arguments += ["--conversation", resume] }
-            return arguments
+            return arguments + modelFlags
         }
         let toolNames = tools.flatMap(\.toolNames)
         let allowed = (["mcp__tiller"] + toolNames).joined(separator: ",")
@@ -100,6 +105,7 @@ enum AgentKind: String, CaseIterable, Codable {
             "--add-dir", AgentSkillStore.exposedFolder,
         ]
         if let resume { common += ["--resume", resume] }
+        common += modelFlags
         switch self {
         case .claude:
             return common + [
@@ -125,6 +131,34 @@ enum AgentKind: String, CaseIterable, Codable {
             return []
         }
     }
+
+    /// The flags for `options`. Codex takes them in thread/start instead.
+    private func modelArguments(_ options: AgentModelOptions) -> [String] {
+        var arguments: [String] = []
+        switch self {
+        case .claude:
+            // 1M is a suffix on the model, and fast mode a setting.
+            if var model = options.model {
+                if options.context == "1m", !model.hasSuffix("]") { model += "[1m]" }
+                arguments += ["--model", model]
+            }
+            if let effort = options.effort { arguments += ["--effort", effort] }
+            if options.fast { arguments += ["--settings", #"{"fastMode":true}"#] }
+        case .qodercli:
+            if let model = options.model { arguments += ["--model", model] }
+            if let effort = options.effort { arguments += ["--reasoning-effort", effort] }
+            if let context = options.context { arguments += ["--context-window", context] }
+        case .agy:
+            if let model = options.model { arguments += ["--model", model] }
+            if let effort = options.effort { arguments += ["--effort", effort] }
+        case .grok:
+            if let model = options.model { arguments += ["--model", model] }
+            if let effort = options.effort { arguments += ["--reasoning-effort", effort] }
+        case .codex:
+            break
+        }
+        return arguments
+    }
 }
 
 enum AgentEvent {
@@ -145,6 +179,8 @@ enum AgentEvent {
     case retrying
     /// Something went wrong that doesn't end the turn.
     case error(String)
+    /// Something to note in the transcript, such as fast mode being refused.
+    case notice(String)
     /// `stopped` means the user interrupted the turn.
     case turnFinished(error: String?, stopped: Bool)
     case exited(message: String?)
@@ -166,6 +202,8 @@ final class AgentSession {
     let kind: AgentKind
     /// The built-in tools the agent gets, fixed for the life of the process.
     let tools: [AgentTool]
+    /// The model, effort, context and fast mode, also fixed for the process.
+    let options: AgentModelOptions
     var onEvent: ((AgentEvent) -> Void)?
 
     /// The saved conversation this session continues, then the one it is in.
@@ -216,10 +254,14 @@ final class AgentSession {
     /// `sessionID` resumes that saved conversation in `directory`, the folder
     /// it was started in, since the CLIs keep sessions by folder. `chat` is
     /// the chat's id, which tiller_mcp passes on so Tiller knows who asks.
-    init(kind: AgentKind, tools: [AgentTool], chat: String, resuming sessionID: String? = nil, in directory: URL? = nil) {
+    init(
+        kind: AgentKind, tools: [AgentTool], options: AgentModelOptions = AgentModelOptions(), chat: String,
+        resuming sessionID: String? = nil, in directory: URL? = nil
+    ) {
         self.kind = kind
         self.chat = chat
         self.tools = tools
+        self.options = options
         self.sessionID = sessionID
         self.directory = directory
     }
@@ -246,7 +288,8 @@ final class AgentSession {
             systemPrompt: AgentEnvironment.systemPrompt(tools: tools, kind: kind),
             tools: tools,
             resume: sessionID,
-            prompt: prompt
+            prompt: prompt,
+            options: options
         )
         let directory = try self.directory ?? AgentEnvironment.workingDirectory()
         self.directory = directory
@@ -469,6 +512,11 @@ final class AgentSession {
             case "init":
                 if let id = message["session_id"] as? String, !id.isEmpty { started(id) }
                 onEvent?(.ready(model: message["model"] as? String))
+                // Claude Code turns fast mode off where the account or model can't have it.
+                if options.fast, kind == .claude, message["fast_mode_state"] as? String == "off" {
+                    let reason = (message["fast_mode_disabled_reason"] as? String).map { ": " + $0.replacingOccurrences(of: "_", with: " ") } ?? "."
+                    onEvent?(.notice("Fast mode is off" + reason))
+                }
                 if let names = message["skills"] as? [String] {
                     let plugins = (message["plugins"] as? [[String: Any]] ?? []).compactMap { plugin -> (name: String, path: String)? in
                         guard let name = plugin["name"] as? String, let path = plugin["path"] as? String else { return nil }
@@ -571,7 +619,7 @@ final class AgentSession {
     }
 
     private func requestCodexThread(cwd: URL) throws {
-        var params = AgentEnvironment.codexThreadParams(cwd: cwd, tools: tools)
+        var params = AgentEnvironment.codexThreadParams(cwd: cwd, tools: tools, options: options)
         if let sessionID {
             // Tiller shows its own copy of the transcript.
             params["threadId"] = sessionID
@@ -1179,30 +1227,39 @@ enum AgentEnvironment {
     /// asks for approval. Codex has no separate read or shell tools, so only
     /// writing changes anything: it lets the shell and patches write in the
     /// working folder.
-    static func codexThreadParams(cwd: URL, tools: [AgentTool]) -> [String: Any] {
-        [
+    /// `options` picks the model, its effort and its service tier; with no
+    /// model, the one Codex lists as its default, so a thread that ran
+    /// another goes back to it.
+    static func codexThreadParams(cwd: URL, tools: [AgentTool], options: AgentModelOptions = AgentModelOptions()) -> [String: Any] {
+        var config: [String: Any] = [
+            "mcp_servers": [
+                "tiller": [
+                    "command": mcpServerPath,
+                    "args": [String](),
+                    // Codex starts MCP servers with only a few variables
+                    // set, so pass on the one that picks this profile's socket.
+                    "env_vars": ["TILLER_SOCKET", "TILLER_CHAT"],
+                    "default_tools_approval_mode": "approve",
+                ],
+            ],
+            // Tools Codex has on by default.
+            "web_search": "disabled",
+            "features": [
+                "apps": false, "goals": false, "multi_agent": false, "image_generation": false, "memories": false,
+            ],
+        ]
+        if let effort = options.effort { config["model_reasoning_effort"] = effort }
+        var params: [String: Any] = [
             "cwd": cwd.path,
             "sandbox": tools.contains(.write) ? "workspace-write" : "read-only",
             "approvalPolicy": "never",
             "developerInstructions": systemPrompt(tools: tools),
-            "config": [
-                "mcp_servers": [
-                    "tiller": [
-                        "command": mcpServerPath,
-                        "args": [String](),
-                        // Codex starts MCP servers with only a few variables
-                        // set, so pass on the one that picks this profile's socket.
-                        "env_vars": ["TILLER_SOCKET", "TILLER_CHAT"],
-                        "default_tools_approval_mode": "approve",
-                    ],
-                ],
-                // Tools Codex has on by default.
-                "web_search": "disabled",
-                "features": [
-                    "apps": false, "goals": false, "multi_agent": false, "image_generation": false, "memories": false,
-                ],
-            ],
+            "config": config,
         ]
+        if let model = options.model ?? AgentModelCatalog.codexModel(nil)?.id { params["model"] = model }
+        // Standard speed unless fast is on, so a resumed thread doesn't keep a tier it had.
+        params["serviceTier"] = options.fast ? (AgentKind.codex.fastTier(model: options.model) ?? "priority") : "default"
+        return params
     }
 
     /// The folder chosen in Settings, or an empty one, so the agent doesn't

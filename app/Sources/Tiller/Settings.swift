@@ -263,6 +263,22 @@ enum Settings {
 
     static var agentTools: [AgentTool] { AgentTool.allCases.filter(agentToolEnabled) }
 
+    /// The model options new chats with `kind` start with. All the CLI's own by default.
+    static func agentModelOptions(for kind: AgentKind) -> AgentModelOptions {
+        defaults.data(forKey: "agentModelOptions.\(kind.rawValue)")
+            .flatMap { try? JSONDecoder().decode(AgentModelOptions.self, from: $0) } ?? AgentModelOptions()
+    }
+
+    static func setAgentModelOptions(_ options: AgentModelOptions, for kind: AgentKind) {
+        let key = "agentModelOptions.\(kind.rawValue)"
+        if options.isDefault {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(try? JSONEncoder().encode(options), forKey: key)
+        }
+        NotificationCenter.default.post(name: .agentModelOptionsDidChange, object: nil)
+    }
+
     /// As typed. Empty means Tiller's own empty folder.
     static var agentFolder: String {
         get { defaults.string(forKey: "agentFolder") ?? "" }
@@ -344,6 +360,8 @@ enum AgentTool: String, CaseIterable, Codable {
 extension Notification.Name {
     /// Posted when `AgentKind.current` changes, from the panel or from Settings.
     static let agentKindDidChange = Notification.Name("TillerAgentKindDidChange")
+    /// Posted when Settings' model options for new chats change.
+    static let agentModelOptionsDidChange = Notification.Name("TillerAgentModelOptionsDidChange")
     /// Posted when `Settings.agentTabs` changes.
     static let agentTabsDidChange = Notification.Name("TillerAgentTabsDidChange")
     /// Posted when `Settings.tabLayout` changes.

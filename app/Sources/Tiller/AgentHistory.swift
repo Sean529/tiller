@@ -14,6 +14,9 @@ struct AgentConversation: Codable, Equatable {
     /// The built-in tools this chat allows. Nil for chats saved before chats
     /// had their own, which use Settings'.
     var tools: [AgentTool]?
+    /// The model, effort, context and fast mode this chat runs with. Nil for
+    /// chats saved before chats had them, which use Settings'.
+    var modelOptions: AgentModelOptions?
     /// The scheduled prompt that started the chat, if one did.
     var scheduleID: String?
     var created: Date

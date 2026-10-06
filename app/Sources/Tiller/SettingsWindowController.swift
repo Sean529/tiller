@@ -1064,6 +1064,12 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     private var pathKindPopUp: NSPopUpButton?
     private let pathField = NSTextField()
     private let pathNote = SettingsPane.note()
+    /// Picks which CLI's model options `modelButton` shows.
+    private var modelKindPopUp: NSPopUpButton?
+    private lazy var modelButton = NSButton(title: "", target: self, action: #selector(chooseModel(_:)))
+    private var modelKind: AgentKind {
+        (modelKindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentKind.init) ?? .current
+    }
     /// What the lookup found, for kinds whose lookup has finished. Nil values mean not found.
     private var detected: [AgentKind: String?] = [:]
     /// The CLI whose path is being edited.
@@ -1132,6 +1138,27 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         Self.linkLabel(of: addRow("Command:", Self.fixWidth(pathRow, Self.wideControlWidth)), to: pathField)
         addNote(pathNote)
         loadPathField()
+
+        // Like the command row, the popup picks whose options the button shows.
+        let modelKindPopUp = Self.popUp(
+            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
+            target: self, action: #selector(modelKindChanged(_:))
+        )
+        self.modelKindPopUp = modelKindPopUp
+        modelButton.bezelStyle = .push
+        modelButton.lineBreakMode = .byTruncatingTail
+        modelButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let modelRow = NSStackView(views: [modelKindPopUp, modelButton])
+        modelRow.spacing = 8
+        Self.linkLabel(of: addRow("Model:", Self.fixWidth(modelRow, Self.wideControlWidth)), to: modelButton)
+        let modelNote = Self.note("Model, thinking effort, context window and fast mode for new chats, where the CLI has them. Each chat can change its own from the model button.")
+        modelNote.lineBreakMode = .byWordWrapping
+        modelNote.preferredMaxLayoutWidth = Self.wideControlWidth
+        addNote(modelNote)
+        showModelOptions()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(modelsChanged(_:)), name: .agentModelsDidChange, object: nil
+        )
 
         let checkboxes = AgentTool.allCases.enumerated().map { index, tool in
             let checkbox = NSButton(checkboxWithTitle: tool.displayName, target: self, action: #selector(toolChanged(_:)))
@@ -1253,6 +1280,29 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             Self.show("Its instructions and project settings load too.", in: folderNote)
         } else {
             Self.show("Not a folder.", in: folderNote, warning: true)
+        }
+    }
+
+    private func showModelOptions() {
+        let kind = modelKind
+        let options = kind.defaultModelOptions
+        modelButton.title = options.isDefault ? "\(kind.displayName)'s own" : options.summary(for: kind)
+    }
+
+    @objc private func modelKindChanged(_ sender: NSPopUpButton) {
+        showModelOptions()
+        AgentModelCatalog.refresh(modelKind)
+    }
+
+    @objc private func modelsChanged(_ notification: Notification) {
+        showModelOptions()
+    }
+
+    @objc private func chooseModel(_ sender: NSButton) {
+        let kind = modelKind
+        AgentModelMenu.popUp(below: sender, kind: kind, options: kind.defaultModelOptions) { [weak self] options in
+            Settings.setAgentModelOptions(options, for: kind)
+            self?.showModelOptions()
         }
     }
 

@@ -33,6 +33,13 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     var title: String { conversation?.title ?? "New Chat" }
     /// The built-in tools this chat allows. A new chat starts with Settings'.
     private(set) var tools: [AgentTool]
+    /// The model, effort, context and fast mode this chat runs with. A new
+    /// chat follows Settings' for its agent until one is picked for it.
+    var modelOptions: AgentModelOptions {
+        (conversation?.modelOptions ?? pickedOptions ?? kind.defaultModelOptions).supported(by: kind)
+    }
+    /// Picked for a new chat before its first message.
+    private var pickedOptions: AgentModelOptions?
 
     /// Where the panel puts its tab bar, between the transcript and the field.
     let tabBarHost = NSView()
@@ -99,12 +106,16 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
 
     /// A new chat, or a saved one with its transcript. A new chat can be
-    /// given its agent and tools instead of those in Settings.
-    init(conversation: AgentConversation? = nil, kind: AgentKind? = nil, tools: [AgentTool]? = nil) {
+    /// given its agent, tools and model options instead of those in Settings.
+    init(
+        conversation: AgentConversation? = nil, kind: AgentKind? = nil, tools: [AgentTool]? = nil,
+        modelOptions: AgentModelOptions? = nil
+    ) {
         id = conversation?.id ?? UUID().uuidString
         self.conversation = conversation
         presetKind = conversation == nil ? kind : nil
         self.tools = conversation?.tools ?? tools ?? Settings.agentTools
+        pickedOptions = conversation == nil ? modelOptions : nil
         loadState = conversation == nil ? .loaded : .unloaded
         super.init(frame: .zero)
         build()
@@ -342,6 +353,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     /// Settings or the picker changed the agent for new chats.
     @objc private func currentAgentChanged(_ notification: Notification) {
+        // Options picked for one agent don't carry over to another.
+        if conversation == nil, presetKind == nil { pickedOptions = nil }
         if session == nil { showIdle() }
     }
 
@@ -443,6 +456,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         )
         if let schedule, conversation.scheduleID == nil { conversation.scheduleID = schedule.id }
         conversation.tools = tools
+        conversation.modelOptions = modelOptions
         conversation.updated = Date()
         save(conversation)
         let session = self.session ?? makeSession()
@@ -502,7 +516,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         if conversation.sessionID != nil, let path = conversation.directory {
             directory = URL(fileURLWithPath: path)
         }
-        let session = AgentSession(kind: conversation.kind, tools: tools, chat: id, resuming: conversation.sessionID, in: directory)
+        let session = AgentSession(
+            kind: conversation.kind, tools: tools, options: modelOptions, chat: id, resuming: conversation.sessionID,
+            in: directory
+        )
         session.onEvent = { [weak self] event in self?.handle(event) }
         self.session = session
         resuming = conversation.sessionID != nil
@@ -521,6 +538,24 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         if var conversation {
             conversation.tools = tools
             save(conversation)
+        }
+        if session != nil {
+            endSession()
+            showIdle()
+        }
+        onChange?()
+    }
+
+    /// Changes the model options. Like the tools, the CLIs take them when they
+    /// start, so a running agent is stopped and the next message resumes its
+    /// session with the new ones. Not while a turn is running.
+    func setModelOptions(_ options: AgentModelOptions) {
+        guard !isBusy, options != modelOptions else { return }
+        if var conversation {
+            conversation.modelOptions = options
+            save(conversation)
+        } else {
+            pickedOptions = options
         }
         if session != nil {
             endSession()
@@ -666,6 +701,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             setStatus("Retrying…", busy: true)
         case .error(let message):
             addError(message)
+        case .notice(let message):
+            addNote(message)
         case .turnFinished(let error, let stopped):
             keepLiveText()
             // A call the turn ended without answering won't be answered now.

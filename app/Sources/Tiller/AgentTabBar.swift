@@ -1,8 +1,8 @@
 import AppKit
 
 /// The row above the message field: a numbered button per open chat on the
-/// left, and tools, new tab, new chat, history and scheduled prompts buttons
-/// on the right.
+/// left, and model, tools, new tab, new chat, history and scheduled prompts
+/// buttons on the right.
 final class AgentTabBar: NSView {
     static let height: CGFloat = 26
 
@@ -14,9 +14,12 @@ final class AgentTabBar: NSView {
     var onHistory: ((NSView) -> Void)?
     /// Gets the tools button, to show the menu from.
     var onTools: ((NSView) -> Void)?
+    /// Gets the model button, to show the menu from.
+    var onModel: ((NSView) -> Void)?
     var onSchedules: (() -> Void)?
 
     private let tabStack = NSStackView()
+    private let modelButton = Theme.iconButton("cpu", label: "Model")
     private let toolsButton = Theme.iconButton("wrench.and.screwdriver", label: "Tools")
     private let newTabButton = Theme.iconButton("plus", label: "New Tab")
     private let newChatButton = Theme.iconButton("square.and.pencil", label: "New Chat")
@@ -34,14 +37,17 @@ final class AgentTabBar: NSView {
         historyButton.action = #selector(history(_:))
         toolsButton.target = self
         toolsButton.action = #selector(tools(_:))
+        modelButton.target = self
+        modelButton.action = #selector(model(_:))
         schedulesButton.target = self
         schedulesButton.action = #selector(schedules(_:))
-        let buttons = NSStackView(views: [toolsButton, newTabButton, newChatButton, historyButton, schedulesButton])
+        let buttons = NSStackView(views: [modelButton, toolsButton, newTabButton, newChatButton, historyButton, schedulesButton])
         buttons.spacing = 4
         // When the tabs and buttons don't fit the panel's width, the bar gives
         // way rather than holding the panel wider: scheduled prompts, then
-        // tools, drop out first.
+        // model, then tools, drop out first.
         buttons.setVisibilityPriority(.init(300), for: schedulesButton)
+        buttons.setVisibilityPriority(.init(350), for: modelButton)
         buttons.setVisibilityPriority(.init(400), for: toolsButton)
         // Only the buttons give way. The tabs hold the panel as wide as they
         // need, so none ends up under the buttons.
@@ -62,8 +68,13 @@ final class AgentTabBar: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     /// The new tab button shows only while there is room for another tab.
-    /// `tools` are the selected chat's, which tint the tools button when any is on.
-    func update(tabs: [(title: String, busy: Bool)], selected: Int, canAddTab: Bool, tools: [AgentTool]) {
+    /// `tools` are the selected chat's, which tint the tools button when any
+    /// is on. `model` describes its model options, which tint the model
+    /// button when any differs from the CLI's own.
+    func update(
+        tabs: [(title: String, busy: Bool)], selected: Int, canAddTab: Bool, tools: [AgentTool],
+        model: (summary: String, isDefault: Bool)
+    ) {
         while tabStack.arrangedSubviews.count > tabs.count { tabStack.arrangedSubviews.last?.removeFromSuperview() }
         while tabStack.arrangedSubviews.count < tabs.count {
             let index = tabStack.arrangedSubviews.count
@@ -85,12 +96,15 @@ final class AgentTabBar: NSView {
         toolsButton.toolTip = tools.isEmpty
             ? "Tools: browser only"
             : "Tools: browser, " + tools.map { $0.displayName.lowercased() }.joined(separator: ", ")
+        modelButton.contentTintColor = model.isDefault ? .secondaryLabelColor : Theme.accentColor
+        modelButton.toolTip = "Model: " + model.summary
     }
 
     @objc private func newTab(_ sender: Any?) { onNewTab?() }
     @objc private func newChat(_ sender: Any?) { onNewChat?() }
     @objc private func history(_ sender: Any?) { onHistory?(historyButton) }
     @objc private func tools(_ sender: Any?) { onTools?(toolsButton) }
+    @objc private func model(_ sender: Any?) { onModel?(modelButton) }
     @objc private func schedules(_ sender: Any?) { onSchedules?() }
 
     #if DEBUG
@@ -98,6 +112,7 @@ final class AgentTabBar: NSView {
     /// hangs off that button, as it does for a real click.
     func historyForTesting() { history(nil) }
     func toolsForTesting() { tools(nil) }
+    func modelForTesting() { model(nil) }
     #endif
 }
 

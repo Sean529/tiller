@@ -155,7 +155,7 @@ fn tools() -> Value {
         },
         {
             "name": "list_schedules",
-            "description": "Lists the prompts Tiller sends by itself on a schedule, each run in a new chat: id, name, prompt, agent, tools, rule, whether it is on, its next run and how its last run went.",
+            "description": "Lists the prompts Tiller sends by itself on a schedule, each run in a new chat: id, name, prompt, agent, tools, model options, rule, whether it is on, its next run and how its last run went.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
@@ -177,6 +177,10 @@ fn tools() -> Value {
                 },
                 "agent": { "type": "string", "enum": ["qodercli", "claude", "codex", "agy", "grok"], "description": "Which CLI runs it. Defaults to this chat's." },
                 "tools": { "type": "array", "items": { "type": "string", "enum": ["read", "write", "shell"] }, "description": "Built-in tools besides Tiller's: read files, write and edit files, run commands. At most this chat's own. Default none." },
+                "model": { "type": "string", "description": "Model id or alias the agent runs, as its CLI's --model takes it. Empty for the CLI's own. Default as in Settings." },
+                "effort": { "type": "string", "description": "Thinking effort, such as low, medium or high; the levels depend on the agent. Empty for the CLI's own." },
+                "context": { "type": "string", "description": "Context window: \"1m\" for Claude Code (needs a model), or tokens such as \"1000000\" for Qoder CLI. Empty for the CLI's own." },
+                "fast": { "type": "boolean", "description": "Fast mode, for Claude Code and Codex models that have it." },
                 "enabled": { "type": "boolean", "description": "Whether it runs. Default true for a new one." },
             } },
         },

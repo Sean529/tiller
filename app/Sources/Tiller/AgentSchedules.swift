@@ -205,6 +205,9 @@ struct ScheduledPrompt: Codable, Equatable {
     var prompt: String
     var kind: AgentKind
     var tools: [AgentTool]
+    /// The model, effort, context and fast mode its runs use. Nil follows
+    /// Settings' for its agent.
+    var modelOptions: AgentModelOptions?
     var rule: ScheduleRule
     var enabled: Bool
     /// When it next runs. Nil while it is off or its rule never matches.
@@ -564,6 +567,7 @@ enum AgentScheduleControl {
             }
             return kind
         }
+        let modelChange = try parseModelOptions(params)
         let tools = try (params["tools"] as? [Any]).map { list in
             try list.map { item in
                 guard let name = item as? String, let tool = AgentTool(rawValue: name) else {
@@ -597,7 +601,17 @@ enum AgentScheduleControl {
         }
         if let prompt { schedule.prompt = prompt }
         if let rule { schedule.rule = rule }
-        if let kind { schedule.kind = kind }
+        if let kind, kind != schedule.kind {
+            schedule.kind = kind
+            // Options for one agent don't carry over to another.
+            schedule.modelOptions = nil
+        }
+        if let modelChange {
+            var options = schedule.modelOptions ?? schedule.kind.defaultModelOptions
+            modelChange(&options)
+            try checkModelOptions(options, for: schedule.kind)
+            schedule.modelOptions = options
+        }
         if let name = (params["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
             schedule.name = name
         }
@@ -615,6 +629,44 @@ enum AgentScheduleControl {
         var result = describe(store.schedule(schedule.id) ?? schedule)
         result["created"] = original == nil
         return result
+    }
+
+    /// `model`, `effort`, `context` and `fast`, where an empty string goes
+    /// back to the CLI's own. Nil when none is given.
+    private static func parseModelOptions(_ params: [String: Any]) throws -> ((inout AgentModelOptions) -> Void)? {
+        func text(_ key: String) throws -> String?? {
+            guard let value = params[key] else { return nil }
+            guard let string = value as? String else { throw ControlError("\(key) is a string; an empty one means the CLI's own.") }
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .some(trimmed.isEmpty ? nil : trimmed)
+        }
+        let model = try text("model"), effort = try text("effort"), context = try text("context")
+        let fast = params["fast"] as? Bool
+        guard model != nil || effort != nil || context != nil || fast != nil else { return nil }
+        return { options in
+            if let model { options.model = model }
+            if let effort { options.effort = effort }
+            if let context { options.context = context }
+            if let fast { options.fast = fast }
+        }
+    }
+
+    /// Refuses options the agent doesn't have, saying which it does.
+    private static func checkModelOptions(_ options: AgentModelOptions, for kind: AgentKind) throws {
+        let name = kind.displayName
+        if let effort = options.effort, !kind.effortLevels(model: options.model).contains(effort) {
+            let levels = kind.effortLevels(model: options.model)
+            throw ControlError("effort for \(name) is one of \(levels.joined(separator: ", ")), or empty for its own.")
+        }
+        if let context = options.context {
+            let sizes = kind.contextSizes.map(\.value)
+            if sizes.isEmpty { throw ControlError("\(name) has no context window choice.") }
+            if !sizes.contains(context) { throw ControlError("context for \(name) is one of \(sizes.joined(separator: ", ")).") }
+            if kind == .claude, options.model == nil { throw ControlError("context 1m for \(name) needs a model, such as opus.") }
+        }
+        if options.fast, kind.fastTier(model: options.model) == nil {
+            throw ControlError("\(name) has no fast mode\(kind == .codex ? " for this model" : "").")
+        }
     }
 
     /// `{"every_minutes": 30}`, `{"daily": "09:00"}`, `{"weekdays": "09:00"}`
@@ -663,6 +715,11 @@ enum AgentScheduleControl {
             "id": schedule.id, "name": schedule.name, "prompt": schedule.prompt, "agent": schedule.kind.rawValue,
             "tools": schedule.tools.map(\.rawValue), "rule": rule, "enabled": schedule.enabled,
         ]
+        let options = schedule.modelOptions ?? schedule.kind.defaultModelOptions
+        if let model = options.model { result["model"] = model }
+        if let effort = options.effort { result["effort"] = effort }
+        if let context = options.context { result["context"] = context }
+        if options.fast { result["fast"] = true }
         if let next = schedule.nextRun { result["next_run"] = dates.string(from: next) }
         if let last = schedule.lastRun { result["last_run"] = dates.string(from: last) }
         if let outcome = schedule.lastResult { result["last_result"] = outcome.displayText }

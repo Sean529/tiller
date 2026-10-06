@@ -278,6 +278,9 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
     private let nameField = NSTextField()
     private var kindPopUp: NSPopUpButton?
     private var toolBoxes: [NSButton] = []
+    private lazy var modelButton = NSButton(title: "", target: self, action: #selector(chooseModel(_:)))
+    /// Nil follows Settings' for the agent.
+    private var modelOptions: AgentModelOptions?
     private let rulePopUp = NSPopUpButton()
     private let intervalField = NSTextField()
     private let unitPopUp = NSPopUpButton()
@@ -323,6 +326,13 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         )
         kindPopUp = popUp
         addRow("Agent:", popUp)
+
+        modelOptions = schedule?.modelOptions
+        modelButton.bezelStyle = .push
+        modelButton.lineBreakMode = .byTruncatingTail
+        modelButton.widthAnchor.constraint(lessThanOrEqualToConstant: Self.fieldWidth).isActive = true
+        addRow("Model:", modelButton)
+        showModelOptions()
 
         let tools = schedule?.tools ?? Settings.agentTools
         toolBoxes = AgentTool.allCases.map { tool in
@@ -561,6 +571,29 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
 
     @objc private func kindChanged(_ sender: Any?) {
         completion.hide()
+        // Options for one agent don't carry over to another.
+        modelOptions = nil
+        showModelOptions()
+    }
+
+    // MARK: Model
+
+    private func showModelOptions() {
+        let kind = kind
+        if let modelOptions {
+            modelButton.title = modelOptions.summary(for: kind)
+        } else {
+            let options = kind.defaultModelOptions
+            modelButton.title = "As in Settings (" + (options.isDefault ? "\(kind.displayName)'s own" : options.summary(for: kind)) + ")"
+        }
+    }
+
+    @objc private func chooseModel(_ sender: NSButton) {
+        let kind = kind
+        AgentModelMenu.popUp(below: sender, kind: kind, options: modelOptions ?? kind.defaultModelOptions) { [weak self] options in
+            self?.modelOptions = options
+            self?.showModelOptions()
+        }
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -607,6 +640,7 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         schedule.prompt = prompt
         schedule.kind = kind
         schedule.tools = tools
+        schedule.modelOptions = modelOptions
         schedule.rule = rule
         do {
             try schedule.validate()
