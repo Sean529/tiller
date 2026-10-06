@@ -421,10 +421,8 @@ final class AgentScheduler: NSObject, UNUserNotificationCenterDelegate {
         }
         askForNotifications()
         let id = schedule.id, name = schedule.name
-        guard let chat = browser.runScheduledPrompt(schedule, completion: { [weak self] chat, outcome in
+        let chat = browser.runScheduledPrompt(schedule) { [weak self] chat, outcome in
             self?.finished(id: id, name: name, chat: chat, outcome: outcome)
-        }) else {
-            return store.record(.skipped("every chat tab was busy or had a message being written"), for: schedule.id, at: now)
         }
         running[schedule.id] = chat
         store.record(.running, for: schedule.id, at: now, chat: chat)

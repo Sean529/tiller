@@ -29,6 +29,9 @@ final class AgentPanelView: NSView {
     private let chatArea = NSView()
     private let tabBar = AgentTabBar()
     private var chats: [AgentChatView] = []
+    /// Scheduled runs going on in the background. They take no tab until
+    /// opened, and leave once their turn ends.
+    private var scheduledChats: [AgentChatView] = []
     private var activeIndex = 0
     private var active: AgentChatView { chats[activeIndex] }
     private var historyPopover: NSPopover?
@@ -69,7 +72,7 @@ final class AgentPanelView: NSView {
     /// Ends every tab's agent and saves the chats. Called when the window closes.
     func shutDown() {
         saveTabs()
-        chats.forEach { $0.shutDown() }
+        (chats + scheduledChats).forEach { $0.shutDown() }
         AgentHistoryStore.shared.flush()
         AgentHistoryStore.shared.waitForWrites()
     }
@@ -136,14 +139,24 @@ final class AgentPanelView: NSView {
     }
 
     private func add(_ chat: AgentChatView, at index: Int? = nil) {
+        attach(chat)
+        chats.insert(chat, at: index ?? chats.count)
+    }
+
+    /// Puts the chat in the panel, hidden, without giving it a tab.
+    private func attach(_ chat: AgentChatView) {
         chat.context = { [weak self] in
             guard let self else { return "" }
             return self.delegate?.agentPanelContext(self) ?? ""
         }
         chat.onChange = { [weak self, weak chat] in
-            guard let self, let chat, self.chats.contains(chat) else { return }
-            self.refresh()
-            self.saveTabs()
+            guard let self, let chat else { return }
+            if self.chats.contains(chat) {
+                self.refresh()
+                self.saveTabs()
+            } else if self.scheduledChats.contains(chat) {
+                self.refresh()
+            }
         }
         chat.isHidden = true
         chat.translatesAutoresizingMaskIntoConstraints = false
@@ -154,7 +167,6 @@ final class AgentPanelView: NSView {
             chat.leadingAnchor.constraint(equalTo: chatArea.leadingAnchor),
             chat.trailingAnchor.constraint(equalTo: chatArea.trailingAnchor),
         ])
-        chats.insert(chat, at: index ?? chats.count)
     }
 
     /// Shows the tab at `index`, with the tab bar moved into it.
@@ -219,7 +231,7 @@ final class AgentPanelView: NSView {
     /// The header and tab bar show the selected chat.
     private func refresh() {
         let chat = active
-        isBusy = chats.contains { $0.isBusy }
+        isBusy = (chats + scheduledChats).contains { $0.isBusy }
         agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: chat.kind) ?? 0)
         status.show(chat.statusText, busy: chat.statusBusy)
         tabBar.update(
@@ -318,17 +330,45 @@ final class AgentPanelView: NSView {
 
     /// Switches to the chat if a tab has it, or opens it in the selected tab.
     func open(_ id: String) {
+        open(id, newTabIfRoom: false)
+    }
+
+    /// Shows a scheduled run's chat: in a new tab while there is room, else
+    /// in the selected tab.
+    func openScheduled(_ id: String) {
+        open(id, newTabIfRoom: true)
+    }
+
+    /// A run still going keeps going in its new tab.
+    private func open(_ id: String, newTabIfRoom: Bool) {
         if let index = chats.firstIndex(where: { $0.id == id }) {
             return select(index, focus: true)
         }
-        guard let conversation = AgentHistoryStore.shared.conversation(id) else { return }
-        let chat = AgentChatView(conversation: conversation)
-        replace(activeIndex, with: chat)
+        let chat: AgentChatView
+        if let index = scheduledChats.firstIndex(where: { $0.id == id }) {
+            chat = scheduledChats.remove(at: index)
+            chat.removeFromSuperview()
+        } else {
+            guard let conversation = AgentHistoryStore.shared.conversation(id) else { return }
+            chat = AgentChatView(conversation: conversation)
+        }
+        if newTabIfRoom, chats.count < Settings.agentTabs {
+            add(chat)
+            select(chats.count - 1, focus: true)
+        } else {
+            replace(activeIndex, with: chat)
+        }
         chat.scrollToBottom()
     }
 
     /// A tab showing the chat gets a new one instead.
     private func delete(_ id: String) {
+        if let index = scheduledChats.firstIndex(where: { $0.id == id }) {
+            let chat = scheduledChats.remove(at: index)
+            chat.shutDown()
+            chat.removeFromSuperview()
+            refresh()
+        }
         if let index = chats.firstIndex(where: { $0.id == id }) {
             let old = chats.remove(at: index)
             old.shutDown()
@@ -395,45 +435,28 @@ final class AgentPanelView: NSView {
     // MARK: Scheduled runs
 
     func isChatBusy(_ id: String) -> Bool {
-        chats.contains { $0.id == id && $0.isBusy }
+        (chats + scheduledChats).contains { $0.id == id && $0.isBusy }
     }
 
-    /// Sends a scheduled prompt in a new chat, without selecting it or taking
-    /// the keyboard. Returns the chat's id, or nil when no tab can take it.
-    /// `completion` gets the chat's id and how its turn ended.
-    func runScheduled(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String? {
-        guard let index = tabForScheduledRun() else { return nil }
+    /// Sends a scheduled prompt in a new chat in the background, taking no
+    /// tab. Once its turn ends the chat leaves, unless opened in a tab by
+    /// then; it stays in history. `completion` gets the chat's id and how
+    /// its turn ended.
+    func runScheduled(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String {
         let chat = AgentChatView(kind: schedule.kind, tools: schedule.tools, modelOptions: schedule.modelOptions)
-        if index == chats.count {
-            add(chat)
-            refresh()
-            saveTabs()
-        } else {
-            let hadFocus = hasKeyboardFocus
-            let old = chats.remove(at: index)
-            old.shutDown()
-            old.removeFromSuperview()
-            add(chat, at: index)
-            // The selected tab is replaced only when nothing else can be, and
-            // keeps the keyboard if it had it.
-            select(activeIndex, focus: hadFocus && index == activeIndex)
-        }
+        attach(chat)
+        scheduledChats.append(chat)
         let id = chat.id
-        chat.runScheduled(schedule) { outcome in completion(id, outcome) }
+        chat.runScheduled(schedule) { [weak self, weak chat] outcome in
+            completion(id, outcome)
+            guard let self, let chat, let index = self.scheduledChats.firstIndex(of: chat) else { return }
+            self.scheduledChats.remove(at: index)
+            chat.shutDown()
+            chat.removeFromSuperview()
+            self.refresh()
+        }
+        refresh()
         return id
-    }
-
-    /// Where a scheduled run goes, from least to most in the way: an empty
-    /// tab you aren't looking at, a new tab while there is room, the
-    /// longest unused idle tab you aren't looking at, then the selected tab.
-    /// Never a tab whose agent is working or that has a message being written.
-    private func tabForScheduledRun() -> Int? {
-        let idle = chats.indices.filter { !chats[$0].isBusy && !chats[$0].hasDraft }
-        if let empty = idle.first(where: { chats[$0].isEmpty && $0 != activeIndex }) { return empty }
-        if chats.count < Settings.agentTabs { return chats.count }
-        let others = idle.filter { $0 != activeIndex }
-        if let oldest = others.min(by: { chats[$0].updated < chats[$1].updated }) { return oldest }
-        return idle.contains(activeIndex) ? activeIndex : nil
     }
 }
 

@@ -872,7 +872,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     /// Sends a scheduled prompt in a new agent chat. The panel stays as it
     /// is; while hidden, its button's dot shows the run working.
-    func runScheduledPrompt(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String? {
+    func runScheduledPrompt(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String {
         agentPanel.runScheduled(schedule, completion: completion)
     }
 
@@ -886,7 +886,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
         if !agentPanelShown { toggleAgentPanel(nil) }
-        agentPanel.open(id)
+        agentPanel.openScheduled(id)
     }
 
     #if DEBUG

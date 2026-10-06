@@ -24,12 +24,6 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// A new chat uses the agent picked for new chats until its first
     /// message, unless it was made for another.
     var kind: AgentKind { conversation?.kind ?? presetKind ?? .current }
-    /// When the chat last changed, for picking a tab a scheduled run can take.
-    var updated: Date { conversation?.updated ?? .distantPast }
-    /// Whether the message field has text or images not yet sent.
-    var hasDraft: Bool {
-        !composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !composer.attachments.isEmpty
-    }
     var title: String { conversation?.title ?? "New Chat" }
     /// The built-in tools this chat allows. A new chat starts with Settings'.
     private(set) var tools: [AgentTool]
