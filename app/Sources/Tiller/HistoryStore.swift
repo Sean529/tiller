@@ -9,9 +9,11 @@ struct HistoryPage: Sendable {
     /// The site's favicon, which only `search` fills in.
     var icon: Data?
 
-    /// The title, or the URL without its scheme when the page has none.
+    /// The title on one line, as some pages' titles hold line breaks; the
+    /// address without its scheme when there is none.
     var displayTitle: String {
-        title.isEmpty ? HistoryStore.bare(url) : title
+        let line = title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return line.isEmpty ? HistoryStore.bare(url) : line
     }
 }
 

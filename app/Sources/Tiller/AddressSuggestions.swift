@@ -278,11 +278,20 @@ private final class SuggestionRow: NSView {
         icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
         icon.setContentHuggingPriority(.required, for: .horizontal)
-        title.lineBreakMode = .byTruncatingTail
-        title.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
+        // One line each: a long title or address is cut short, never wrapped
+        // over the rows around it.
+        clipsToBounds = true
+        for label in [title, url] {
+            label.lineBreakMode = .byTruncatingTail
+            label.maximumNumberOfLines = 1
+            label.usesSingleLineMode = true
+        }
+        // The title keeps the room it needs; the address gives way first and
+        // never takes more than two fifths of the row.
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         url.font = .systemFont(ofSize: Theme.FontSize.secondary)
-        url.lineBreakMode = .byTruncatingTail
-        url.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        url.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
+        url.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.4).isActive = true
         let stack = NSStackView(views: [icon, title, url])
         stack.spacing = 8
         stack.setCustomSpacing(10, after: icon)
@@ -362,8 +371,13 @@ private final class SuggestionRow: NSView {
 
     /// `text` with the first run matching `typed` in bold, case aside.
     private static func highlighting(_ text: String, _ typed: String, color: NSColor) -> NSAttributedString {
+        // Without a paragraph style of its own the text would wrap, whatever
+        // the label's line break mode.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
         let result = NSMutableAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: Theme.FontSize.body), .foregroundColor: color,
+            .paragraphStyle: paragraph,
         ])
         if !typed.isEmpty, let range = text.range(of: typed, options: [.caseInsensitive, .diacriticInsensitive]) {
             result.addAttribute(.font, value: NSFont.systemFont(ofSize: Theme.FontSize.body, weight: .semibold), range: NSRange(range, in: text))
