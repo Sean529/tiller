@@ -103,7 +103,6 @@ final class AgentPanelView: NSView {
         tabBar.onHistory = { [weak self] button in self?.showHistory(from: button) }
         tabBar.onTools = { [weak self] button in self?.showTools(from: button) }
         tabBar.onModel = { [weak self] button in self?.showModelOptions(from: button) }
-        tabBar.onSchedules = { (NSApp.delegate as? AppDelegate)?.showScheduledSettings() }
 
         for view in [agentPicker, status, chatArea] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false

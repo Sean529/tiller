@@ -1,8 +1,8 @@
 import AppKit
 
 /// The row above the message field: a numbered button per open chat on the
-/// left, and model, tools, new tab, new chat, history and scheduled prompts
-/// buttons on the right.
+/// left, and model, tools, new tab, new chat and history buttons on the
+/// right.
 final class AgentTabBar: NSView {
     static let height: CGFloat = 26
 
@@ -16,7 +16,6 @@ final class AgentTabBar: NSView {
     var onTools: ((NSView) -> Void)?
     /// Gets the model button, to show the menu from.
     var onModel: ((NSView) -> Void)?
-    var onSchedules: (() -> Void)?
 
     private let tabStack = NSStackView()
     private let modelButton = Theme.iconButton("cpu", label: "Model")
@@ -24,7 +23,6 @@ final class AgentTabBar: NSView {
     private let newTabButton = Theme.iconButton("plus", label: "New Tab")
     private let newChatButton = Theme.iconButton("square.and.pencil", label: "New Chat")
     private let historyButton = Theme.iconButton("clock.arrow.circlepath", label: "Chat History")
-    private let schedulesButton = Theme.iconButton("calendar.badge.clock", label: "Scheduled Prompts")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -39,14 +37,11 @@ final class AgentTabBar: NSView {
         toolsButton.action = #selector(tools(_:))
         modelButton.target = self
         modelButton.action = #selector(model(_:))
-        schedulesButton.target = self
-        schedulesButton.action = #selector(schedules(_:))
-        let buttons = NSStackView(views: [modelButton, toolsButton, newTabButton, newChatButton, historyButton, schedulesButton])
+        let buttons = NSStackView(views: [modelButton, toolsButton, newTabButton, newChatButton, historyButton])
         buttons.spacing = 4
         // When the tabs and buttons don't fit the panel's width, the bar gives
-        // way rather than holding the panel wider: scheduled prompts, then
-        // model, then tools, drop out first.
-        buttons.setVisibilityPriority(.init(300), for: schedulesButton)
+        // way rather than holding the panel wider: model, then tools, drop
+        // out first.
         buttons.setVisibilityPriority(.init(350), for: modelButton)
         buttons.setVisibilityPriority(.init(400), for: toolsButton)
         // Only the buttons give way. The tabs hold the panel as wide as they
@@ -105,7 +100,6 @@ final class AgentTabBar: NSView {
     @objc private func history(_ sender: Any?) { onHistory?(historyButton) }
     @objc private func tools(_ sender: Any?) { onTools?(toolsButton) }
     @objc private func model(_ sender: Any?) { onModel?(modelButton) }
-    @objc private func schedules(_ sender: Any?) { onSchedules?() }
 
     #if DEBUG
     /// Clicks the history or tools button for `ui.agentAction`, so what opens

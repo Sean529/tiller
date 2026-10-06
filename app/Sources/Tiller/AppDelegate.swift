@@ -66,12 +66,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController?.showPane(titled: "Agent")
     }
 
-    /// The Scheduled pane, from the agent panel's button.
-    func showScheduledSettings() {
-        showSettings(nil)
-        settingsController?.showPane(titled: ScheduledSettingsPane.paneTitle)
-    }
-
     @objc func manageExtensions(_ sender: Any?) {
         showSettings(sender)
         settingsController?.showPane(titled: ExtensionsSettingsPane.paneTitle)
