@@ -1397,11 +1397,28 @@ final class MarkdownMessageView: NSView, TranscriptRow {
     }
 }
 
+private final class TranscriptHorizontalScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        let contentWidth = documentView?.frame.width ?? 0
+        let overflowsHorizontally = contentWidth - contentView.bounds.width > 1
+        let scrollsHorizontally = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
+        guard overflowsHorizontally && scrollsHorizontally else {
+            if let enclosingScrollView {
+                enclosingScrollView.scrollWheel(with: event)
+            } else {
+                super.scrollWheel(with: event)
+            }
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+}
+
 /// A markdown table: a bold header, a rule between rows, and cells that wrap
 /// to the transcript's width. One whose columns can't wrap that narrow and
 /// stay readable keeps them wider and scrolls sideways instead.
 final class MarkdownTableView: NSView, TranscriptRow {
-    private let scroll = NSScrollView()
+    private let scroll = TranscriptHorizontalScrollView()
     private let content = MarkdownTableContentView()
     private var width: CGFloat = 0
     private lazy var height = heightAnchor.constraint(equalToConstant: 0)
@@ -1647,7 +1664,7 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     private let languageLabel = NSTextField(labelWithString: "")
     private let copyButton = FocusReportingButton()
     private let rule = NSView()
-    private let scroll = NSScrollView()
+    private let scroll = TranscriptHorizontalScrollView()
     /// Holds the text with the padding around it, at the text's own width.
     private let document = NSView()
     private let label = NSTextField(labelWithString: "")
