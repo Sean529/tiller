@@ -8,11 +8,14 @@ import os
 /// built-in tools turned on in Settings. Codex always keeps a shell, confined
 /// to a read-only sandbox unless writing is on. Antigravity CLI can't be
 /// limited, so it keeps all of its tools and is only told to use Tiller's.
+/// Grok Build prints the same stream-json as Claude Code but reads no stdin,
+/// so each message runs its own process, limited like Claude Code's.
 enum AgentKind: String, CaseIterable, Codable {
     case qodercli
     case claude
     case codex
     case agy
+    case grok
 
     var displayName: String {
         switch self {
@@ -20,13 +23,14 @@ enum AgentKind: String, CaseIterable, Codable {
         case .claude: "Claude Code"
         case .codex: "Codex"
         case .agy: "Antigravity CLI"
+        case .grok: "Grok Build"
         }
     }
 
     /// Whether the agent has `tool` whatever the chat allows.
     func alwaysAllows(_ tool: AgentTool) -> Bool {
         switch self {
-        case .qodercli, .claude: false
+        case .qodercli, .claude, .grok: false
         case .codex: tool != .write
         case .agy: true
         }
@@ -49,8 +53,25 @@ enum AgentKind: String, CaseIterable, Codable {
     /// `tools`, only the `tiller` MCP server, and all of those allowed without
     /// asking. `resume` continues that saved session. `--add-dir` brings in
     /// Tiller's skill library, whose `.claude/skills` and `.qoder/skills` the
-    /// CLIs read.
-    func arguments(mcpConfig: String, systemPrompt: String, tools: [AgentTool], resume: String?) -> [String] {
+    /// CLIs read. `prompt` is the message, for Grok Build only.
+    func arguments(mcpConfig: String, systemPrompt: String, tools: [AgentTool], resume: String?, prompt: String? = nil) -> [String] {
+        if self == .grok {
+            // -p takes the message, since grok reads no stdin. The MCP server
+            // and skill library come from Tiller's block in its config.toml,
+            // since it has no flags for either. --tools always keeps grok's
+            // MCP meta-tools, and an empty list would mean every tool.
+            let toolNames = ["search_tool", "use_tool"] + tools.flatMap(\.grokToolNames)
+            var arguments = [
+                "--single=" + (prompt ?? ""),
+                "--output-format", "streaming-messages-json",
+                "--include-partial-messages",
+                "--tools", toolNames.joined(separator: ","),
+                "--rules", systemPrompt,
+                "--always-approve",
+            ]
+            if let resume { arguments += ["--resume", resume] }
+            return arguments
+        }
         if self == .agy {
             // -p takes the prompt as its value, which comes on stdin instead.
             // The MCP server comes from Tiller's plugin, and the prompt goes in
@@ -100,7 +121,7 @@ enum AgentKind: String, CaseIterable, Codable {
             // The MCP server, sandbox and prompt go in thread/start or
             // thread/resume instead.
             return ["app-server"]
-        case .agy:
+        case .agy, .grok:
             return []
         }
     }
@@ -137,8 +158,9 @@ struct AgentSetupError: Error {
 }
 
 /// One running agent CLI. The process stays alive across turns and keeps the
-/// conversation. The CLI also saves it, so after the process stops a new
-/// session can pick it up again with its `sessionID`.
+/// conversation, except Grok Build's, which runs one turn. The CLI also saves
+/// it, so after the process stops a new session can pick it up again with its
+/// `sessionID`.
 @MainActor
 final class AgentSession {
     let kind: AgentKind
@@ -184,6 +206,13 @@ final class AgentSession {
     private var agyTextStep: Int?
     private var agyText = ""
 
+    // Grok Build state.
+    /// Whether stdout has ended, and the exit status if the process has
+    /// exited: grok exits right after its last line, which may still be on
+    /// its way.
+    private var outputEnded = false
+    private var exitStatus: Int32?
+
     /// `sessionID` resumes that saved conversation in `directory`, the folder
     /// it was started in, since the CLIs keep sessions by folder. `chat` is
     /// the chat's id, which tiller_mcp passes on so Tiller knows who asks.
@@ -197,7 +226,8 @@ final class AgentSession {
 
     var isRunning: Bool { process?.isRunning ?? false }
 
-    func start() throws {
+    /// Starts the CLI. Grok Build's runs `prompt` and exits.
+    func start(prompt: String? = nil) throws {
         guard process == nil else { return }
         guard let executable = AgentEnvironment.executable(for: kind) else {
             if let path = Settings.agentPath(for: kind) {
@@ -208,13 +238,15 @@ final class AgentSession {
         // Creates the skill folders that --add-dir and Codex's skills root name.
         _ = AgentSkillStore.shared
         if kind == .agy { try AgentEnvironment.writeAgyPlugin() }
+        if kind == .grok { try AgentEnvironment.writeGrokConfig() }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = kind.arguments(
             mcpConfig: try AgentEnvironment.writeMCPConfig(chat: chat),
-            systemPrompt: AgentEnvironment.systemPrompt(tools: tools),
+            systemPrompt: AgentEnvironment.systemPrompt(tools: tools, kind: kind),
             tools: tools,
-            resume: sessionID
+            resume: sessionID,
+            prompt: prompt
         )
         let directory = try self.directory ?? AgentEnvironment.workingDirectory()
         self.directory = directory
@@ -227,7 +259,8 @@ final class AgentSession {
         let generation = generation
 
         let input = Pipe(), output = Pipe(), errors = Pipe()
-        process.standardInput = input
+        // grok reads no stdin.
+        process.standardInput = kind == .grok ? FileHandle.nullDevice : input
         process.standardOutput = output
         process.standardError = errors
 
@@ -238,7 +271,10 @@ final class AgentSession {
         let parser = JSONLineParser()
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.outputEnded(generation: generation) } }
+            }
             let messages = parser.feed(data)
             guard !messages.isEmpty else { return }
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.received(messages, generation: generation) } }
@@ -250,12 +286,12 @@ final class AgentSession {
         }
         process.terminationHandler = { [weak self] process in
             let status = process.terminationStatus
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.terminated(status: status, generation: generation) } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.exited(status: status, generation: generation) } }
         }
 
         try process.run()
         self.process = process
-        stdin = input.fileHandleForWriting
+        stdin = kind == .grok ? nil : input.fileHandleForWriting
         if kind == .codex { try startCodexThread(cwd: directory) }
         agyNeedsPrompt = kind == .agy
     }
@@ -265,8 +301,20 @@ final class AgentSession {
     /// only at the very start of the message, so one goes before the context.
     /// For Codex, `skill` is attached as its own input, and the text calls it
     /// with `$`, as Codex writes it. Antigravity CLI gets the images' paths,
-    /// and Tiller's prompt with the first message of each process.
+    /// and Tiller's prompt with the first message of each process. Grok Build
+    /// gets the images' paths too, and a process of its own.
     func send(_ text: String, images: [AgentAttachment] = [], context: String, skill: AgentSkill? = nil) throws {
+        if kind == .grok {
+            var parts = [context]
+            // A slash command only works at the very start.
+            if text.hasPrefix("/") { parts.insert(text, at: 0) } else if !text.isEmpty { parts.append(text) }
+            if !images.isEmpty { parts.append("Attached images:\n" + images.map(\.url.path).joined(separator: "\n")) }
+            // The last turn's process may not have exited yet.
+            stop()
+            try start(prompt: parts.joined(separator: "\n\n"))
+            isBusy = true
+            return
+        }
         try start()
         var prompt = text.isEmpty ? context : context + "\n\n" + text
         if kind == .codex {
@@ -309,9 +357,9 @@ final class AgentSession {
         if kind == .codex {
             interruptCodexTurn()
             guard isBusy else { return }
-        } else if kind == .agy {
-            // agy has no interrupt on stdin, so the process ends. The next
-            // message continues the saved conversation.
+        } else if kind == .agy || kind == .grok {
+            // agy has no interrupt on stdin and grok reads none, so the
+            // process ends. The next message continues the saved conversation.
             finishAgyText()
             finishTurn(error: nil)
             stop()
@@ -341,7 +389,8 @@ final class AgentSession {
         // any writes still queued, which fail once the process ends.
         // Terminate in case it is in the middle of a request.
         if let stdin { writer.async { try? stdin.close() } }
-        if process.isRunning { process.terminate() }
+        // grok saves the conversation when interrupted.
+        if process.isRunning { if kind == .grok { process.interrupt() } else { process.terminate() } }
         reset()
     }
 
@@ -362,6 +411,8 @@ final class AgentSession {
         agyNeedsPrompt = false
         agyTextStep = nil
         agyText = ""
+        outputEnded = false
+        exitStatus = nil
     }
 
     private func write(_ object: [String: Any]) throws {
@@ -401,7 +452,7 @@ final class AgentSession {
             switch kind {
             case .codex: handleCodex(message.object)
             case .agy: handleAgy(message.object)
-            case .qodercli, .claude: handle(message.object)
+            case .qodercli, .claude, .grok: handle(message.object)
             }
         }
     }
@@ -453,11 +504,13 @@ final class AgentSession {
                 case "text":
                     if let text = block["text"] as? String, !text.isEmpty { onEvent?(.text(text)) }
                 case "tool_use":
-                    onEvent?(.toolUse(
-                        id: block["id"] as? String ?? "",
-                        name: block["name"] as? String ?? "tool",
-                        input: block["input"] as? [String: Any] ?? [:]
-                    ))
+                    var name = block["name"] as? String ?? "tool"
+                    var input = block["input"] as? [String: Any] ?? [:]
+                    if kind == .grok {
+                        guard let tool = Self.grokTool(name, input) else { continue }
+                        (name, input) = tool
+                    }
+                    onEvent?(.toolUse(id: block["id"] as? String ?? "", name: name, input: input))
                 default: break
                 }
             }
@@ -467,7 +520,7 @@ final class AgentSession {
                 onEvent?(.toolResult(
                     id: block["tool_use_id"] as? String ?? "",
                     isError: block["is_error"] as? Bool ?? false,
-                    summary: Self.summary(of: block["content"])
+                    summary: Self.summary(of: kind == .grok ? Self.grokOutput(block["content"]) : block["content"])
                 ))
             }
         case "result":
@@ -774,6 +827,39 @@ final class AgentSession {
         return (name, input)
     }
 
+    // MARK: Grok Build
+
+    /// grok calls every MCP tool through use_tool, as `<server>__<tool>`, so
+    /// Tiller's are `tiller__<tool>`. Looking tools up with search_tool gets
+    /// no row of its own. Its own tools' paths are renamed to the key the
+    /// transcript shows.
+    private static func grokTool(_ name: String, _ input: [String: Any]) -> (String, [String: Any])? {
+        switch name {
+        case "search_tool":
+            return nil
+        case "use_tool":
+            let tool = input["tool_name"] as? String ?? "tool"
+            let arguments = input["tool_input"] as? [String: Any] ?? [:]
+            return (tool.hasPrefix("tiller__") ? String(tool.dropFirst("tiller__".count)) : tool, arguments)
+        default:
+            var input = input
+            for (key, renamed) in ["target_file": "file_path", "target_directory": "path"] {
+                if let value = input.removeValue(forKey: key) { input[renamed] = value }
+            }
+            return (name, input)
+        }
+    }
+
+    /// grok wraps an MCP tool's output in JSON of its own.
+    private static func grokOutput(_ content: Any?) -> Any? {
+        guard let string = content as? String, string.hasPrefix("{"),
+            let object = try? JSONSerialization.jsonObject(with: Data(string.utf8)) as? [String: Any],
+            object["type"] as? String == "MCP",
+            let output = (object["output"] as? [String: Any])?["OkayOutput"]
+        else { return content }
+        return output
+    }
+
     /// Tiller can't ask the user, so approvals and questions are declined.
     private func answerCodex(id: Any, method: String) {
         let result: [String: Any]? = switch method {
@@ -803,8 +889,27 @@ final class AgentSession {
         return line.count > 160 ? String(line.prefix(160)) + "…" : line
     }
 
+    /// grok exits right after printing its result, which may still be on its
+    /// way, so its exit waits for the end of the output, or a second.
+    private func exited(status: Int32, generation: Int) {
+        guard generation == self.generation else { return }
+        guard kind == .grok, !outputEnded else { return terminated(status: status, generation: generation) }
+        exitStatus = status
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            MainActor.assumeIsolated { self?.terminated(status: status, generation: generation) }
+        }
+    }
+
+    private func outputEnded(generation: Int) {
+        guard generation == self.generation else { return }
+        outputEnded = true
+        if let exitStatus { terminated(status: exitStatus, generation: generation) }
+    }
+
     private func terminated(status: Int32, generation: Int) {
         guard generation == self.generation, process != nil else { return }
+        // grok's process ends with each turn.
+        if kind == .grok, !isBusy { return reset() }
         let tail = stderrTail.split(whereSeparator: \.isNewline).suffix(3).joined(separator: "\n")
         reset()
         onEvent?(.exited(message: "\(kind.displayName) exited with status \(status)." + (tail.isEmpty ? "" : "\n" + tail)))
@@ -885,6 +990,11 @@ enum AgentEnvironment {
                 Tiller's tools are the MCP server tiller_tiller, called with call_mcp_tool. Never use your \
                 own browser tools: the user's browser is Tiller, and only the tiller tools reach it.
                 """)
+        } else if kind == .grok {
+            parts.append("""
+                Tiller's tools are on the MCP server tiller. Call them with use_tool, named \
+                tiller__<tool> (such as tiller__read_page), without searching for them first.
+                """)
         }
         if !tools.isEmpty {
             let can = tools.map { $0.displayName.lowercased() }.joined(separator: ", ")
@@ -907,6 +1017,7 @@ enum AgentEnvironment {
         return [
             "\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
             "\(home)/.bun/bin", "\(home)/.volta/bin", "\(home)/.npm-global/bin",
+            "\(home)/.grok/bin",
         ]
     }
 
@@ -983,6 +1094,8 @@ enum AgentEnvironment {
         // Tells Tiller which chat a tool call comes from.
         env["TILLER_CHAT"] = chat
         if kind == .codex { env["CODEX_HOME"] = try codexHome() }
+        // Tiller's block in grok's config.toml takes the skill library from here.
+        if kind == .grok { env["TILLER_SKILLS"] = AgentSkillStore.exposedSkills }
         return env
     }
 
@@ -1002,6 +1115,44 @@ enum AgentEnvironment {
             let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
             if (try? Data(contentsOf: url)) != data { try data.write(to: url) }
         }
+    }
+
+    /// Tiller's block in the user's grok `config.toml`, which gives Grok
+    /// Build Tiller's MCP server and skill library, since grok -p has no
+    /// flags for either. The socket, chat and skill folder come from grok's
+    /// environment, so the user's own grok sessions get no extra skills, and
+    /// a server that reaches the default profile with no chat asking. A
+    /// `[skills]` table of the user's own leaves
+    /// the library out, since TOML allows one. Rewritten only when it
+    /// changes, such as when Tiller moves.
+    static func writeGrokConfig() throws {
+        let environment = ProcessInfo.processInfo.environment
+        let folder = environment["GROK_HOME"] ?? (environment["HOME"] ?? NSHomeDirectory()) + "/.grok"
+        // A config.toml linked from elsewhere is written through the link.
+        let url = URL(fileURLWithPath: folder + "/config.toml").resolvingSymlinksInPath()
+        let begin = "# BEGIN Tiller: written by Tiller, which replaces any change here", end = "# END Tiller"
+        let current = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        var own = current
+        if let start = own.range(of: begin), let stop = own.range(of: end, range: start.upperBound..<own.endIndex) {
+            own.removeSubrange(start.lowerBound..<stop.upperBound)
+        }
+        own = String(own.reversed().drop(while: \.isNewline).reversed())
+        let quoted = "\"" + mcpServerPath.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        var block = [
+            begin,
+            "[mcp_servers.tiller]",
+            "command = \(quoted)",
+            #"env = { TILLER_SOCKET = "${TILLER_SOCKET:-}", TILLER_CHAT = "${TILLER_CHAT:-}" }"#,
+        ]
+        let hasSkills = own.split(whereSeparator: \.isNewline).contains {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("[skills]")
+        }
+        if !hasSkills { block += ["", "[skills]", #"paths = ["${TILLER_SKILLS:-}"]"#] }
+        block.append(end)
+        let updated = (own.isEmpty ? "" : own + "\n\n") + block.joined(separator: "\n") + "\n"
+        guard updated != current else { return }
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        try updated.write(to: url, atomically: true, encoding: .utf8)
     }
 
     /// Codex's own folder for Tiller, so the user's config.toml, MCP servers,

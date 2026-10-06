@@ -234,12 +234,14 @@ final class AgentHistoryStore {
     }
 }
 
-/// The title Claude Code or Qoder CLI gave a session, from the session file
-/// it writes under its projects folder. Nil if there is none yet.
+/// The title Claude Code, Qoder CLI or Grok Build gave a session, from the
+/// session file it writes under its projects folder. Nil if there is none yet.
 enum AgentSessionTitle {
     nonisolated static func read(kind: AgentKind, sessionID: String, directory: String) -> String? {
         let home: String
         switch kind {
+        case .grok:
+            return grokTitle(sessionID: sessionID, directory: directory)
         case .claude:
             home = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] ?? NSHomeDirectory() + "/.claude"
         case .qodercli:
@@ -270,5 +272,18 @@ enum AgentSessionTitle {
             if let title, !title.isEmpty { return title }
         }
         return nil
+    }
+
+    /// grok keeps a session in a folder named after its folder's path,
+    /// percent-encoded, with the title in `summary.json`.
+    nonisolated private static func grokTitle(sessionID: String, directory: String) -> String? {
+        let home = ProcessInfo.processInfo.environment["GROK_HOME"] ?? NSHomeDirectory() + "/.grok"
+        let resolved = URL(fileURLWithPath: directory).resolvingSymlinksInPath().path
+        guard let project = resolved.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")),
+            let data = FileManager.default.contents(atPath: "\(home)/sessions/\(project)/\(sessionID)/summary.json"),
+            let summary = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let title = summary["generated_title"] as? String, !title.isEmpty
+        else { return nil }
+        return title
     }
 }

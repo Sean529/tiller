@@ -330,6 +330,15 @@ enum AgentTool: String, CaseIterable, Codable {
         case .shell: ["Bash"]
         }
     }
+
+    /// The tool names Grok Build uses.
+    var grokToolNames: [String] {
+        switch self {
+        case .read: ["read_file", "grep", "list_dir"]
+        case .write: ["write", "search_replace"]
+        case .shell: ["run_terminal_command", "get_command_or_subagent_output", "kill_command_or_subagent"]
+        }
+    }
 }
 
 extension Notification.Name {

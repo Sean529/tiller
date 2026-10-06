@@ -100,7 +100,8 @@ struct AgentSkill: Equatable, Sendable {
 /// `exposed` links the enabled ones where the CLIs look. Claude Code and
 /// Qoder CLI get `exposed` with `--add-dir` and read its `.claude/skills` and
 /// `.qoder/skills`, and Antigravity CLI its `.agents/skills`; Codex gets
-/// `exposed/skills` as an extra skills root.
+/// `exposed/skills` as an extra skills root, and Grok Build in `[skills]`
+/// paths of its config.toml.
 @MainActor
 final class AgentSkillStore {
     static let shared = AgentSkillStore()
@@ -488,6 +489,9 @@ enum AgentSkillCatalog {
             case .qodercli: roots += [home + "/.agents/skills", home + "/.qoder/skills"] + (workFolder.map { [$0 + "/.qoder/skills"] } ?? [])
             case .codex: roots += [home + "/.agents/skills"] + (workFolder.map { [$0 + "/.agents/skills"] } ?? [])
             case .agy: roots += [home + "/.gemini/config/skills"] + (workFolder.map { [$0 + "/.agents/skills"] } ?? [])
+            case .grok:
+                roots += [home + "/.grok/skills", home + "/.agents/skills"]
+                    + (workFolder.map { [$0 + "/.grok/skills", $0 + "/.agents/skills"] } ?? [])
             }
         }
         var seen = Set<String>()
