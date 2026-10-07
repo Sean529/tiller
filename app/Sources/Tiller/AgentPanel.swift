@@ -57,18 +57,19 @@ final class AgentPanelView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// The panel is on screen: have the selected chat's CLI looked up now,
-    /// so the first message doesn't wait on a login shell.
+    /// The panel is on screen: have the CLIs looked up now, so the first
+    /// message doesn't wait on a login shell and the agent picker knows
+    /// which are missing.
     override func viewDidUnhide() {
         super.viewDidUnhide()
-        AgentEnvironment.warmUp(active.kind)
+        AgentEnvironment.refreshAvailability()
         AgentModelCatalog.refreshAll()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil, !isHiddenOrHasHiddenAncestor else { return }
-        AgentEnvironment.warmUp(active.kind)
+        AgentEnvironment.refreshAvailability()
         AgentModelCatalog.refreshAll()
     }
 
@@ -97,6 +98,7 @@ final class AgentPanelView: NSView {
         agentPicker.toolTip = "Agent for this chat"
         agentPicker.target = self
         agentPicker.action = #selector(agentChanged(_:))
+        AgentMenuAvailability.watch(agentPicker)
 
         tabBar.onSelect = { [weak self] index in self?.select(index, focus: true) }
         tabBar.onClose = { [weak self] index in self?.closeTab(index) }

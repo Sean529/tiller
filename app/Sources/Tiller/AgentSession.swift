@@ -1088,9 +1088,9 @@ enum AgentEnvironment {
     }
 
     /// Where the CLI is when Settings has no path for it. Can start a login
-    /// shell, so Settings calls it off the main thread, and `warmUp` asks for
-    /// every CLI in the background at launch so a new chat finds the answer
-    /// waiting.
+    /// shell, so Settings calls it off the main thread, and
+    /// `refreshAvailability` asks for every CLI in the background when the
+    /// panel shows, so a new chat finds the answer waiting.
     nonisolated static func detectedExecutable(for kind: AgentKind) -> String? {
         for directory in searchDirectories {
             let path = "\(directory)/\(kind.rawValue)"
@@ -1112,15 +1112,31 @@ enum AgentEnvironment {
         return found
     }
 
-    /// Looks `kind` up off the main thread, so the first message of a chat
-    /// doesn't wait for a login shell. Once per CLI per run: the lookup
-    /// keeps what it found.
-    static func warmUp(_ kind: AgentKind) {
-        guard Settings.agentPath(for: kind) == nil, warmedUp.insert(kind).inserted else { return }
-        Task.detached(priority: .utility) { _ = detectedExecutable(for: kind) }
+    /// Whether the CLI can be run, from what's known without starting a
+    /// shell, so a menu can ask as it opens. Nil until a lookup has said.
+    static func isAvailable(_ kind: AgentKind) -> Bool? {
+        if let path = Settings.agentPath(for: kind) { return FileManager.default.isExecutableFile(atPath: path) }
+        for directory in searchDirectories where FileManager.default.isExecutableFile(atPath: "\(directory)/\(kind.rawValue)") {
+            return true
+        }
+        guard let cached = shellFound.withLock({ $0[kind.rawValue] }) else { return nil }
+        return cached.path.map { FileManager.default.isExecutableFile(atPath: $0) } ?? false
     }
 
-    private static var warmedUp: Set<AgentKind> = []
+    /// Looks up every CLI Settings has no path for in the background, so the
+    /// first message of a chat doesn't wait for a login shell and
+    /// `isAvailable` has an answer the next time a menu asks. A CLI still
+    /// being looked up isn't asked for again.
+    static func refreshAvailability() {
+        for kind in AgentKind.allCases where Settings.agentPath(for: kind) == nil && lookingUp.insert(kind).inserted {
+            Task.detached(priority: .utility) {
+                _ = detectedExecutable(for: kind)
+                await MainActor.run { _ = lookingUp.remove(kind) }
+            }
+        }
+    }
+
+    private static var lookingUp: Set<AgentKind> = []
 
     /// What `loginShellLookup` said, by CLI name: the path, or nil when it
     /// found nothing, and when it was asked.

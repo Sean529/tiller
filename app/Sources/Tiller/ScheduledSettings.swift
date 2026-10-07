@@ -327,6 +327,7 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
             target: self, action: #selector(kindChanged(_:))
         )
         kindPopUp = popUp
+        AgentMenuAvailability.watch(popUp)
         addRow("Agent:", popUp)
 
         modelOptions = schedule?.modelOptions

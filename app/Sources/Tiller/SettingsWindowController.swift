@@ -1128,6 +1128,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             target: self, action: #selector(agentChanged(_:))
         )
         agentPopUp = popUp
+        AgentMenuAvailability.watch(popUp)
         addRow("New chats use:", popUp)
         addNote(Self.note("A running chat keeps its agent."))
         NotificationCenter.default.addObserver(
@@ -1175,6 +1176,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             target: self, action: #selector(modelKindChanged(_:))
         )
         self.modelKindPopUp = modelKindPopUp
+        AgentMenuAvailability.watch(modelKindPopUp)
         modelButton.bezelStyle = .push
         modelButton.lineBreakMode = .byTruncatingTail
         modelButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

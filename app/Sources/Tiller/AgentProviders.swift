@@ -192,6 +192,17 @@ struct AgentChoice: Hashable, RawRepresentable {
     @MainActor
     var exists: Bool { provider == nil || providerConfig != nil }
 
+    /// Why it can't be picked: its CLI isn't there. Nil when it can, or
+    /// while the CLI is still being looked up.
+    @MainActor
+    var unavailableReason: String? {
+        guard AgentEnvironment.isAvailable(kind) == false else { return nil }
+        if let path = Settings.agentPath(for: kind) {
+            return "\(path) is not an executable file. Fix the \(kind.displayName) path in Settings (Cmd+,)."
+        }
+        return "\(kind.rawValue) not found. Install it, or set its path in Settings (Cmd+,)."
+    }
+
     @MainActor
     var displayName: String {
         guard let provider else { return kind.displayName }
@@ -229,4 +240,28 @@ struct AgentChoice: Hashable, RawRepresentable {
 extension Notification.Name {
     /// Posted when a provider is added, changed or removed.
     static let agentProvidersDidChange = Notification.Name("TillerAgentProvidersDidChange")
+}
+
+/// Greys out the agents whose CLI isn't there in an agent pop-up's menu,
+/// with why as the tooltip. Checked each time the menu opens, so a CLI
+/// installed or given a path since then can be picked.
+@MainActor
+final class AgentMenuAvailability: NSObject, NSMenuDelegate {
+    private static let shared = AgentMenuAvailability()
+
+    /// `popUp`'s items name agents by `AgentChoice.rawValue`.
+    static func watch(_ popUp: NSPopUpButton) {
+        popUp.autoenablesItems = false
+        popUp.menu?.delegate = shared
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items {
+            guard let choice = (item.representedObject as? String).flatMap(AgentChoice.init) else { continue }
+            let reason = choice.unavailableReason
+            item.isEnabled = reason == nil
+            item.toolTip = reason
+        }
+        AgentEnvironment.refreshAvailability()
+    }
 }
