@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The manual, in a new tab.
     @objc func openHelp(_ sender: Any?) {
-        openInNewTab("https://github.com/sorrycc/Tiller/tree/master/docs")
+        openInNewTab("https://github.com/sorrycc/Tiller/tree/main/docs")
     }
 
     @objc func openGitHub(_ sender: Any?) {

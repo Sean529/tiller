@@ -1,12 +1,12 @@
 # Publishes site/ to the gh-pages branch, which GitHub Pages serves at
 # https://sorrycc.github.io/Tiller/. The branch also holds appcast.xml, written
-# by scripts/release.sh, and promo.mp4, kept out of master for its size; both
+# by scripts/release.sh, and promo.mp4, kept out of main for its size; both
 # stay as they are. Like release.sh, it commits without checking the branch out.
 name: Site
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths: ["site/**", ".github/workflows/site.yml"]
   workflow_dispatch:
 
