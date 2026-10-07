@@ -110,11 +110,11 @@ if git -C "$ROOT" rev-parse --verify --quiet origin/gh-pages >/dev/null; then
     git -C "$ROOT" show origin/gh-pages:appcast.xml > "$APPCAST" 2>/dev/null || rm -f "$APPCAST"
     tree_entries="$(git -C "$ROOT" ls-tree origin/gh-pages | grep -v $'\tappcast.xml$' || true)"
 fi
-URL="https://github.com/sorrycc/tiller/releases/download/$TAG/Tiller-$VERSION.zip"
+URL="https://github.com/sorrycc/Tiller/releases/download/$TAG/Tiller-$VERSION.zip"
 /usr/bin/python3 "$ROOT/scripts/appcast.py" "$APPCAST" "$VERSION" "$BUILD" "$URL" "$signature" $CHANNEL
 blob="$(git -C "$ROOT" hash-object -w "$APPCAST")"
 tree="$(printf '%s\n100644 blob %s\tappcast.xml\n' "$tree_entries" "$blob" | sed '/^$/d' | git -C "$ROOT" mktree)"
 commit="$(git -C "$ROOT" commit-tree "$tree" ${parent[@]+"${parent[@]}"} -m "Add Tiller $VERSION to the appcast")"
 git -C "$ROOT" push --quiet origin "$commit:refs/heads/gh-pages"
 
-echo "==> released Tiller $VERSION: https://github.com/sorrycc/tiller/releases/tag/$TAG"
+echo "==> released Tiller $VERSION: https://github.com/sorrycc/Tiller/releases/tag/$TAG"

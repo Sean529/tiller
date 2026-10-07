@@ -6,7 +6,7 @@
 
 A small macOS browser built on Chromium, with a native Swift/AppKit interface and a built-in agent panel that can drive the browser.
 
-Website: [sorrycc.github.io/tiller](https://sorrycc.github.io/tiller/)
+Website: [sorrycc.github.io/Tiller](https://sorrycc.github.io/Tiller/)
 
 https://github.com/user-attachments/assets/1960eca0-6cb0-460b-bb6f-b292b739a147
 
@@ -66,7 +66,7 @@ The script builds the Rust crates and the Swift app, then assembles an ad-hoc si
 
 ## Releasing
 
-Releases are signed with a Developer ID, notarized, and published on GitHub as `Tiller-<version>.dmg` for installing and `Tiller-<version>.zip` for [Sparkle](https://sparkle-project.org), which updates installed copies from the appcast at `https://sorrycc.github.io/tiller/appcast.xml`. A version with a pre-release part, such as `0.2.0-beta.1`, is a beta: a GitHub pre-release that only Tillers with Settings > General > Include beta versions turned on update to.
+Releases are signed with a Developer ID, notarized, and published on GitHub as `Tiller-<version>.dmg` for installing and `Tiller-<version>.zip` for [Sparkle](https://sparkle-project.org), which updates installed copies from the appcast at `https://sorrycc.github.io/Tiller/appcast.xml`. A version with a pre-release part, such as `0.2.0-beta.1`, is a beta: a GitHub pre-release that only Tillers with Settings > General > Include beta versions turned on update to.
 
 To release, set `version` in `Cargo.toml`, commit, and either push the tag `v<version>` to have the Release workflow do it, or run `scripts/release.sh` on a Mac set up as below. `scripts/fetch-cef.sh` downloads CEF and the codecs build for the workflow, checking the codecs archive against a pinned hash.
 

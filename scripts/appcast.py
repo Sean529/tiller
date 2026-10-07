@@ -16,7 +16,7 @@ from email.utils import formatdate
 SPARKLE = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 ET.register_namespace("sparkle", SPARKLE)
 MINIMUM_SYSTEM = "26.0"
-RELEASES = "https://github.com/sorrycc/tiller/releases"
+RELEASES = "https://github.com/sorrycc/Tiller/releases"
 
 
 def sparkle(name):

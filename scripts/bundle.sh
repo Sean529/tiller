@@ -17,7 +17,7 @@ BUNDLE_ID="${TILLER_BUNDLE_ID:-dev.sorrycc.tiller}"
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
 BUILD="${TILLER_BUILD:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
 IDENTITY="${TILLER_SIGN_IDENTITY:--}"
-FEED_URL="https://sorrycc.github.io/tiller/appcast.xml"
+FEED_URL="https://sorrycc.github.io/Tiller/appcast.xml"
 FRAMEWORK="Chromium Embedded Framework.framework"
 SPARKLE="Sparkle.framework"
 HELPERS=("Helper" "Helper (GPU)" "Helper (Renderer)" "Helper (Plugin)" "Helper (Alerts)")

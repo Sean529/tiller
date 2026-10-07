@@ -1,5 +1,5 @@
 # Publishes site/ to the gh-pages branch, which GitHub Pages serves at
-# https://sorrycc.github.io/tiller/. The branch also holds appcast.xml, written
+# https://sorrycc.github.io/Tiller/. The branch also holds appcast.xml, written
 # by scripts/release.sh, and promo.mp4, kept out of master for its size; both
 # stay as they are. Like release.sh, it commits without checking the branch out.
 name: Site
