@@ -582,7 +582,12 @@ final class AgentSession {
             let subtype = message["subtype"] as? String ?? "success"
             var error: String?
             if failed || subtype != "success" {
-                error = (message["result"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? subtype
+                // grok leaves the result empty and says why in errors.
+                let errors = (message["errors"] as? [String] ?? []).joined(separator: "\n")
+                error = (message["result"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (errors.isEmpty ? subtype : errors)
+                if kind == .grok, error?.hasPrefix("Not signed in") == true {
+                    error = "Grok Build isn't signed in. Run grok login in Terminal, then send the message again."
+                }
             }
             finishTurn(error: error)
         default:
@@ -1178,7 +1183,9 @@ enum AgentEnvironment {
     /// a server that reaches the default profile with no chat asking. A
     /// `[skills]` table of the user's own leaves
     /// the library out, since TOML allows one. Rewritten only when it
-    /// changes, such as when Tiller moves.
+    /// changes, such as when Tiller moves. grok rewrites the file when it
+    /// saves its own settings, dropping the markers, so Tiller's tables
+    /// found outside them are removed too.
     static func writeGrokConfig() throws {
         let environment = ProcessInfo.processInfo.environment
         let folder = environment["GROK_HOME"] ?? (environment["HOME"] ?? NSHomeDirectory()) + "/.grok"
@@ -1190,6 +1197,7 @@ enum AgentEnvironment {
         if let start = own.range(of: begin), let stop = own.range(of: end, range: start.upperBound..<own.endIndex) {
             own.removeSubrange(start.lowerBound..<stop.upperBound)
         }
+        own = withoutGrokLeftovers(own)
         own = String(own.reversed().drop(while: \.isNewline).reversed())
         let quoted = "\"" + mcpServerPath.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
         var block = [
@@ -1207,6 +1215,37 @@ enum AgentEnvironment {
         guard updated != current else { return }
         try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         try updated.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// `toml` without the tables grok kept from Tiller's block when it
+    /// rewrote the file: `[mcp_servers.tiller]` and its subtables, which a
+    /// second copy would make a duplicate key that stops grok loading, and
+    /// a `[skills]` table holding only Tiller's paths, which grok saves with
+    /// the variable expanded to "", next to empty lists of its own.
+    private static func withoutGrokLeftovers(_ toml: String) -> String {
+        let header = /^\s*\[{1,2}([^\[\]]+)\]{1,2}\s*(#.*)?$/
+        let emptyList = /^\s*[A-Za-z0-9_-]+\s*=\s*\[\s*\]\s*$/
+        // Each table with its lines, the lines before the first one first.
+        var tables: [(name: String?, lines: [Substring])] = [(nil, [])]
+        for line in toml.split(separator: "\n", omittingEmptySubsequences: false) {
+            if let match = line.wholeMatch(of: header) {
+                tables.append((match.1.trimmingCharacters(in: .whitespaces), [line]))
+            } else {
+                tables[tables.count - 1].lines.append(line)
+            }
+        }
+        let kept = tables.filter { table in
+            guard let name = table.name else { return true }
+            if name == "mcp_servers.tiller" || name.hasPrefix("mcp_servers.tiller.") { return false }
+            guard name == "skills" else { return true }
+            let body = table.lines.dropFirst().map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            let isTillers = { (line: String) in
+                line.hasPrefix("paths") && (line.contains("${TILLER_SKILLS") || line.replacingOccurrences(of: " ", with: "") == #"paths=[""]"#)
+            }
+            return !(body.contains(where: isTillers) && body.allSatisfy { isTillers($0) || $0.wholeMatch(of: emptyList) != nil })
+        }
+        return kept.flatMap(\.lines).joined(separator: "\n")
     }
 
     /// Codex's own folder for Tiller, so the user's config.toml, MCP servers,
