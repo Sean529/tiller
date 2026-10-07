@@ -42,6 +42,11 @@ final class SessionStore {
     var openTabs: [SavedTab] { session.tabs }
     var selectedIndex: Int { session.selected }
     var hasClosedTabs: Bool { !session.closed.isEmpty }
+    /// The closed tabs, most recent first, each URL once.
+    var recentlyClosed: [SavedTab] {
+        var seen = Set<String>()
+        return session.closed.reversed().map(\.tab).filter { !$0.isBlank && seen.insert($0.url).inserted }
+    }
 
     func setOpenTabs(_ tabs: [SavedTab], selected: Int) {
         guard tabs != session.tabs || selected != session.selected else { return }
@@ -53,19 +58,24 @@ final class SessionStore {
     func pushClosedTab(_ tab: SavedTab, at index: Int) {
         session.closed.append(ClosedTab(tab: tab, index: index))
         session.closed.removeFirst(max(0, session.closed.count - Self.closedLimit))
-        scheduleWrite()
+        closedTabsChanged()
     }
 
     func popClosedTab() -> ClosedTab? {
         guard let tab = session.closed.popLast() else { return nil }
-        scheduleWrite()
+        closedTabsChanged()
         return tab
     }
 
     func clearClosedTabs() {
         guard hasClosedTabs else { return }
         session.closed = []
+        closedTabsChanged()
+    }
+
+    private func closedTabsChanged() {
         scheduleWrite()
+        NotificationCenter.default.post(name: .closedTabsDidChange, object: nil)
     }
 
     /// Writes a pending change now rather than after the short delay.
@@ -88,4 +98,9 @@ final class SessionStore {
             MainActor.assumeIsolated { SessionStore.shared.flush() }
         }
     }
+}
+
+extension Notification.Name {
+    /// Posted when a tab joins or leaves the recently closed list.
+    static let closedTabsDidChange = Notification.Name("TillerClosedTabsDidChange")
 }

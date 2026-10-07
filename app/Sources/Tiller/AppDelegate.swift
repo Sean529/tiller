@@ -9,10 +9,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Links that arrived before the window, which opens them.
     private var pendingURLs: [URL] = []
 
+    /// A change of appearance redraws everything on its own; a change of
+    /// accent needs a nudge.
+    @objc private func themeChanged(_ notification: Notification) {
+        Theme.applyAppearance()
+        Theme.redrawAll()
+    }
+
     @objc func showSettings(_ sender: Any?) {
         let controller = settingsController ?? SettingsWindowController()
         settingsController = controller
         controller.showWindow(sender)
+    }
+
+    #if DEBUG
+    /// Opens Settings on the pane titled `pane`, for `ui.settings` on the control socket.
+    func showSettings(pane: String) {
+        showSettings(nil)
+        settingsController?.showPane(titled: pane)
+    }
+    #endif
+
+    /// The manual, in a new tab.
+    @objc func openHelp(_ sender: Any?) {
+        openInNewTab("https://github.com/sorrycc/tiller/tree/master/docs")
+    }
+
+    @objc func openGitHub(_ sender: Any?) {
+        openInNewTab("https://github.com/sorrycc/tiller")
     }
 
     @objc func installCommandLineTool(_ sender: Any?) {
@@ -36,14 +60,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController?.showPane(titled: ProfilesSettingsPane.paneTitle)
     }
 
+    /// The Agent pane, from an error about the agent's command.
+    func showAgentSettings() {
+        showSettings(nil)
+        settingsController?.showPane(titled: "Agent")
+    }
+
     @objc func manageExtensions(_ sender: Any?) {
         showSettings(sender)
         settingsController?.showPane(titled: ExtensionsSettingsPane.paneTitle)
     }
 
-    /// Opens `url` in a new tab of the browser window, for Settings.
-    func openInNewTab(_ url: String) {
-        windowController?.openInNewTab(url)
+    /// Opens `url` in a new tab of the browser window, for Settings and links
+    /// in the agent panel.
+    func openInNewTab(_ url: String, background: Bool = false) {
+        windowController?.openInNewTab(url, background: background)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -51,6 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Show All Tabs out of the View menu.
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.mainMenu = MainMenu.build()
+        // Before the first window, so it never shows in the wrong appearance.
+        Theme.applyAppearance()
+        NotificationCenter.default.addObserver(self, selector: #selector(themeChanged(_:)), name: .themeDidChange, object: nil)
 
         tiller_core_set_quit_handler {
             MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.quitRequested() }
@@ -76,10 +110,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(profilesChanged(_:)), name: .profilesDidChange, object: nil
         )
         showProfile()
+        DownloadStore.shared.start()
         controlServer.browser = controller
         if !controlServer.start() {
             NSLog("Tiller: control socket unavailable, agent tools will not work")
         }
+        AgentScheduler.shared.start(browser: controller)
         NSApp.activate()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak controller] in
             MainActor.assumeIsolated { DefaultBrowser.askOnce(on: controller?.window) }
@@ -163,9 +199,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.showProfile(name: name)
     }
 
-    /// Cmd+Q, the Dock or logging out, before the tabs start closing.
+    /// Cmd+Q, the Dock or logging out. Closes every tab, which closes the
+    /// window, and the core quits when the last browser is gone. The core
+    /// closes only tabs that have a browser, so this can't be left to it:
+    /// a restored tab that hasn't loaded yet would be selected, start, and
+    /// keep Tiller running.
     fileprivate func quitRequested() {
-        windowController?.freezeSession()
+        windowController?.closeAllTabs()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {

@@ -20,7 +20,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private var sidebarWidth = TabSidebarView.defaultWidth
     private lazy var sidebarMinWidth = sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 0)
     private lazy var sidebarMaxWidth = sidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 0)
-    /// Holds every tab's view. Only the selected one is visible.
+    /// Holds every tab's view. The selected one is on top, and the others are
+    /// hidden unless an agent woke them.
     private let contentView = PageCardView()
     private let agentPanel = AgentPanelView(frame: NSRect(x: 0, y: 0, width: 360, height: 600))
     /// Where the panel is going. It stays unhidden while it slides out.
@@ -28,17 +29,26 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Counts toggles, so a slide's completion knows a later toggle took over.
     private var agentToggleCount = 0
     private let agentButton = NSButton()
+    /// A dot on the agent button while a chat works behind a hidden panel.
+    private let agentBadge = AgentBadgeView()
     private let tabStrip = TabStripView()
     private let addressBar = AddressBarView(frame: NSRect(x: 0, y: 0, width: 800, height: 40))
     private let backButton = NSButton()
     private let forwardButton = NSButton()
     private let reloadButton = NSButton()
+    private var reloadItem: NSToolbarItem?
+    /// Whether the reload button shows Stop, or nil before the first tab.
+    private var showsStop: Bool?
     private let newTabButton = NSButton()
     /// Names the profile and opens the Profiles menu. Hidden with one profile.
     private let profileButton = NSButton()
     private var profileItem: NSToolbarItem?
     /// Extension buttons. Hidden when no extension is loaded.
     private let extensionBar = ExtensionBarView()
+    /// Hidden until the first download of the run.
+    private let downloadsButton = DownloadsButton()
+    private var downloadsItem: NSToolbarItem?
+    private var downloadsPopover: NSPopover?
     /// The extension popup while one is open.
     private var extensionPopover: ExtensionPopover?
     /// Nil while there is only one profile.
@@ -51,14 +61,32 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         bar.onClose = { [weak self] in self?.hideFindBar(focusPage: true) }
         return bar
     }()
+    /// Whether the find bar is up. It stays in the view while it fades out.
+    private var findBarShown = false
     /// Shown over the selected tab while it is blank.
     private lazy var startPage: StartPageView = {
         let view = StartPageView()
-        view.onOpen = { [weak self] url in self?.openSuggestion(url) }
+        view.onOpen = { [weak self] url, disposition in self?.open(url, disposition) }
         return view
     }()
     /// The import sheet while it is up.
     private var chromeImport: ChromeImportController?
+    /// The link under the mouse, at the bottom left of the page.
+    private let statusBubble = StatusBubbleView()
+    /// The tab whose page has the whole screen, while one does.
+    private var fullscreenTab: Tab?
+    /// Whether the window was in full screen already when the page took the
+    /// screen, in which case leaving is the user's to do.
+    private var windowWasFullScreen = false
+    /// Set while AppKit animates into or out of full screen, when another
+    /// toggle would be ignored.
+    private var inFullScreenTransition = false
+    /// A page gave the screen back while the window was still on its way
+    /// into full screen, so the window leaves once it has arrived.
+    private var leaveFullScreenWhenSettled = false
+    /// Whether the window's full screen is one a page asked for, as opposed
+    /// to one the user chose, which a page's exit must leave alone.
+    private var windowFullScreenForPage = false
 
     /// The tab strip's width, kept to what the toolbar has room for. A larger
     /// preference makes the toolbar move the whole strip into its overflow menu.
@@ -77,6 +105,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// beforeunload leaves tabs open, and the next thing done with the tabs
     /// clears it.
     private var closingAll = false
+    /// Tabs an agent woke, each with the timer that hides it again.
+    private var wakeTimers: [ObjectIdentifier: DispatchWorkItem] = [:]
+    /// How long a tab stays awake after an agent's last click, type or screenshot.
+    private static let wakeDuration: TimeInterval = 30
 
     /// Opens the `restored` tabs, then `url` in a selected tab after them. With
     /// no `url`, selects the restored tab at `selected`. One of the two must
@@ -92,6 +124,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 520, height: 360)
+        window.collectionBehavior.insert(.fullScreenPrimary)
         window.setFrameAutosaveName("TillerBrowserWindow")
         super.init(window: window)
 
@@ -121,13 +154,38 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         agentPanel.wantsLayer = true
         // Not the name used while there were two panes, whose saved widths
         // don't fit three.
+        // Read before the name is set, since setting it saves the frames.
+        let hasSavedSplit = UserDefaults.standard.object(forKey: "NSSplitView Subview Frames TillerSplit") != nil
         splitView.autosaveName = "TillerSplit"
         window.contentView = splitView
         window.toolbarStyle = .unified
 
         if !window.setFrameUsingName("TillerBrowserWindow") { window.center() }
+        // With no widths saved yet, the split view would give the panel every
+        // point the page can spare, since the panel holds its width harder.
+        // The panel starts at its own width instead.
+        if agentPanelShown, !hasSavedSplit {
+            // Once the window has laid out, so the split view has its width.
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let position = max(
+                        self.splitView.bounds.width - Self.defaultAgentPanelWidth,
+                        self.splitView.minPossiblePositionOfDivider(at: 1)
+                    )
+                    self.splitView.setPosition(position, ofDividerAt: 1)
+                }
+            }
+        }
 
         configureControls()
+        statusBubble.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(statusBubble, positioned: .above, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            statusBubble.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            statusBubble.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            statusBubble.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, multiplier: 0.6),
+        ])
         tabStrip.delegate = self
         applyTabLayout()
         NotificationCenter.default.addObserver(self, selector: #selector(passwordsChanged(_:)), name: .passwordsDidChange, object: nil)
@@ -189,8 +247,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// `resumeSaving` is false only when a closing tab hands the selection on.
     private func select(_ tab: Tab, resumeSaving: Bool = true) {
         if resumeSaving { closingAll = false }
-        if tab !== selectedTab { hideFindBar(focusPage: false) }
-        selectedTab?.hostView.isHidden = true
+        if tab !== selectedTab {
+            hideFindBar(focusPage: false)
+            statusBubble.show("")
+            if let fullscreenTab, fullscreenTab !== tab { fullscreenTab.exitFullscreen() }
+        }
+        if let old = selectedTab, !isAwake(old) { old.hostView.isHidden = true }
+        // Over the tabs an agent keeps awake, and under the status bubble.
+        // The find bar closed above.
+        if tab !== selectedTab {
+            contentView.addSubview(tab.hostView, positioned: .above, relativeTo: nil)
+            contentView.addSubview(statusBubble, positioned: .above, relativeTo: nil)
+        }
         selectedTab = tab
         tab.hostView.isHidden = false
         start(tab)
@@ -212,6 +280,37 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tab.startIfNeeded()
     }
 
+    /// Keeps a tab drawing behind the selected one for `wakeDuration`, so an
+    /// agent can click, type and take screenshots in it. Chromium treats a
+    /// hidden view's page as hidden: it stops drawing, and input to it stalls
+    /// for seconds or is dropped. A covered view counts as visible.
+    private func wake(_ tab: Tab) -> Bool {
+        start(tab)
+        let woke = tab.hostView.isHidden
+        if woke {
+            // Under the selected tab. Views are moved only while hidden: sorting
+            // them all made Chromium count every hidden page as visible again.
+            contentView.addSubview(tab.hostView, positioned: .below, relativeTo: nil)
+            tab.hostView.isHidden = false
+        }
+        let key = ObjectIdentifier(tab)
+        wakeTimers[key]?.cancel()
+        let sleep = DispatchWorkItem { [weak self, weak tab] in
+            MainActor.assumeIsolated {
+                guard let self, let tab else { return }
+                self.wakeTimers[ObjectIdentifier(tab)] = nil
+                if tab !== self.selectedTab { tab.hostView.isHidden = true }
+            }
+        }
+        wakeTimers[key] = sleep
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.wakeDuration, execute: sleep)
+        return woke
+    }
+
+    private func isAwake(_ tab: Tab) -> Bool {
+        wakeTimers[ObjectIdentifier(tab)] != nil
+    }
+
     /// Asks a tab to close on the user's or an agent's behalf.
     private func requestClose(_ tab: Tab) {
         closingAll = false
@@ -221,6 +320,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Takes the tab out of the window once CEF has agreed to close it.
     private func remove(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        if tab === fullscreenTab { self.tab(tab, fullscreenChanged: false) }
+        wakeTimers.removeValue(forKey: ObjectIdentifier(tab))?.cancel()
+        failLoadWaits(for: tab)
         tab.detach()
         // Tearing down the view is what lets CEF finish closing the browser.
         tab.hostView.removeFromSuperview()
@@ -239,7 +341,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
         if tab === selectedTab {
             selectedTab = nil
-            select(tabs[min(index, tabs.count - 1)], resumeSaving: false)
+            let next = tabs[min(index, tabs.count - 1)]
+            // While every tab closes, a tab that never loaded is left alone:
+            // selecting it would start its browser, which keeps Tiller running
+            // after the others are gone.
+            if closingAll && !next.isStarted {
+                tabStrip.update(tabs: tabs, selected: nil)
+            } else {
+                select(next, resumeSaving: false)
+            }
         } else {
             tabStrip.update(tabs: tabs, selected: selectedTab)
             saveSession()
@@ -266,16 +376,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         showLoading(tab.isLoading)
         backButton.isEnabled = tab.canGoBack
         forwardButton.isEnabled = tab.canGoForward
-        window?.title = tab.displayTitle
+        updateWindowTitle()
         addressBar.keyButton.isHidden = savedLogins(for: tab).isEmpty
         addressBar.showZoom(tab.zoomFactor)
         updateStartPage(for: tab)
     }
 
     /// Puts the start page over `tab` while it is blank, and takes it away once
-    /// the tab goes somewhere.
+    /// the page it goes to has arrived.
     private func updateStartPage(for tab: Tab) {
-        if tab.isBlank {
+        if tab.isBlank || tab.isLeavingBlank {
             guard startPage.superview !== tab.hostView else { return }
             startPage.frame = tab.hostView.bounds
             startPage.autoresizingMask = [.width, .height]
@@ -311,6 +421,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         recordHistory(tab)
         saveSession()
         tabStrip.refresh(tab)
+        loadStateChanged(tab)
         if tab === selectedTab {
             showState(of: tab)
             addressBar.setProgress(tab.progress, loading: tab.isLoading)
@@ -318,7 +429,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func tab(_ tab: Tab, foundMatches count: Int, active: Int, final: Bool) {
-        guard tab === selectedTab, findBar.superview != nil, !findBar.text.isEmpty else { return }
+        guard tab === selectedTab, findBarShown, !findBar.text.isEmpty else { return }
         findBar.showCount((count, active))
     }
 
@@ -328,6 +439,126 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func tab(_ tab: Tab, openInNewTab url: String, background: Bool) {
         openTab(url: url, select: !background, at: tabs.firstIndex { $0 === tab }.map { $0 + 1 })
+    }
+
+    func tab(_ tab: Tab, statusChanged text: String) {
+        guard tab === selectedTab else { return }
+        statusBubble.show(text)
+    }
+
+    /// A page taking the screen takes the window to full screen with the
+    /// sidebar and the panel out of the way; giving it back puts them back.
+    func tab(_ tab: Tab, fullscreenChanged fullscreen: Bool) {
+        guard let window else { return }
+        if fullscreen {
+            // A page behind the selected one, as one an agent works in,
+            // can't have the screen: Chromium would hold it fullscreen all the same.
+            guard tab === selectedTab else { return tab.exitFullscreen() }
+            guard fullscreenTab == nil else { return }
+            fullscreenTab = tab
+            windowWasFullScreen = window.styleMask.contains(.fullScreen) && !windowFullScreenForPage
+            leaveFullScreenWhenSettled = false
+            statusBubble.show("")
+            hideChromeForFullscreen()
+            roundPage()
+            if !windowWasFullScreen { enterFullScreenForPage() }
+        } else {
+            guard tab === fullscreenTab else { return }
+            fullscreenTab = nil
+            // Back to what the layout and the panel toggle say, not to a
+            // snapshot: either may have changed meanwhile.
+            sidebar.isHidden = tabLayout != .vertical
+            agentPanel.isHidden = !agentPanelShown
+            addressAccessory?.isHidden = false
+            window.toolbar?.isVisible = true
+            splitView.adjustSubviews()
+            if tabLayout == .vertical { fitSidebar() }
+            roundPage()
+            guard !windowWasFullScreen, window.styleMask.contains(.fullScreen) else { return }
+            if inFullScreenTransition {
+                // Still arriving. Leave once there; a toggle now would be ignored.
+                leaveFullScreenWhenSettled = true
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.fullscreenTab == nil, let window = self.window,
+                        window.styleMask.contains(.fullScreen), !self.inFullScreenTransition
+                    else { return }
+                    window.toggleFullScreen(nil)
+                }
+            }
+        }
+    }
+
+    /// Takes the sidebar, the panel, the address bar and the toolbar out of
+    /// the way of a page that has the screen.
+    private func hideChromeForFullscreen() {
+        sidebar.isHidden = true
+        agentPanel.isHidden = true
+        addressAccessory?.isHidden = true
+        window?.toolbar?.isVisible = false
+        splitView.adjustSubviews()
+    }
+
+    /// Takes the window to full screen for the page, on the next turn: this
+    /// is reached from a Chromium callback, where AppKit won't start the
+    /// transition. Nothing happens while the window is already there or on
+    /// its way; `windowDidExitFullScreen` tries again after a way out.
+    private func enterFullScreenForPage() {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.fullscreenTab != nil, let window = self.window,
+                    !window.styleMask.contains(.fullScreen), !self.inFullScreenTransition
+                else { return }
+                self.windowFullScreenForPage = true
+                window.toggleFullScreen(nil)
+            }
+        }
+    }
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        inFullScreenTransition = true
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        inFullScreenTransition = false
+        guard leaveFullScreenWhenSettled else { return }
+        leaveFullScreenWhenSettled = false
+        if fullscreenTab == nil { window?.toggleFullScreen(nil) }
+    }
+
+    /// The page keeps the window's content area, with the chrome out of the
+    /// way, as other browsers do when the screen itself can't be had.
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        inFullScreenTransition = false
+        leaveFullScreenWhenSettled = false
+        windowFullScreenForPage = false
+    }
+
+    /// Leaving full screen by the green button or a gesture takes the page
+    /// out of its fullscreen too. The window is on its way out already, so
+    /// the page's exit mustn't toggle it again.
+    func windowWillExitFullScreen(_ notification: Notification) {
+        inFullScreenTransition = true
+        leaveFullScreenWhenSettled = false
+        guard let fullscreenTab else { return }
+        windowWasFullScreen = true
+        fullscreenTab.exitFullscreen()
+    }
+
+    /// A page that took the screen again while the window was on its way
+    /// out gets its full screen now.
+    func windowDidExitFullScreen(_ notification: Notification) {
+        inFullScreenTransition = false
+        windowFullScreenForPage = false
+        if fullscreenTab != nil, !windowWasFullScreen { enterFullScreenForPage() }
+    }
+
+    /// While a page has the screen, the toolbar stays away unless the mouse
+    /// goes to the top, as it does in other browsers.
+    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions) -> NSApplication.PresentationOptions {
+        fullscreenTab == nil ? proposedOptions : proposedOptions.union([.autoHideToolbar, .autoHideMenuBar, .fullScreen])
     }
 
     func tabReadyToClose(_ tab: Tab) {
@@ -373,14 +604,59 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         newTab(nil)
     }
 
+    /// Right-click on a tab.
+    func tabStrip(_ strip: TabStripView, menuFor tab: Tab) -> NSMenu? {
+        guard let index = tabs.firstIndex(where: { $0 === tab }) else { return nil }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(MenuActionItem(title: "New Tab") { [weak self] in self?.newTab(nil) })
+        menu.addItem(.separator())
+        let reload = MenuActionItem(title: "Reload") { tab.reload() }
+        reload.isEnabled = !tab.isBlank
+        menu.addItem(reload)
+        let duplicate = MenuActionItem(title: "Duplicate Tab") { [weak self] in self?.duplicate(tab) }
+        duplicate.isEnabled = !tab.isBlank
+        menu.addItem(duplicate)
+        menu.addItem(.separator())
+        menu.addItem(MenuActionItem(title: "Close Tab") { [weak self] in self?.requestClose(tab) })
+        let others = MenuActionItem(title: "Close Other Tabs") { [weak self] in self?.closeTabs { $0 !== tab } }
+        others.isEnabled = tabs.count > 1
+        menu.addItem(others)
+        // Stacked in the sidebar, the later tabs are below this one.
+        let right = MenuActionItem(title: tabLayout == .vertical ? "Close Tabs Below" : "Close Tabs to the Right") { [weak self] in
+            guard let self, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
+            self.closeTabs { candidate in self.tabs.firstIndex { $0 === candidate }.map { $0 > index } ?? false }
+        }
+        right.isEnabled = index < tabs.count - 1
+        menu.addItem(right)
+        return menu
+    }
+
+    /// Opens the same page in a new tab right after `tab`.
+    private func duplicate(_ tab: Tab) {
+        openTab(url: tab.url, select: true, at: tabs.firstIndex { $0 === tab }.map { $0 + 1 })
+    }
+
+    /// Asks every tab `keep` rejects to close. Each page's beforeunload may
+    /// still keep its own tab.
+    private func closeTabs(where close: (Tab) -> Bool) {
+        closingAll = false
+        for tab in tabs where close(tab) { tab.close() }
+    }
+
     // MARK: Actions (also reached from the menu through the responder chain)
 
     @objc func newTab(_ sender: Any?) {
         openTab(url: Settings.newTabPage == .homepage ? Settings.homepageURL : "about:blank", select: true)
     }
 
-    /// Opens `url` in a new selected tab and brings the window forward.
-    func openInNewTab(_ url: String) {
+    /// Opens `url` in a new selected tab and brings the window forward. A
+    /// `background` tab goes after the selected one and leaves it in front.
+    func openInNewTab(_ url: String, background: Bool = false) {
+        if background {
+            openTab(url: url, select: false, at: selectedTab.flatMap { tab in tabs.firstIndex { $0 === tab } }.map { $0 + 1 })
+            return
+        }
         openTab(url: url, select: true)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -419,6 +695,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     @objc func reloadPage(_ sender: Any?) { selectedTab?.reload() }
+    @objc func stopLoading(_ sender: Any?) { selectedTab?.stop() }
+    @objc func printPage(_ sender: Any?) { selectedTab?.print() }
+    @objc func showDevTools(_ sender: Any?) { selectedTab?.showDevTools() }
+    @objc func viewPageSource(_ sender: Any?) { selectedTab?.viewSource() }
+
+    /// Moves the tabs between the toolbar and the sidebar.
+    @objc func toggleTabSidebar(_ sender: Any?) {
+        guard fullscreenTab == nil else { return }
+        Settings.tabLayout = tabLayout == .vertical ? .horizontal : .vertical
+    }
 
     // MARK: Zoom
 
@@ -442,13 +728,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     @objc func showFindBar(_ sender: Any?) {
         guard selectedTab != nil else { return }
-        if findBar.superview == nil {
+        if !findBarShown {
+            findBarShown = true
+            // Put back on top, in case a tab was selected over it while it
+            // faded out.
+            findBar.removeFromSuperview()
             findBar.translatesAutoresizingMaskIntoConstraints = false
+            findBar.alphaValue = 0
             contentView.addSubview(findBar, positioned: .above, relativeTo: nil)
             NSLayoutConstraint.activate([
-                findBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
-                findBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+                findBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Padding.row),
+                findBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Padding.panel),
+                // A narrow page squeezes the bar rather than cutting off its left side.
+                findBar.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: Theme.Padding.panel),
             ])
+            withEasing(Theme.Duration.quick) { findBar.animator().alphaValue = 1 }
             if !findBar.text.isEmpty { find(findBar.text) }
         }
         window?.makeFirstResponder(findBar.field)
@@ -470,13 +764,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     private func findAgain(forward: Bool) {
         guard let tab = selectedTab, !findBar.text.isEmpty else { return showFindBar(nil) }
-        if findBar.superview == nil { showFindBar(nil) }
+        if !findBarShown { showFindBar(nil) }
         tab.find(findBar.text, forward: forward, next: true)
     }
 
+    /// Fades the bar out and takes it away, unless it is shown again first.
+    /// The search stops and the focus moves at once.
     private func hideFindBar(focusPage: Bool) {
-        guard findBar.superview != nil else { return }
-        findBar.removeFromSuperview()
+        guard findBarShown else { return }
+        findBarShown = false
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.reduceMotion ? 0 : Theme.Duration.quick
+            findBar.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.findBarShown else { return }
+                self.findBar.removeFromSuperview()
+            }
+        }
         selectedTab?.stopFinding()
         findBar.showCount(nil)
         if focusPage { selectedTab?.focus() }
@@ -485,13 +790,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Slides the panel in or out. The page resizes once, before sliding in and
     /// after sliding out, since Chromium laying it out every frame would stutter.
     @objc func toggleAgentPanel(_ sender: Any?) {
+        // The chrome stays out of the way while a page has the screen.
+        guard fullscreenTab == nil else { return }
         agentPanelShown.toggle()
         Settings.defaults.set(agentPanelShown, forKey: Self.agentVisibleKey)
         agentButton.state = agentPanelShown ? .on : .off
+        updateAgentBadge()
         agentToggleCount += 1
         let count = agentToggleCount
-        roundPage()
+        // The page's corner by the panel rounds before the panel slides in
+        // and squares once it has slid out, so the page never shows a square,
+        // unoutlined edge beside an empty gap.
         if agentPanelShown {
+            roundPage()
             agentPanel.isHidden = false
             splitView.adjustSubviews()
             window?.makeFirstResponder(agentPanel.input)
@@ -501,6 +812,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             slideAgentPanel(to: agentPanel.bounds.width, count: count) { [weak self] in
                 self?.agentPanel.isHidden = true
                 self?.splitView.adjustSubviews()
+                self?.roundPage()
             }
         }
     }
@@ -523,13 +835,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             completion?()
             layer.removeAnimation(forKey: key)
         }
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if Theme.reduceMotion {
             return finish()
         }
         let animation = CABasicAnimation(keyPath: "transform.translation.x")
         animation.fromValue = start
         animation.toValue = offset
-        animation.duration = 0.2
+        animation.duration = Theme.Duration.panel
         animation.timingFunction = CAMediaTimingFunction(name: offset == 0 ? .easeOut : .easeIn)
         // Stays at the end until `finish` hides the panel, so it doesn't flash back.
         animation.fillMode = .forwards
@@ -540,8 +852,42 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         CATransaction.commit()
     }
 
+    /// The dot shows only while the panel is hidden, where the work would
+    /// otherwise go unseen. The button says so too, for VoiceOver and the
+    /// tooltip, which can't see the dot.
+    private func updateAgentBadge() {
+        let shown = agentPanel.isBusy && !agentPanelShown
+        withEasing(Theme.Duration.quick) { agentBadge.animator().alphaValue = shown ? 1 : 0 }
+        let label = shown ? "Agent (working)" : "Agent"
+        agentButton.toolTip = label
+        agentButton.setAccessibilityLabel(label)
+    }
+
     private static let agentVisibleKey = "agentPanelVisible"
+    /// The panel's width until the divider is dragged.
+    private static let defaultAgentPanelWidth: CGFloat = 400
     private static let sidebarWidthKey = "sidebarWidth"
+
+    // MARK: Scheduled prompts
+
+    /// Sends a scheduled prompt in a new agent chat. The panel stays as it
+    /// is; while hidden, its button's dot shows the run working.
+    func runScheduledPrompt(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String {
+        agentPanel.runScheduled(schedule, completion: completion)
+    }
+
+    func isAgentChatBusy(_ id: String) -> Bool {
+        agentPanel.isChatBusy(id)
+    }
+
+    /// Brings the window forward with the panel showing the chat, for a
+    /// scheduled run's notification.
+    func showAgentChat(_ id: String) {
+        NSApp.activate()
+        window?.makeKeyAndOrderFront(nil)
+        if !agentPanelShown { toggleAgentPanel(nil) }
+        agentPanel.openScheduled(id)
+    }
 
     #if DEBUG
     /// For testing without typing: `open Tiller.app --args -agentPrompt "..."`.
@@ -569,27 +915,44 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     /// Loads a suggestion picked from the address bar's list.
-    private func openSuggestion(_ url: String) {
+    /// Opens a URL chosen in the address bar, its suggestions or the start
+    /// page. A new tab goes right after the selected one.
+    private func open(_ url: String, _ disposition: OpenDisposition) {
         guard let tab = selectedTab else { return }
-        tab.load(url)
-        addressBar.show(url)
-        tab.focus()
+        switch disposition {
+        case .currentTab:
+            tab.load(url)
+            addressBar.show(url)
+            tab.focus()
+        case .foregroundTab, .backgroundTab:
+            let index = tabs.firstIndex { $0 === tab }.map { $0 + 1 }
+            if disposition == .backgroundTab { addressBar.show(tab.url) }
+            openTab(url: url, select: disposition == .foregroundTab, at: index)
+        }
     }
 
     @objc private func addressEntered(_ sender: NSTextField) {
         let input = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty, let tab = selectedTab else { return }
-        let url = AddressInput.url(for: input)
-        tab.load(url)
-        addressBar.show(url)
-        tab.focus()
+        guard !input.isEmpty else { return }
+        open(AddressInput.url(for: input), .returnKey(OpenDisposition.currentFlags))
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleAgentPanel(_:)) {
             item.title = agentPanelShown ? "Hide Agent" : "Show Agent"
         }
+        if item.action == #selector(toggleTabSidebar(_:)) {
+            item.title = tabLayout == .vertical ? "Hide Tab Sidebar" : "Show Tab Sidebar"
+        }
+        if item.action == #selector(toggleSidebarCollapsed(_:)) {
+            item.title = sidebar.isCollapsed ? "Expand Tab Sidebar" : "Collapse Tab Sidebar"
+        }
         return switch item.action {
+        case #selector(toggleAgentPanel(_:)), #selector(toggleTabSidebar(_:)): fullscreenTab == nil
+        case #selector(toggleSidebarCollapsed(_:)): tabLayout == .vertical && fullscreenTab == nil
+        case #selector(stopLoading(_:)): selectedTab?.isLoading ?? false
+        case #selector(printPage(_:)), #selector(showDevTools(_:)), #selector(viewPageSource(_:)):
+            selectedTab.map { !$0.isBlank } ?? false
         case #selector(goBack(_:)): selectedTab?.canGoBack ?? false
         case #selector(goForward(_:)): selectedTab?.canGoForward ?? false
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)): tabs.count > 1
@@ -597,7 +960,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case #selector(fillPassword(_:)): selectedTab.map { !savedLogins(for: $0).isEmpty } ?? false
         case #selector(findNext(_:)), #selector(findPrevious(_:)): !findBar.text.isEmpty
         case #selector(actualSize(_:)): selectedTab.map { abs($0.zoomFactor - 1) > 0.001 } ?? false
-        case #selector(zoomIn(_:)), #selector(zoomOut(_:)), #selector(showFindBar(_:)): selectedTab != nil
+        case #selector(zoomIn(_:)), #selector(zoomOut(_:)): selectedTab != nil
+        // A blank tab has nothing to find in.
+        case #selector(showFindBar(_:)): selectedTab.map { !$0.isBlank } ?? false
         default: true
         }
     }
@@ -608,9 +973,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// close. The window closes when its last tab is gone.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if tabs.isEmpty { return true }
+        closeAllTabs()
+        return false
+    }
+
+    /// Closes every tab, for the window closing or Tiller quitting. Tabs that
+    /// never loaded go right away; the others run their beforeunload first. The
+    /// window closes with the last one, and Tiller quits with the window.
+    func closeAllTabs() {
         freezeSession()
         tabs.forEach { $0.close() }
-        return false
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -625,8 +997,46 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard let width = window?.frame.width else { return }
         let profileWidth = profileName == nil ? 0 : profileButton.fittingSize.width + 12
         let extensionsWidth = extensionBar.isEmpty ? 0 : extensionBar.fittingSize.width + 12
-        tabStripWidth.constant = max(200, width - 370 - profileWidth - extensionsWidth)
-        addressWidth.constant = max(200, width - 330 - profileWidth - extensionsWidth)
+        let downloadsWidth: CGFloat = downloadsItem?.isHidden == false ? 40 : 0
+        tabStripWidth.constant = max(200, width - 370 - profileWidth - extensionsWidth - downloadsWidth)
+        addressWidth.constant = max(200, width - 330 - profileWidth - extensionsWidth - downloadsWidth)
+    }
+
+    // MARK: Downloads
+
+    /// Shows the button with the first download and keeps its ring current.
+    private func downloadsChanged() {
+        downloadsButton.refresh()
+        let hidden = DownloadStore.shared.downloads.isEmpty
+        if downloadsItem?.isHidden != hidden {
+            downloadsItem?.isHidden = hidden
+            fitTabStrip()
+        }
+        (downloadsPopover?.contentViewController as? DownloadsController)?.reload()
+    }
+
+    /// A load that became a download leaves the tab on its page, so the tab
+    /// shouldn't keep the download's URL, or the session would fetch the file
+    /// again at the next launch.
+    private func downloadStarted(_ download: Download) {
+        guard let tab = tabs.first(where: { $0.browserID == download.tabID }) else { return }
+        tab.dropPendingLoad(of: [download.url, download.originalURL])
+    }
+
+    @objc func showDownloads(_ sender: Any?) {
+        if let downloadsPopover, downloadsPopover.isShown { return downloadsPopover.close() }
+        // The button is away until the first download; the menu brings it out.
+        if downloadsItem?.isHidden != false {
+            downloadsItem?.isHidden = false
+            fitTabStrip()
+            window?.layoutIfNeeded()
+        }
+        guard downloadsButton.window != nil else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = DownloadsController()
+        downloadsPopover = popover
+        popover.show(relativeTo: downloadsButton.bounds, of: downloadsButton, preferredEdge: .maxY)
     }
 
     // MARK: Tab layout
@@ -635,6 +1045,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard Settings.tabLayout != tabLayout else { return }
         tabLayout = Settings.tabLayout
         applyTabLayout()
+        if fullscreenTab != nil { hideChromeForFullscreen() }
         if let selectedTab { tabStrip.update(tabs: tabs, selected: selectedTab) }
     }
 
@@ -682,8 +1093,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// With tabs in the sidebar the page is a card, rounded where it meets
     /// the sidebar and the agent panel.
     private func roundPage() {
-        contentView.isCard = tabLayout == .vertical
-        contentView.roundsTrailingCorner = agentPanelShown
+        contentView.isCard = tabLayout == .vertical && fullscreenTab == nil
+        contentView.roundsTrailingCorner = agentPanelShown && fullscreenTab == nil
     }
 
     /// Gives the sidebar its collapsed width, or the one it had before.
@@ -701,7 +1112,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         splitView.setPosition(width, ofDividerAt: 0)
     }
 
-    @objc private func toggleSidebarCollapsed(_ sender: Any?) {
+    /// Collapses the sidebar to icons or expands it, from its button or the
+    /// View menu.
+    @objc func toggleSidebarCollapsed(_ sender: Any?) {
+        guard tabLayout == .vertical, fullscreenTab == nil else { return }
         sidebar.isCollapsed.toggle()
         Settings.sidebarCollapsed = sidebar.isCollapsed
         fitSidebar()
@@ -715,10 +1129,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         Settings.defaults.set(Double(sidebarWidth), forKey: Self.sidebarWidthKey)
     }
 
+    private static let reloadImage = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Reload")
+    private static let stopImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Stop")
+
+    /// Turns Reload into Stop while the page loads. Only a change of state
+    /// touches the button, since this runs on every update of the selected tab.
     private func showLoading(_ loading: Bool) {
-        reloadButton.image = NSImage(
-            systemSymbolName: loading ? "xmark" : "arrow.clockwise", accessibilityDescription: loading ? "Stop" : "Reload")
-        reloadButton.toolTip = loading ? "Stop" : "Reload"
+        guard loading != showsStop else { return }
+        showsStop = loading
+        reloadButton.image = loading ? Self.stopImage : Self.reloadImage
+        let label = loading ? "Stop" : "Reload"
+        reloadButton.toolTip = label
+        reloadItem?.label = label
     }
 
     /// Shows the profile's name in the toolbar and window title, or hides it
@@ -727,8 +1149,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         profileName = name
         profileButton.title = name ?? ""
         profileItem?.isHidden = name == nil
-        window?.title = name.map { "Tiller – \($0)" } ?? "Tiller"
+        updateWindowTitle()
         fitTabStrip()
+    }
+
+    /// The selected page's title, then the profile's name when there are
+    /// several, for the Window menu, Mission Control and VoiceOver, where two
+    /// profiles' windows need telling apart.
+    private func updateWindowTitle() {
+        let page = selectedTab?.displayTitle ?? "Tiller"
+        window?.title = profileName.map { "\(page) – \($0)" } ?? page
     }
 
     @objc private func showProfilesMenu(_ sender: NSButton) {
@@ -756,6 +1186,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         static let agent = NSToolbarItem.Identifier("agent")
         static let profile = NSToolbarItem.Identifier("profile")
         static let extensions = NSToolbarItem.Identifier("extensions")
+        static let downloads = NSToolbarItem.Identifier("downloads")
     }
 
     private func configureControls() {
@@ -782,6 +1213,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         profileButton.action = #selector(showProfilesMenu(_:))
         agentButton.setButtonType(.pushOnPushOff)
         agentButton.state = agentPanel.isHidden ? .off : .on
+        // Faded out rather than hidden, so it can ease in and out.
+        agentBadge.alphaValue = 0
+        agentBadge.translatesAutoresizingMaskIntoConstraints = false
+        agentButton.addSubview(agentBadge)
+        NSLayoutConstraint.activate([
+            agentBadge.widthAnchor.constraint(equalToConstant: Theme.busyDot),
+            agentBadge.heightAnchor.constraint(equalToConstant: Theme.busyDot),
+            agentBadge.topAnchor.constraint(equalTo: agentButton.topAnchor, constant: 3),
+            agentBadge.trailingAnchor.constraint(equalTo: agentButton.trailingAnchor, constant: -3),
+        ])
+        agentPanel.onBusyChange = { [weak self] _ in self?.updateAgentBadge() }
+        downloadsButton.target = self
+        downloadsButton.action = #selector(showDownloads(_:))
+        // The two round buttons side by side take one size, the agent's, so
+        // their circles match whatever glyph each shows.
+        let round = agentButton.intrinsicContentSize
+        NSLayoutConstraint.activate([
+            downloadsButton.widthAnchor.constraint(equalToConstant: round.width),
+            downloadsButton.heightAnchor.constraint(equalToConstant: round.height),
+        ])
+        DownloadStore.shared.onChange = { [weak self] in self?.downloadsChanged() }
+        DownloadStore.shared.onStart = { [weak self] download in self?.downloadStarted(download) }
 
         addressBar.field.target = self
         addressBar.field.action = #selector(addressEntered(_:))
@@ -791,7 +1244,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         addressBar.keyButton.action = #selector(fillPassword(_:))
         addressBar.zoomButton.target = self
         addressBar.zoomButton.action = #selector(actualSize(_:))
-        suggestions.onOpen = { [weak self] url in self?.openSuggestion(url) }
+        suggestions.onOpen = { [weak self] url, disposition in self?.open(url, disposition) }
         extensionBar.onPopup = { [weak self] manifest, anchor in self?.showExtensionPopup(manifest, from: anchor) }
         extensionBar.onOpen = { [weak self] url in self?.openInNewTab(url) }
         extensionBar.onResize = { [weak self] in self?.fitTabStrip() }
@@ -820,10 +1273,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         tabLayout == .vertical
-            ? [Item.back, Item.forward, Item.reload, Item.address, .flexibleSpace, Item.extensions, Item.profile, Item.agent]
+            ? [
+                Item.back, Item.forward, Item.reload, Item.address, .flexibleSpace, Item.extensions, Item.downloads,
+                Item.profile, Item.agent,
+            ]
             : [
                 Item.back, Item.forward, Item.reload, Item.tabs, Item.newTab, .flexibleSpace, Item.extensions,
-                Item.profile, Item.agent,
+                Item.downloads, Item.profile, Item.agent,
             ]
     }
 
@@ -840,13 +1296,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         switch id {
         case Item.back: item.view = backButton; item.label = "Back"
         case Item.forward: item.view = forwardButton; item.label = "Forward"
-        case Item.reload: item.view = reloadButton; item.label = "Reload"
+        case Item.reload:
+            item.view = reloadButton
+            item.label = showsStop == true ? "Stop" : "Reload"
+            reloadItem = item
         case Item.newTab: item.view = newTabButton; item.label = "New Tab"
         case Item.agent: item.view = agentButton; item.label = "Agent"
         case Item.extensions:
             item.view = extensionBar
             item.label = "Extensions"
             item.isHidden = extensionBar.isEmpty
+        case Item.downloads:
+            item.view = downloadsButton
+            item.label = "Downloads"
+            item.isHidden = DownloadStore.shared.downloads.isEmpty
+            downloadsItem = item
         case Item.profile:
             item.view = profileButton
             item.label = "Profile"
@@ -891,16 +1355,38 @@ extension BrowserWindowController {
                 if panelHadFocus { window?.makeFirstResponder(agentPanel.input) }
             }
             return info(tab)
+        case "tabs.wake":
+            // Before a click, type or screenshot. `woke` says the page was hidden
+            // until now, so it may need a moment to draw.
+            let tab = try tab(for: params)
+            var reply = info(tab)
+            reply["woke"] = wake(tab)
+            return reply
         case "tabs.navigate":
             let tab = try tab(for: params)
             guard let input = params["url"] as? String, !input.isEmpty else { throw ControlError("navigate needs a url") }
             tab.load(AddressInput.url(for: input))
             tabDidChange(tab)
             return info(tab)
+        case "tabs.wait_load":
+            // Answers once the tab's load ends, or once `grace_ms` pass with
+            // none starting, or at `timeout_ms` with a note. Event-driven, so
+            // a tool call doesn't poll the tab list every few milliseconds.
+            let tab = try tab(for: params)
+            let grace = (params["grace_ms"] as? Double ?? 500) / 1000
+            let timeout = (params["timeout_ms"] as? Double ?? 30_000) / 1000
+            return ControlDeferred { [weak self] reply in
+                guard let self else { return reply(.failure(ControlError("the window closed"))) }
+                self.waitForLoad(of: tab, grace: grace, timeout: timeout, reply: reply)
+            }
         case "tabs.close":
             let tab = try tab(for: params)
             requestClose(tab)
             return ["closing": Int(tab.browserID)]
+        #if DEBUG
+        case _ where method.hasPrefix("ui."):
+            return try debugUI(String(method.dropFirst(3)), params: params)
+        #endif
         default:
             throw ControlError("unknown method \(method)")
         }
@@ -924,7 +1410,162 @@ extension BrowserWindowController {
             "selected": tab === selectedTab,
         ]
     }
+
+    // MARK: Waiting for loads
+
+    /// A `tabs.wait_load` request in progress.
+    private final class LoadWaiter {
+        let tab: Tab
+        let reply: (Result<Any, ControlError>) -> Void
+        /// Whether the tab was seen loading since the wait began.
+        var sawLoading: Bool
+        var graceTimer: Timer?
+        var timeoutTimer: Timer?
+
+        init(tab: Tab, sawLoading: Bool, reply: @escaping (Result<Any, ControlError>) -> Void) {
+            self.tab = tab
+            self.sawLoading = sawLoading
+            self.reply = reply
+        }
+    }
+
+    private static var loadWaiters: [LoadWaiter] = []
+
+    private func waitForLoad(of tab: Tab, grace: TimeInterval, timeout: TimeInterval, reply: @escaping (Result<Any, ControlError>) -> Void) {
+        let waiter = LoadWaiter(tab: tab, sawLoading: tab.isLoading, reply: reply)
+        Self.loadWaiters.append(waiter)
+        // The timers find the waiter by id: they may fire after it is gone.
+        let id = ObjectIdentifier(waiter)
+        if !tab.isLoading {
+            // Nothing has started yet. A click's navigation starts within a
+            // moment; after that, there is nothing to wait for.
+            waiter.graceTimer = Timer.scheduledTimer(withTimeInterval: grace, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let waiter = Self.loadWaiters.first(where: { ObjectIdentifier($0) == id }), !waiter.sawLoading
+                    else { return }
+                    self.finish(waiter, note: nil)
+                }
+            }
+        }
+        waiter.timeoutTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let waiter = Self.loadWaiters.first(where: { ObjectIdentifier($0) == id }) else { return }
+                self.finish(waiter, note: "still loading after \(Int(timeout.rounded())) seconds")
+            }
+        }
+    }
+
+    /// A tab's loading state changed: waits on it move along.
+    private func loadStateChanged(_ tab: Tab) {
+        for waiter in Self.loadWaiters where waiter.tab === tab {
+            if tab.isLoading {
+                waiter.sawLoading = true
+                waiter.graceTimer?.invalidate()
+            } else if waiter.sawLoading {
+                finish(waiter, note: nil)
+            }
+        }
+    }
+
+    private func finish(_ waiter: LoadWaiter, note: String?) {
+        guard let index = Self.loadWaiters.firstIndex(where: { $0 === waiter }) else { return }
+        Self.loadWaiters.remove(at: index)
+        waiter.graceTimer?.invalidate()
+        waiter.timeoutTimer?.invalidate()
+        var result = info(waiter.tab)
+        if let note { result["note"] = note }
+        waiter.reply(.success(result))
+    }
+
+    /// The tab closed under a wait.
+    private func failLoadWaits(for tab: Tab) {
+        for waiter in Self.loadWaiters where waiter.tab === tab {
+            Self.loadWaiters.removeAll { $0 === waiter }
+            waiter.graceTimer?.invalidate()
+            waiter.timeoutTimer?.invalidate()
+            waiter.reply(.failure(ControlError("tab \(tab.browserID) closed")))
+        }
+    }
 }
+
+#if DEBUG
+// MARK: UI driving for screenshots and tests
+
+extension BrowserWindowController {
+    /// `ui.<action>` on the control socket, for driving the window from a
+    /// script without the keyboard or mouse: `agent` toggles the panel,
+    /// `agentAction` runs one of the panel's buttons (`text` names it),
+    /// `agentText` puts `text` in the message field, `runSchedule` runs the
+    /// scheduled prompt named `text` now, `scheduleEditor` opens a new
+    /// scheduled prompt with `text` as its prompt, `find` searches for
+    /// `text`, `location` types `text` in the address bar, `downloads`,
+    /// `sidebar` and `settings` open those, `appearance` forces `light` or
+    /// `dark`, and `resize` sets the window to `width` by `height`.
+    func debugUI(_ action: String, params: [String: Any]) throws -> Any {
+        let text = params["text"] as? String ?? ""
+        switch action {
+        case "agent":
+            toggleAgentPanel(nil)
+        case "agentAction":
+            agentPanel.performForTesting(text)
+        case "agentText":
+            agentPanel.setTextForTesting(text)
+        case "runSchedule":
+            guard let schedule = AgentScheduleStore.shared.schedules.first(where: { $0.name == text }) else {
+                throw ControlError("no scheduled prompt named \(text)")
+            }
+            AgentScheduler.shared.runNow(schedule.id)
+        case "scheduleEditor":
+            (NSApp.delegate as? AppDelegate)?.showSettings(pane: ScheduledSettingsPane.paneTitle)
+            ScheduledSettingsPane.shown?.addForTesting(prompt: text)
+        case "find":
+            showFindBar(nil)
+            findBar.field.stringValue = text
+            find(text)
+            findBar.field.currentEditor()?.selectedRange = NSRange(location: text.utf16.count, length: 0)
+        case "location":
+            openLocation(nil)
+            if let editor = addressBar.field.currentEditor() as? NSTextView {
+                editor.insertText(text, replacementRange: editor.selectedRange())
+            }
+        case "downloads":
+            showDownloads(nil)
+        case "sidebar":
+            toggleSidebarCollapsed(nil)
+        case "settings":
+            (NSApp.delegate as? AppDelegate)?.showSettings(pane: text)
+        case "appearance":
+            NSApp.appearance = switch text {
+            case "dark": NSAppearance(named: .darkAqua)
+            case "light": NSAppearance(named: .aqua)
+            default: nil
+            }
+        case "resize":
+            guard let window, let width = params["width"] as? Double, let height = params["height"] as? Double else {
+                throw ControlError("resize needs width and height")
+            }
+            var frame = window.frame
+            frame.origin.y += frame.height - height
+            frame.size = NSSize(width: width, height: height)
+            window.setFrame(frame, display: true)
+        case "focusPage":
+            selectedTab?.focus()
+        case "status":
+            statusBubble.show(text)
+        case "action":
+            // Any menu action by selector name, such as `showDevTools:`.
+            let selector = Selector(text)
+            NSApp.activate()
+            window?.makeKeyAndOrderFront(nil)
+            let target: AnyObject? = responds(to: selector) ? self : window?.responds(to: selector) == true ? window : nil
+            guard let target, NSApp.sendAction(selector, to: target, from: nil) else { throw ControlError("nothing took \(text)") }
+        default:
+            throw ControlError("unknown ui action \(action)")
+        }
+        return ["ok": true]
+    }
+}
+#endif
 
 // MARK: Agent panel
 
@@ -954,12 +1595,10 @@ extension BrowserWindowController {
 
 extension BrowserWindowController {
     /// A page from the History menu. The URL is the item's represented object.
+    /// Cmd and Cmd+Shift open it in a new tab, as a click on a link does.
     @objc func openHistoryItem(_ sender: Any?) {
         guard let url = (sender as? NSMenuItem)?.representedObject as? String else { return }
-        guard let tab = selectedTab else { return }
-        tab.load(url)
-        tab.focus()
-        tabDidChange(tab)
+        open(url, .click(OpenDisposition.currentFlags))
     }
 
     @objc func clearHistory(_ sender: Any?) {
@@ -1027,9 +1666,96 @@ extension BrowserWindowController {
     }
 }
 
+/// The link under the mouse, in a small plate at the bottom left of the page,
+/// as other browsers show it. It fades in once a link is hovered and out
+/// when the mouse leaves.
+final class StatusBubbleView: NSView {
+    private let label = NSTextField(labelWithString: "")
+    private var shownText = ""
+    private var pendingShow: DispatchWorkItem?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        alphaValue = 0
+        isHidden = true
+        label.font = .systemFont(ofSize: Theme.FontSize.secondary)
+        label.textColor = .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingMiddle
+        label.maximumNumberOfLines = 1
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        guard let layer else { return }
+        layer.cornerRadius = Theme.Radius.row
+        layer.cornerCurve = .continuous
+        layer.maskedCorners = [.layerMaxXMaxYCorner]
+        layer.backgroundColor = NSColor.windowBackgroundColor.dynamic(alpha: 0.96).layerColor
+        layer.borderWidth = Theme.hairlineWidth
+        layer.borderColor = Theme.hairline.layerColor
+    }
+
+    /// Shows `text`, or hides the bubble when it is empty. The URL loses its
+    /// scheme, which is noise where it shows.
+    func show(_ text: String) {
+        var shown = text
+        for scheme in ["https://", "http://"] where shown.hasPrefix(scheme) { shown.removeFirst(scheme.count) }
+        guard shown != shownText else { return }
+        shownText = shown
+        pendingShow?.cancel()
+        pendingShow = nil
+        if shown.isEmpty {
+            NSAnimationContext.runAnimationGroup { context in
+                // Under Reduce Motion the bubble goes at once.
+                context.duration = Theme.reduceMotion ? 0 : Theme.Duration.quick
+                animator().alphaValue = 0
+            } completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.shownText.isEmpty else { return }
+                    self.isHidden = true
+                }
+            }
+            return
+        }
+        label.stringValue = shown
+        toolTip = text
+        isHidden = false
+        // A short wait keeps a sweep of the mouse across links from flashing.
+        let show = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.shownText.isEmpty else { return }
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = Theme.reduceMotion ? 0 : Theme.Duration.standard
+                    self.animator().alphaValue = 1
+                }
+            }
+        }
+        pendingShow = show
+        DispatchQueue.main.asyncAfter(deadline: .now() + (alphaValue > 0 ? 0 : 0.12), execute: show)
+    }
+
+    // Lets the page under it take the mouse.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// Holds the tabs' pages. As a card its top corners are rounded where it
 /// meets the sidebar and the agent panel, and a hairline sets it apart from
 /// them, which a light page on the light window would otherwise run into.
+/// The hairline is a bordered layer with the card's own continuous corners,
+/// so it follows the clip exactly.
 final class PageCardView: NSView {
     var isCard = false { didSet { needsDisplay = true } }
     /// Whether the corner next to the agent panel is rounded too.
@@ -1040,14 +1766,14 @@ final class PageCardView: NSView {
         }
     }
 
-    private let outline = CAShapeLayer()
+    private let outline = CALayer()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.cornerCurve = .continuous
-        outline.fillColor = nil
-        outline.lineWidth = 1
+        outline.cornerCurve = .continuous
+        outline.borderWidth = Theme.hairlineWidth
         // Above the pages, which are sublayers too.
         outline.zPosition = 1
     }
@@ -1058,40 +1784,57 @@ final class PageCardView: NSView {
 
     override func updateLayer() {
         guard let layer else { return }
-        layer.cornerRadius = isCard ? 10 : 0
-        layer.masksToBounds = isCard
-        layer.maskedCorners = roundsTrailingCorner
+        let corners: CACornerMask = roundsTrailingCorner
             ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMaxYCorner]
+        layer.cornerRadius = isCard ? Theme.Radius.card : 0
+        layer.masksToBounds = isCard
+        layer.maskedCorners = corners
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         outline.isHidden = !isCard
-        outline.strokeColor = NSColor.separatorColor.cgColor
+        outline.cornerRadius = Theme.Radius.card
+        outline.maskedCorners = corners
+        outline.borderColor = Theme.hairline.layerColor
+        CATransaction.commit()
         if outline.superlayer == nil { layer.addSublayer(outline) }
     }
 
     override func layout() {
         super.layout()
         // The top and the sides next to the sidebar and the panel. The bottom
-        // and an open side are the window's edge.
-        let radius: CGFloat = 10
-        let inset: CGFloat = 0.5
-        let path = CGMutablePath()
-        path.move(to: CGPoint(x: inset, y: 0))
-        path.addLine(to: CGPoint(x: inset, y: bounds.maxY - radius))
-        path.addQuadCurve(to: CGPoint(x: radius, y: bounds.maxY - inset), control: CGPoint(x: inset, y: bounds.maxY - inset))
-        if roundsTrailingCorner {
-            path.addLine(to: CGPoint(x: bounds.maxX - radius, y: bounds.maxY - inset))
-            path.addQuadCurve(
-                to: CGPoint(x: bounds.maxX - inset, y: bounds.maxY - radius),
-                control: CGPoint(x: bounds.maxX - inset, y: bounds.maxY - inset))
-            path.addLine(to: CGPoint(x: bounds.maxX - inset, y: 0))
-        } else {
-            path.addLine(to: CGPoint(x: bounds.maxX, y: bounds.maxY - inset))
-        }
+        // and an open trailing side are the window's edge, so the outline
+        // reaches past them and the card's clip cuts those lines off.
+        let overhang = Theme.hairlineWidth
+        var frame = bounds
+        frame.origin.y -= overhang
+        frame.size.height += overhang
+        if !roundsTrailingCorner { frame.size.width += overhang }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        outline.frame = bounds
-        outline.path = path
+        outline.frame = frame
         CATransaction.commit()
     }
+}
+
+/// The dot on the agent button. Its color is set in `updateLayer`, so it
+/// follows light and dark mode and the accent color as they change.
+private final class AgentBadgeView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = Theme.busyDot / 2
+        layer?.backgroundColor = Theme.accentColor.layerColor
+    }
+
+    // Faded out, it is still there; clicks go to the button under it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// A menu item that runs a closure.

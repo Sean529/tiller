@@ -1,6 +1,6 @@
 # Browser tools
 
-Tiller exposes one set of browser tools two ways: as an MCP server for agents and as the `tiller` command-line tool for shells and scripts.
+Tiller exposes one set of browser tools two ways: as an MCP server for agents and as the `tiller` command-line tool for shells and scripts. The MCP server also has three tools for the [skill library](agent.md#tillers-skill-library) and four for [scheduled prompts](agent.md#scheduling-from-a-chat).
 
 ## MCP server
 
@@ -9,21 +9,30 @@ Tiller exposes one set of browser tools two ways: as an MCP server for agents an
 | Tool | What it does |
 |---|---|
 | `list_tabs` | Id, URL, title, loading state and selection of every tab |
-| `new_tab` | Opens a URL or search in a new tab and waits for it to load |
+| `new_tab` | Opens a URL or search in a new tab and waits for it to load. `background` leaves the selected tab in front |
 | `select_tab` | Brings a tab to the front |
 | `close_tab` | Closes a tab (the page may still ask to confirm) |
 | `navigate` | Loads a URL or search and waits for the load |
 | `read_page` | Page text plus numbered links, buttons and fields |
 | `click` | Real mouse click on an element's center by `ref` or CSS `selector` |
 | `type` | Types into a field, replacing its text unless `append` is set, optionally presses Enter |
-| `screenshot` | JPEG of the visible part of the tab |
+| `screenshot` | JPEG of the visible part of the tab, in CSS pixels, the units `click` uses |
 | `eval_js` | Runs an expression in the page and returns the value as JSON |
+| `list_skills` | Every skill agents can call: the library's, marked editable and on or off, then the CLIs' own |
+| `read_skill` | A skill's `SKILL.md` and the other files in its folder |
+| `save_skill` | Creates or updates a library skill from the whole `SKILL.md`, or its body plus a `description`, with optional `files` to write and `delete_files` to remove |
+| `list_schedules` | Every scheduled prompt: id, name, prompt, agent, tools, rule, on or off, next run and last result |
+| `save_schedule` | Creates a scheduled prompt, or changes the one with `id`, keeping fields not given. `rule` is one of `{"every_minutes": 30}`, `{"daily": "09:00"}`, `{"weekdays": "09:00"}` or `{"cron": "0 9 * * 1-5"}` |
+| `delete_schedule` | Removes a scheduled prompt by `id` |
+| `run_schedule` | Runs a scheduled prompt now, without moving its next run |
 
-Tools act on the selected tab unless given `tab_id`. `click`, `type` and `screenshot` select their tab first, because background tabs don't draw and Chromium drops their input.
+Tools act on the selected tab unless given `tab_id`, and work in background tabs without bringing them to the front, so agents can each work in a tab of their own while you use another. Only `select_tab` and `new_tab` without `background` change the selected tab.
+
+Background tabs are hidden, and Chromium stops drawing hidden pages and stalls or drops their input. So `click`, `type` and `screenshot` wake their tab first: Tiller unhides it behind the selected tab, where it draws and takes input, and hides it again 30 seconds after the last of these calls. While awake, the page counts as visible, so its animations and videos run as in a front tab. `read_page` and `eval_js` don't need to wake a tab.
 
 `read_page` marks each element it lists with a `data-tiller-ref` attribute, which pages can see. Refs are renumbered on every call.
 
-How it's wired: tab operations (`tabs.*`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
+How it's wired: tab operations (`tabs.*`, including `tabs.wake` and `tabs.wait_load`, which answers once a tab's load ends or a moment passes with none starting) skill operations (`skills.*`, in `AgentSkills.swift`) and schedule operations (`schedules.*`, in `AgentSchedules.swift`) are answered by the Swift app (`ControlServer.swift`). Everything that touches page content is a DevTools protocol command (`Runtime.evaluate`, `Input.dispatchMouseEvent`, `Input.insertText`, `Page.captureScreenshot`) that the Rust core sends straight to the tab (`core/src/ipc.rs`, `core/src/browser.rs`).
 
 To try it without an agent:
 
@@ -40,6 +49,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"r
 ```sh
 tiller tabs                        # * marks the selected tab
 tiller new example.com             # opens a tab and waits for the load
+tiller new --background example.com  # leaves the selected tab in front
 tiller read                        # text, then [ref] lines for links, buttons and fields
 tiller click 3
 tiller type 5 "hello" --submit
@@ -53,7 +63,7 @@ tiller --profile work tabs         # another profile's Tiller
 | Command | Tool |
 |---|---|
 | `tabs` | `list_tabs` |
-| `new [url]` | `new_tab` |
+| `new [url] [--background]` | `new_tab` |
 | `select <tab>` | `select_tab` |
 | `close <tab>` | `close_tab` |
 | `go <url>` | `navigate` |
@@ -76,3 +86,5 @@ Three arguments test the Chrome import: `-chromeDataDir <folder>` reads a Chrome
 `-addExtension <path>` adds an unpacked extension folder, or a CRX file when the path ends in `.crx`, and logs the result. It loads at the next launch.
 
 Three arguments test the agent panel without typing: `-agentPrompt "..."` opens the panel and sends that message, `-agentStopAfter <seconds>` presses Stop after that many seconds, and `-agentPasteImage YES` pastes the clipboard into the field twice before sending the prompt three seconds later.
+
+Debug builds also answer `ui.*` methods on the control socket, for driving the window from a script, such as for screenshots. Each takes `text`: `ui.agent` toggles the panel; `ui.agentAction` runs one of its buttons (`newChat`, `newTab`, `closeTab`, `history`, `tools`, `model`, `focus`, `enter`, `ctrlEnter`, or `tab1` to `tab9`); `ui.agentText` puts the text in the message field; `ui.find` searches for it; `ui.location` types it in the address bar; `ui.status` shows it in the link plate; `ui.action` runs a menu action by selector name, such as `showDevTools:`; `ui.settings` opens that pane; `ui.appearance` forces `light` or `dark` until the Appearance setting next changes; `ui.downloads`, `ui.sidebar` and `ui.focusPage` do what they say; and `ui.resize` takes `width` and `height` instead. The socket speaks one JSON object per line, `{"id": 1, "method": "ui.find", "params": {"text": "tiller"}}`, and answers with one.

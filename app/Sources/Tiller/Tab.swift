@@ -16,10 +16,16 @@ protocol TabDelegate: AnyObject {
     func tab(_ tab: Tab, foundMatches count: Int, active: Int, final: Bool)
     /// The page's size in points, once `autoResize` is on.
     func tab(_ tab: Tab, autoResizedTo size: NSSize)
+    /// The link under the mouse, or an empty string once it leaves one.
+    func tab(_ tab: Tab, statusChanged text: String)
+    /// The page asked for the whole screen, as a video player does, or gave it back.
+    func tab(_ tab: Tab, fullscreenChanged fullscreen: Bool)
 }
 
 extension TabDelegate {
     func tab(_ tab: Tab, autoResizedTo size: NSSize) {}
+    func tab(_ tab: Tab, statusChanged text: String) {}
+    func tab(_ tab: Tab, fullscreenChanged fullscreen: Bool) {}
 }
 
 /// One CEF browser and the view that hosts it.
@@ -33,6 +39,9 @@ final class Tab {
     /// for its first selection, so a launch with many tabs loads only one page.
     private(set) var isStarted = false
     private(set) var url = ""
+    /// The last URL the page actually went to. `url` runs ahead of it while
+    /// a load requested here is still on its way.
+    private(set) var committedURL = ""
     private(set) var title = ""
     private(set) var isLoading = false
     private(set) var canGoBack = false
@@ -48,7 +57,20 @@ final class Tab {
     /// The favicon last saved for the start page.
     var recordedIcon: Data?
 
-    var isBlank: Bool { url.isEmpty || url == "about:blank" }
+    var isBlank: Bool { Self.isBlank(url) }
+
+    private static func isBlank(_ url: String) -> Bool { url.isEmpty || url == "about:blank" }
+
+    /// True from a load requested on the blank page until that page has had
+    /// time to paint. Chromium shows its white blank page meanwhile, so the
+    /// window keeps the start page up, which in dark mode saves a white flash.
+    private(set) var isLeavingBlank = false
+    /// Covers a browser created in dark mode until its first page has had
+    /// time to paint, for the same reason.
+    private var paintCover: NSView?
+    private var paintWait: DispatchWorkItem?
+    /// From a page's arrival to its likely first paint.
+    private static let paintDelay: TimeInterval = 0.25
 
     var displayTitle: String {
         if !title.isEmpty && title != url { return title }
@@ -84,6 +106,7 @@ final class Tab {
     func start(url: String, title: String = "") {
         isStarted = true
         self.url = url
+        committedURL = url
         self.title = title
         let size = hostView.bounds.size
         let callbacks = TillerBrowserCallbacks(
@@ -128,17 +151,73 @@ final class Tab {
             auto_resize: { ctx, width, height in
                 guard let ctx else { return }
                 Tab.from(ctx).autoResized(NSSize(width: Int(width), height: Int(height)))
+            },
+            copy_text: { ctx, text in
+                guard ctx != nil, let text else { return }
+                let string = String(cString: text)
+                MainActor.assumeIsolated {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(string, forType: .string)
+                }
+            },
+            status_changed: { ctx, text in
+                guard let ctx else { return }
+                Tab.from(ctx).statusChanged(text.map { String(cString: $0) } ?? "")
+            },
+            fullscreen_changed: { ctx, fullscreen in
+                guard let ctx else { return }
+                Tab.from(ctx).fullscreenChanged(fullscreen)
             }
         )
         let view = Unmanaged.passUnretained(hostView).toOpaque()
         browserID = tiller_browser_create(view, Int32(size.width), Int32(size.height), url, callbacks)
+        let dark = hostView.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        if dark && !isBlank {
+            let cover = PaintCoverView(frame: hostView.bounds)
+            hostView.addSubview(cover, positioned: .above, relativeTo: nil)
+            paintCover = cover
+        }
+    }
+
+    /// The page being waited for arrived: gives it a moment to paint, then
+    /// shows it.
+    private func pageArrived() {
+        guard (isLeavingBlank || paintCover != nil), paintWait == nil else { return }
+        let wait = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.showPage() }
+        }
+        paintWait = wait
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.paintDelay, execute: wait)
+    }
+
+    /// Stops waiting for a first paint, when it has likely happened or the
+    /// load ended without one.
+    private func showPage() {
+        paintWait?.cancel()
+        paintWait = nil
+        paintCover?.removeFromSuperview()
+        paintCover = nil
+        guard isLeavingBlank else { return }
+        isLeavingBlank = false
+        delegate?.tabDidChange(self)
     }
 
     // MARK: Commands
 
     func load(_ url: String) {
+        if isBlank && !Self.isBlank(url) && Self.isBlank(committedURL) { isLeavingBlank = true }
         self.url = url
         tiller_browser_load_url(browserID, url)
+    }
+
+    /// Puts `url` back to the page the tab is on, for a requested load of one
+    /// of `urls` that turned out to be a download, which leaves the page
+    /// where it was.
+    func dropPendingLoad(of urls: [String]) {
+        guard urls.contains(url), committedURL != url else { return }
+        url = committedURL
+        isLeavingBlank = false
+        delegate?.tabDidChange(self)
     }
 
     func goBack() { tiller_browser_go_back(browserID) }
@@ -170,6 +249,18 @@ final class Tab {
     /// Runs `code` in the main frame. Does nothing once the tab has closed.
     func executeJavaScript(_ code: String) { tiller_browser_execute_js(browserID, code) }
 
+    /// Opens the system print dialog for the page.
+    func print() { tiller_browser_print(browserID) }
+
+    /// Opens Chromium's developer tools in a window of their own.
+    func showDevTools() { tiller_browser_show_dev_tools(browserID) }
+
+    /// Opens the page's source in a new tab.
+    func viewSource() { tiller_browser_view_source(browserID) }
+
+    /// Takes the page out of the fullscreen it asked for.
+    func exitFullscreen() { tiller_browser_exit_fullscreen(browserID) }
+
     func focus() {
         hostView.window?.makeFirstResponder(hostView)
         tiller_browser_set_focus(browserID, true)
@@ -198,6 +289,8 @@ final class Tab {
     nonisolated private func addressChanged(_ url: String) {
         MainActor.assumeIsolated {
             self.url = url
+            committedURL = url
+            if !Self.isBlank(url) { pageArrived() }
             delegate?.tabDidChange(self)
         }
     }
@@ -213,9 +306,12 @@ final class Tab {
         MainActor.assumeIsolated {
             // A new load starts from nothing rather than the last one's end.
             if loading && !isLoading { progress = 0 }
+            let ended = isLoading && !loading
             isLoading = loading
             canGoBack = back
             canGoForward = forward
+            // A load that ended, loaded or not, has nothing more to wait for.
+            if ended { showPage() }
             delegate?.tabDidChange(self)
         }
     }
@@ -233,6 +329,14 @@ final class Tab {
 
     nonisolated private func autoResized(_ size: NSSize) {
         MainActor.assumeIsolated { delegate?.tab(self, autoResizedTo: size) }
+    }
+
+    nonisolated private func statusChanged(_ text: String) {
+        MainActor.assumeIsolated { delegate?.tab(self, statusChanged: text) }
+    }
+
+    nonisolated private func fullscreenChanged(_ fullscreen: Bool) {
+        MainActor.assumeIsolated { delegate?.tab(self, fullscreenChanged: fullscreen) }
     }
 
     nonisolated private func faviconChanged(_ png: Data) {
@@ -272,6 +376,18 @@ final class Tab {
 }
 
 /// Hosts CEF's view and keeps it the size of the tab area.
+/// The window's background over a page that hasn't painted yet.
+private final class PaintCoverView: NSView {
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.windowBackgroundColor.layerColor
+    }
+
+    // Clicks wait for the page rather than landing on what can't be seen.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 final class BrowserHostView: NSView {
     override var acceptsFirstResponder: Bool { true }
 

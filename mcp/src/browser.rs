@@ -37,7 +37,7 @@ impl Browser {
         match name {
             "list_tabs" => json_out(self.request("tabs.list", json!({}))?),
             "new_tab" => {
-                let mut params = json!({});
+                let mut params = json!({ "select": !args["background"].as_bool().unwrap_or(false) });
                 if let Some(url) = args["url"].as_str() {
                     params["url"] = json!(url);
                 }
@@ -59,7 +59,7 @@ impl Browser {
                 json_out(self.evaluate(id, &format!("({READ_PAGE_JS})({max})"))?)
             }
             "click" => {
-                let id = self.front(tab)?;
+                let id = self.wake(tab)?;
                 let selector = target_selector(args)?;
                 let point = self.evaluate(id, &format!("({LOCATE_JS})({})", json!(selector)))?;
                 let (Some(x), Some(y)) = (point["x"].as_f64(), point["y"].as_f64()) else {
@@ -68,16 +68,14 @@ impl Browser {
                 self.mouse(id, "mouseMoved", x, y)?;
                 self.mouse(id, "mousePressed", x, y)?;
                 self.mouse(id, "mouseReleased", x, y)?;
-                // Give a click that navigates a moment to start loading.
-                thread::sleep(Duration::from_millis(300));
-                let mut info = self.wait_for_load(id)?;
+                let mut info = self.wait_for_load_within(id, 1000)?;
                 if point["covered"] == true {
                     info["note"] = json!("another element was on top of the target at its center and got the click");
                 }
                 json_out(info)
             }
             "type" => {
-                let id = self.front(tab)?;
+                let id = self.wake(tab)?;
                 let value = args["text"].as_str().ok_or("text is required")?;
                 if args.get("ref").is_some() || args.get("selector").is_some() {
                     let selector = target_selector(args)?;
@@ -96,21 +94,67 @@ impl Browser {
                         }
                         self.cdp(id, "Input.dispatchKeyEvent", key)?;
                     }
-                    thread::sleep(Duration::from_millis(300));
-                    return json_out(self.wait_for_load(id)?);
+                    return json_out(self.wait_for_load_within(id, 1000)?);
                 }
                 json_out(json!({ "typed": value.chars().count() }))
             }
             "screenshot" => {
-                let id = self.front(tab)?;
-                let shot = self.cdp(id, "Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 }))?;
-                let data = shot["data"].as_str().ok_or("the screenshot came back empty")?;
-                Ok(Output::Image(data.to_string()))
+                let id = self.wake(tab)?;
+                // In CSS pixels, the units clicks take, rather than the
+                // display's: a Retina screenshot has four times the bytes
+                // to encode, send and read, and the model sees it no better.
+                // The clip is in page coordinates, so it starts where the page
+                // is scrolled to. A page whose script can't run just now, as
+                // with an alert up, is captured at the display's scale.
+                let mut params = json!({ "format": "jpeg", "quality": 80 });
+                let viewport = self
+                    .evaluate(id, "({ x: visualViewport.pageLeft, y: visualViewport.pageTop, w: visualViewport.width, h: visualViewport.height, dpr: devicePixelRatio })")
+                    .unwrap_or(Value::Null);
+                if let (Some(x), Some(y), Some(w), Some(h), Some(dpr)) = (
+                    viewport["x"].as_f64(),
+                    viewport["y"].as_f64(),
+                    viewport["w"].as_f64(),
+                    viewport["h"].as_f64(),
+                    viewport["dpr"].as_f64(),
+                ) && dpr > 1.0
+                    && w > 0.0
+                    && h > 0.0
+                {
+                    params["clip"] = json!({ "x": x, "y": y, "width": w, "height": h, "scale": 1.0 / dpr });
+                }
+                let mut shot = self.cdp(id, "Page.captureScreenshot", params)?;
+                match shot["data"].take() {
+                    Value::String(data) if !data.is_empty() => Ok(Output::Image(data)),
+                    _ => Err("the screenshot came back empty".into()),
+                }
             }
             "eval_js" => {
                 let id = self.resolve(tab)?;
                 let expression = args["expression"].as_str().ok_or("expression is required")?;
                 json_out(self.evaluate(id, expression)?)
+            }
+            "list_skills" => json_out(self.request("skills.list", json!({}))?),
+            "read_skill" => {
+                let name = args["name"].as_str().ok_or("name is required")?;
+                json_out(self.request("skills.read", json!({ "name": name }))?)
+            }
+            "save_skill" => json_out(self.request("skills.save", args.clone())?),
+            "list_schedules" | "save_schedule" | "delete_schedule" | "run_schedule" => {
+                let method = match name {
+                    "list_schedules" => "schedules.list",
+                    "save_schedule" => "schedules.save",
+                    "delete_schedule" => "schedules.delete",
+                    _ => "schedules.run",
+                };
+                // The app limits what a chat may do with schedules by the
+                // chat's own tools, so it is told which chat asks.
+                let mut params = if args.is_object() { args.clone() } else { json!({}) };
+                if let Ok(chat) = std::env::var("TILLER_CHAT")
+                    && !chat.is_empty()
+                {
+                    params["chat"] = json!(chat);
+                }
+                json_out(self.request(method, params)?)
             }
             _ => Err(format!("unknown tool: {name}")),
         }
@@ -129,17 +173,41 @@ impl Browser {
             .ok_or_else(|| "no tab is open".to_string())
     }
 
-    /// Selects the tab and returns its id. Only the front tab draws, and
-    /// Chromium drops mouse and key input to tabs that don't.
-    fn front(&mut self, tab: Option<i64>) -> Result<i64, String> {
+    /// Wakes the tab and returns its id. Background tabs are hidden, and
+    /// Chromium stalls or drops mouse and key input to hidden pages, so the
+    /// app keeps a woken tab drawing behind the selected one for a while.
+    fn wake(&mut self, tab: Option<i64>) -> Result<i64, String> {
         let id = self.resolve(tab)?;
-        self.request("tabs.select", json!({ "tab_id": id }))?;
+        let info = self.request("tabs.wake", json!({ "tab_id": id }))?;
+        // Let the page become visible before input arrives. Not
+        // Emulation.setFocusEmulationEnabled: it keeps the page visible after
+        // the app hides it again.
+        if info["woke"] == true {
+            thread::sleep(Duration::from_millis(100));
+        }
         Ok(id)
+    }
+
+    /// Waits until the tab stops loading, then returns its info. The app
+    /// answers when the load ends, or once half a second passes with none
+    /// starting. A Tiller from before that request is polled instead.
+    fn wait_for_load(&mut self, id: i64) -> Result<Value, String> {
+        self.wait_for_load_within(id, 500)
+    }
+
+    /// Like `wait_for_load`, giving a load `grace` milliseconds to start. A
+    /// click or a submitted form may run script before it navigates.
+    fn wait_for_load_within(&mut self, id: i64, grace: u64) -> Result<Value, String> {
+        match self.request("tabs.wait_load", json!({ "tab_id": id, "grace_ms": grace, "timeout_ms": LOAD_TIMEOUT.as_millis() as u64 })) {
+            Err(message) if message.starts_with("unknown method") => {}
+            other => return other,
+        }
+        self.poll_for_load(id)
     }
 
     /// Polls until the tab stops loading, then returns its info. A load that
     /// hasn't started yet gets a second to show up.
-    fn wait_for_load(&mut self, id: i64) -> Result<Value, String> {
+    fn poll_for_load(&mut self, id: i64) -> Result<Value, String> {
         let start = Instant::now();
         let mut seen_loading = false;
         loop {
@@ -198,11 +266,17 @@ impl Browser {
                 self.conn = None;
                 self.try_request(method, &params)
             }
+            // The reply may still come, and the next request must not read
+            // it as its own: the connection goes, without a retry.
+            Err(Failure::Timeout(message)) => {
+                self.conn = None;
+                Err(Failure::Timeout(message))
+            }
             other => other,
         }
         .map_err(|f| match f {
             Failure::Connection(e) => format!("Tiller is not running or its control socket is unavailable ({e})"),
-            Failure::App(message) => message,
+            Failure::App(message) | Failure::Timeout(message) => message,
         })
     }
 
@@ -210,21 +284,42 @@ impl Browser {
         if self.conn.is_none() {
             let path = socket_path(self.profile.as_deref()).map_err(Failure::App)?;
             let stream = UnixStream::connect(path).map_err(|e| Failure::Connection(e.to_string()))?;
+            // The app gives up on a request after 60 seconds; this only
+            // catches an app that stopped answering altogether.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(90)));
             let reader = BufReader::new(stream.try_clone().map_err(|e| Failure::Connection(e.to_string()))?);
             self.conn = Some((stream, reader));
         }
         let (stream, reader) = self.conn.as_mut().unwrap();
         self.next_id += 1;
-        let line = json!({ "id": self.next_id, "method": method, "params": params });
-        writeln!(stream, "{line}").map_err(|e| Failure::Connection(e.to_string()))?;
-        let mut reply = String::new();
-        if reader.read_line(&mut reply).map_err(|e| Failure::Connection(e.to_string()))? == 0 {
-            return Err(Failure::Connection("connection closed".into()));
-        }
-        let reply: Value = serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Tiller: {e}")))?;
-        match reply.get("error") {
-            Some(error) => Err(Failure::App(error.as_str().unwrap_or("error").to_string())),
-            None => Ok(reply["result"].clone()),
+        // One write per request. Formatting straight into the socket would
+        // make a system call of every token.
+        let mut line = json!({ "id": self.next_id, "method": method, "params": params }).to_string();
+        line.push('\n');
+        stream.write_all(line.as_bytes()).map_err(|e| Failure::Connection(e.to_string()))?;
+        loop {
+            let mut reply = String::new();
+            // A timeout is the app not answering, not a connection to retry
+            // on: sending a click or keystroke again could apply it twice.
+            let read = reader.read_line(&mut reply).map_err(|e| match e.kind() {
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                    Failure::Timeout("Tiller did not answer within 90 seconds".into())
+                }
+                _ => Failure::Connection(e.to_string()),
+            })?;
+            if read == 0 {
+                return Err(Failure::Connection("connection closed".into()));
+            }
+            let mut reply: Value =
+                serde_json::from_str(&reply).map_err(|e| Failure::App(format!("bad reply from Tiller: {e}")))?;
+            // A reply to an earlier request isn't this one's answer.
+            if reply.get("id").and_then(Value::as_u64).is_some_and(|id| id != self.next_id) {
+                continue;
+            }
+            return match reply.get("error") {
+                Some(error) => Err(Failure::App(error.as_str().unwrap_or("error").to_string())),
+                None => Ok(reply["result"].take()),
+            };
         }
     }
 }
@@ -232,6 +327,8 @@ impl Browser {
 enum Failure {
     Connection(String),
     App(String),
+    /// The app took too long; its reply may still be on its way.
+    Timeout(String),
 }
 
 /// TILLER_SOCKET, or `control.sock` in the folder of the profile named by
@@ -305,10 +402,15 @@ const READ_PAGE_JS: &str = r#"(max) => {
     const ref = String(elements.length + 1);
     el.setAttribute('data-tiller-ref', ref);
     const tag = el.tagName.toLowerCase();
-    const label = (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.getAttribute('alt') || '')
+    // A password field's value never goes into the result; `filled` says
+    // whether it holds anything.
+    const secret = tag === 'input' && el.type === 'password';
+    const value = secret ? '' : el.value;
+    const label = (el.getAttribute('aria-label') || el.innerText || value || el.placeholder || el.title || el.getAttribute('alt') || '')
       .replace(/\s+/g, ' ').trim().slice(0, 100);
     const item = { ref, tag, text: label };
     if (tag === 'input') item.type = el.type;
+    if (secret) item.filled = !!el.value;
     if (el.getAttribute('role')) item.role = el.getAttribute('role');
     if (tag === 'a') item.href = el.href;
     if (rect.bottom < 0 || rect.top > innerHeight) item.offscreen = true;
@@ -319,11 +421,12 @@ const READ_PAGE_JS: &str = r#"(max) => {
 }"#;
 
 /// Scrolls the element to the middle of the viewport and returns its center in
-/// viewport coordinates, which is what DevTools mouse events use.
+/// viewport coordinates, which is what DevTools mouse events use. The scroll is
+/// instant even on pages with CSS smooth scrolling, so the rect is the final one.
 const LOCATE_JS: &str = r#"(selector) => {
   const el = document.querySelector(selector);
   if (!el) return null;
-  el.scrollIntoView({ block: 'center', inline: 'center' });
+  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
   const rect = el.getBoundingClientRect();
   const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
   const hit = document.elementFromPoint(x, y);
@@ -335,7 +438,7 @@ const LOCATE_JS: &str = r#"(selector) => {
 const FOCUS_JS: &str = r#"(selector, append) => {
   const el = document.querySelector(selector);
   if (!el) return false;
-  el.scrollIntoView({ block: 'center' });
+  el.scrollIntoView({ block: 'center', behavior: 'instant' });
   el.focus();
   if (append) {
     if (typeof el.setSelectionRange === 'function' && typeof el.value === 'string') {

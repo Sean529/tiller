@@ -20,7 +20,15 @@ enum MainMenu {
         // Goes to the key window's BrowserWindowController, like File's items.
         appMenu.addItem(withTitle: "Import from Chrome…", action: #selector(BrowserWindowController.importFromChrome(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
+        let services = NSMenu(title: "Services")
+        add(services, titled: "Services", to: appMenu)
+        NSApp.servicesMenu = services
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Tiller", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Tiller", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         add(appMenu, titled: "Tiller", to: main)
 
@@ -29,6 +37,8 @@ enum MainMenu {
         let file = NSMenu(title: "File")
         file.addItem(withTitle: "New Tab", action: #selector(BrowserWindowController.newTab(_:)), keyEquivalent: "t")
         file.addItem(withTitle: "Open Location…", action: #selector(BrowserWindowController.openLocation(_:)), keyEquivalent: "l")
+        file.addItem(.separator())
+        file.addItem(withTitle: "Print…", action: #selector(BrowserWindowController.printPage(_:)), keyEquivalent: "p")
         file.addItem(.separator())
         file.addItem(withTitle: "Close Tab", action: #selector(BrowserWindowController.closeTab(_:)), keyEquivalent: "w")
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "W")
@@ -42,6 +52,9 @@ enum MainMenu {
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let pasteMatching = edit.addItem(withTitle: "Paste and Match Style", action: #selector(NSTextView.pasteAsPlainText(_:)), keyEquivalent: "V")
+        pasteMatching.keyEquivalentModifierMask = [.command, .option, .shift]
+        edit.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
         let find = NSMenu(title: findTitle)
@@ -54,6 +67,7 @@ enum MainMenu {
 
         let view = NSMenu(title: "View")
         view.addItem(withTitle: "Reload Page", action: #selector(BrowserWindowController.reloadPage(_:)), keyEquivalent: "r")
+        view.addItem(withTitle: "Stop", action: #selector(BrowserWindowController.stopLoading(_:)), keyEquivalent: ".")
         view.addItem(.separator())
         view.addItem(withTitle: "Actual Size", action: #selector(BrowserWindowController.actualSize(_:)), keyEquivalent: "0")
         view.addItem(withTitle: "Zoom In", action: #selector(BrowserWindowController.zoomIn(_:)), keyEquivalent: "=")
@@ -63,6 +77,17 @@ enum MainMenu {
         view.addItem(.separator())
         agentItem = view.addItem(withTitle: "Show Agent", action: #selector(BrowserWindowController.toggleAgentPanel(_:)), keyEquivalent: "")
         applyAgentShortcut()
+        view.addItem(withTitle: "Show Tab Sidebar", action: #selector(BrowserWindowController.toggleTabSidebar(_:)), keyEquivalent: "L")
+        let collapse = view.addItem(withTitle: "Collapse Tab Sidebar", action: #selector(BrowserWindowController.toggleSidebarCollapsed(_:)), keyEquivalent: "s")
+        collapse.keyEquivalentModifierMask = [.command, .control]
+        view.addItem(.separator())
+        let source = view.addItem(withTitle: "View Page Source", action: #selector(BrowserWindowController.viewPageSource(_:)), keyEquivalent: "u")
+        source.keyEquivalentModifierMask = [.command, .option]
+        let devTools = view.addItem(withTitle: "Developer Tools", action: #selector(BrowserWindowController.showDevTools(_:)), keyEquivalent: "i")
+        devTools.keyEquivalentModifierMask = [.command, .option]
+        view.addItem(.separator())
+        let fullScreen = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.command, .control]
         add(view, titled: "View", to: main)
 
         let history = NSMenu(title: "History")
@@ -79,6 +104,7 @@ enum MainMenu {
 
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        window.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         window.addItem(.separator())
         window.addItem(withTitle: "Show Previous Tab", action: #selector(BrowserWindowController.selectPreviousTab(_:)), keyEquivalent: "{")
         window.addItem(withTitle: "Show Next Tab", action: #selector(BrowserWindowController.selectNextTab(_:)), keyEquivalent: "}")
@@ -93,13 +119,24 @@ enum MainMenu {
             item.tag = number
         }
         window.addItem(.separator())
+        window.addItem(withTitle: "Downloads", action: #selector(BrowserWindowController.showDownloads(_:)), keyEquivalent: "J")
+        window.addItem(.separator())
+        window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        window.addItem(.separator())
         add(window, titled: "Window", to: main)
         NSApp.windowsMenu = window
+
+        let help = NSMenu(title: "Help")
+        help.addItem(withTitle: "Tiller Help", action: #selector(AppDelegate.openHelp(_:)), keyEquivalent: "?")
+        help.addItem(withTitle: "Tiller on GitHub", action: #selector(AppDelegate.openGitHub(_:)), keyEquivalent: "")
+        add(help, titled: "Help", to: main)
+        NSApp.helpMenu = help
 
         return main
     }
 
     @MainActor private static let historyMenu = HistoryMenuDelegate()
+    @MainActor fileprivate static var historyDelegate: HistoryMenuDelegate? { historyMenu }
     @MainActor private static let profilesMenu = ProfilesMenuDelegate()
 
     /// The Profiles menu, which the toolbar's profile button shows too.
@@ -160,6 +197,16 @@ enum MainMenu {
 private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
     private static let recentTag = 1001
     private static let limit = 15
+    /// The pages shown last time, and the history they came from. The menu
+    /// opens with these rather than waiting on the database, which an
+    /// import or a search may be holding, and asks for fresh ones.
+    private var pages: [HistoryPage] = []
+    /// The pages' favicons by URL, decoded once when fresh pages arrive
+    /// rather than each time the menu opens.
+    private var icons: [String: NSImage] = [:]
+    private var pagesVersion = -1
+    /// The menu, for filling once fresh pages arrive.
+    private weak var menu: NSMenu?
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         // AppKit also asks while it looks for a shortcut's menu item, on every
@@ -169,17 +216,46 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
         {
             return
         }
+        self.menu = menu
+        let store = HistoryStore.shared
+        if store.version != pagesVersion {
+            let version = store.version
+            store.recentWithIcons(limit: Self.limit) { pages in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self = MainMenu.historyDelegate else { return }
+                        self.pages = pages
+                        self.icons = [:]
+                        for page in pages {
+                            guard let data = page.icon, let image = NSImage(data: data) else { continue }
+                            image.size = NSSize(width: 16, height: 16)
+                            self.icons[page.url] = image
+                        }
+                        self.pagesVersion = version
+                        // Usually back before the menu has drawn; else the
+                        // items change under the mouse, which is fine.
+                        if let menu = self.menu { self.fill(menu) }
+                    }
+                }
+            }
+        }
+        fill(menu)
+    }
+
+    private func fill(_ menu: NSMenu) {
         for item in menu.items where item.tag == Self.recentTag {
             menu.removeItem(item)
         }
         // After Back, Forward and the separator.
         var index = 3
-        for page in HistoryStore.shared.recent(limit: Self.limit) {
+        for page in pages {
             var title = page.displayTitle
             if title.count > 60 { title = title.prefix(59) + "…" }
             let item = NSMenuItem(title: title, action: #selector(BrowserWindowController.openHistoryItem(_:)), keyEquivalent: "")
             item.representedObject = page.url
             item.toolTip = page.url
+            // A globe for a site with no saved favicon, so the titles line up.
+            item.image = icons[page.url] ?? Theme.symbol("globe", size: Theme.Symbol.row, weight: .regular)
             item.tag = Self.recentTag
             menu.insertItem(item, at: index)
             index += 1

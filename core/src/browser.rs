@@ -3,12 +3,14 @@
 
 use crate::ipc;
 use cef::*;
-use serde_json::{Value, json};
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     ffi::{CString, c_char, c_void},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicI32, Ordering},
+    },
 };
 
 /// Mirrors `TillerBrowserCallbacks` in tiller_core.h.
@@ -26,6 +28,9 @@ pub struct Callbacks {
     pub loading_progress: Option<unsafe extern "C" fn(*mut c_void, f64)>,
     pub find_result: Option<unsafe extern "C" fn(*mut c_void, i32, i32, bool)>,
     pub auto_resize: Option<unsafe extern "C" fn(*mut c_void, i32, i32)>,
+    pub copy_text: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub status_changed: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub fullscreen_changed: Option<unsafe extern "C" fn(*mut c_void, bool)>,
 }
 
 struct Entry {
@@ -33,6 +38,13 @@ struct Entry {
     callbacks: Option<Callbacks>,
     /// Keeps the DevTools observer attached. Added on the first DevTools call.
     devtools: Option<Registration>,
+    /// The favicon URL last fetched for the tab. Pages of one site share an
+    /// icon, so the same URL again isn't fetched and encoded again.
+    icon_url: Option<String>,
+    /// The site `icon_url` was fetched for. Another site naming the same
+    /// URL fetches it again, since the first fetch may still be on its way
+    /// and will be dropped as the old site's.
+    icon_origin: String,
 }
 
 /// A DevTools call waiting for its result.
@@ -51,7 +63,21 @@ thread_local! {
     /// must close before CEF shuts down.
     static POPUPS: RefCell<HashMap<i32, Browser>> = RefCell::new(HashMap::new());
     static DEVTOOLS_CALLS: RefCell<HashMap<i32, PendingCall>> = RefCell::new(HashMap::new());
-    static NEXT_MESSAGE_ID: Cell<i32> = const { Cell::new(1) };
+}
+
+/// DevTools message ids, handed out on the socket threads that frame the
+/// messages. Positive, so a reply's id can be told from an event's lack of one.
+static NEXT_MESSAGE_ID: AtomicI32 = AtomicI32::new(1);
+
+pub fn next_message_id() -> i32 {
+    let id = NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed);
+    if id > 0 {
+        id
+    } else {
+        // Wrapped around. Start over; a call from that long ago is gone.
+        NEXT_MESSAGE_ID.store(2, Ordering::Relaxed);
+        1
+    }
 }
 
 pub fn get(id: i32) -> Option<Browser> {
@@ -87,9 +113,14 @@ fn close_popups() {
     }
 }
 
+/// The string for C, without copying it again unless it holds a NUL.
 fn to_cstring(s: Option<&CefString>) -> CString {
     let s = s.map(|s| s.to_string()).unwrap_or_default();
-    CString::new(s.replace('\0', "")).unwrap_or_default()
+    CString::new(s).unwrap_or_else(|e| {
+        let mut bytes = e.into_vec();
+        bytes.retain(|&b| b != 0);
+        CString::new(bytes).unwrap_or_default()
+    })
 }
 
 pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, callbacks: Callbacks) -> i32 {
@@ -111,7 +142,9 @@ pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, call
         return -1;
     };
     let id = browser.identifier();
-    BROWSERS.with_borrow_mut(|map| map.insert(id, Entry { browser, callbacks: Some(callbacks), devtools: None }));
+    BROWSERS.with_borrow_mut(|map| {
+        map.insert(id, Entry { browser, callbacks: Some(callbacks), devtools: None, icon_url: None, icon_origin: String::new() })
+    });
     id
 }
 
@@ -150,32 +183,38 @@ pub fn close_all() {
     }
 }
 
-/// Sends one DevTools protocol command to a tab and replies to the control
-/// socket request `token` with `{"result": ...}` or `{"error": ...}`.
-pub fn devtools_call(id: i32, method: &str, params: Value, token: u64) {
+/// Sends one DevTools protocol `message`, framed with `message_id` by the
+/// socket thread, to a tab. The reply answers the control socket request
+/// `token`, or an error does right away.
+pub fn devtools_send(id: i32, message_id: i32, message: &str, token: u64) {
     let Some(host) = get(id).and_then(|b| b.host()) else {
         return ipc::reply_error(token, format!("no tab with id {id}"));
     };
-    let attached = BROWSERS.with_borrow_mut(|map| {
-        let Some(entry) = map.get_mut(&id) else { return false };
-        if entry.devtools.is_none() {
-            let mut observer = TillerDevToolsObserver::new();
-            entry.devtools = host.add_dev_tools_message_observer(Some(&mut observer));
-        }
-        entry.devtools.is_some()
-    });
+    let attached = BROWSERS.with_borrow(|map| map.get(&id).is_some_and(|e| e.devtools.is_some()));
     if !attached {
-        return ipc::reply_error(token, "could not attach to the tab's DevTools agent");
+        // Attached outside the borrow: CEF may call back into the handlers.
+        let mut observer = TillerDevToolsObserver::new();
+        let registration = host.add_dev_tools_message_observer(Some(&mut observer));
+        let kept = BROWSERS.with_borrow_mut(|map| {
+            let Some(entry) = map.get_mut(&id) else { return false };
+            entry.devtools = registration;
+            entry.devtools.is_some()
+        });
+        if !kept {
+            return ipc::reply_error(token, "could not attach to the tab's DevTools agent");
+        }
     }
 
-    let message_id = NEXT_MESSAGE_ID.get();
-    NEXT_MESSAGE_ID.set(message_id.wrapping_add(1).max(1));
     DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.insert(message_id, PendingCall { browser_id: id, token }));
-    let message = json!({ "id": message_id, "method": method, "params": params }).to_string();
     if host.send_dev_tools_message(Some(message.as_bytes())) == 0 {
         DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&message_id));
         ipc::reply_error(token, "DevTools message was rejected");
     }
+}
+
+/// Drops the call waiting for `token`, whose requester gave up on it.
+pub fn forget_devtools_call(token: u64) {
+    DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.retain(|_, c| c.token != token));
 }
 
 /// Fails every DevTools call still waiting on a browser that is going away.
@@ -189,21 +228,38 @@ fn fail_devtools_calls(browser_id: i32) {
     }
 }
 
+/// The id at the front of a DevTools reply, `{"id":12,...}`. Chromium writes
+/// the id first; events have none. Nothing else is read here, so a reply of
+/// megabytes costs the UI thread a few bytes.
+fn devtools_reply_id(message: &[u8]) -> Option<i32> {
+    if let Some(rest) = message.strip_prefix(b"{\"id\":") {
+        let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        return std::str::from_utf8(&rest[..digits]).ok()?.parse().ok();
+    }
+    // An event, which starts with its method.
+    if message.starts_with(b"{\"method\"") {
+        return None;
+    }
+    // Some other shape: read it properly.
+    #[derive(serde::Deserialize)]
+    struct WithId {
+        id: Option<i32>,
+    }
+    serde_json::from_slice::<WithId>(message).ok()?.id
+}
+
 wrap_dev_tools_message_observer! {
     struct TillerDevToolsObserver;
 
     impl DevToolsMessageObserver {
-        /// Answers the matching call. Events and replies to anyone else's calls
-        /// are left for CEF's default handling.
+        /// Hands the matching call its reply, to be read on the waiting
+        /// thread. Events and replies to anyone else's calls are left for
+        /// CEF's default handling.
         fn on_dev_tools_message(&self, _browser: Option<&mut Browser>, message: Option<&[u8]>) -> i32 {
-            let Some(message) = message.and_then(|m| serde_json::from_slice::<Value>(m).ok()) else { return 0 };
-            let Some(id) = message["id"].as_i64() else { return 0 };
-            let Some(call) = DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&(id as i32))) else { return 0 };
-            let reply = match message.get("error") {
-                Some(error) => json!({ "error": error["message"].as_str().unwrap_or("DevTools error") }),
-                None => json!({ "result": message.get("result").cloned().unwrap_or_else(|| json!({})) }),
-            };
-            ipc::reply(call.token, reply);
+            let Some(message) = message else { return 0 };
+            let Some(id) = devtools_reply_id(message) else { return 0 };
+            let Some(call) = DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&id)) else { return 0 };
+            ipc::reply_devtools(call.token, message.to_vec());
             1
         }
     }
@@ -231,6 +287,146 @@ wrap_client! {
 
         fn find_handler(&self) -> Option<FindHandler> {
             Some(TillerFindHandler::new())
+        }
+
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(crate::downloads::TillerDownloadHandler::new())
+        }
+
+        fn request_handler(&self) -> Option<RequestHandler> {
+            Some(TillerRequestHandler::new())
+        }
+
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(TillerContextMenuHandler::new())
+        }
+    }
+}
+
+/// Asks the Swift side to open `url` in a new tab.
+fn open_in_tab(browser: Option<&mut Browser>, url: Option<&CefString>, background: bool) {
+    // A link inside a native popup opens in its opener's window.
+    if let Some(cb) = tab_callbacks_for(browser) && let Some(f) = cb.open_tab {
+        let url = to_cstring(url);
+        unsafe { f(cb.ctx, url.as_ptr(), background) };
+    }
+}
+
+wrap_request_handler! {
+    struct TillerRequestHandler;
+
+    impl RequestHandler {
+        /// Cmd+click, Shift+click and middle click on a link. Chromium turns
+        /// the modifiers into a disposition before it gets here: Cmd or middle
+        /// click is a background tab, Cmd+Shift a foreground one, Shift a new
+        /// window, which becomes a selected tab since Tiller has one window.
+        fn on_open_urlfrom_tab(
+            &self,
+            browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            target_url: Option<&CefString>,
+            target_disposition: WindowOpenDisposition,
+            _user_gesture: i32,
+        ) -> i32 {
+            let background = match target_disposition {
+                WindowOpenDisposition::NEW_BACKGROUND_TAB => true,
+                WindowOpenDisposition::NEW_FOREGROUND_TAB
+                | WindowOpenDisposition::NEW_WINDOW
+                | WindowOpenDisposition::NEW_POPUP => false,
+                _ => return 0,
+            };
+            open_in_tab(browser, target_url, background);
+            1
+        }
+    }
+}
+
+const MENU_OPEN_LINK: i32 = sys::cef_menu_id_t::MENU_ID_USER_FIRST as i32;
+const MENU_OPEN_LINK_BACKGROUND: i32 = MENU_OPEN_LINK + 1;
+const MENU_COPY_LINK: i32 = MENU_OPEN_LINK + 2;
+const MENU_OPEN_IMAGE: i32 = MENU_OPEN_LINK + 3;
+const MENU_COPY_IMAGE_ADDRESS: i32 = MENU_OPEN_LINK + 4;
+const MENU_INSPECT: i32 = MENU_OPEN_LINK + 5;
+
+/// Opens Chromium's developer tools for the browser in a window of their own,
+/// or brings that window forward, inspecting the element at `inspect_at` in
+/// view coordinates when given.
+pub fn show_dev_tools(host: &BrowserHost, inspect_at: Option<&Point>) {
+    let window_info = WindowInfo { bounds: Rect { x: 120, y: 120, width: 1100, height: 760 }, ..Default::default() };
+    host.show_dev_tools(Some(&window_info), None, Some(&BrowserSettings::default()), inspect_at);
+}
+
+/// Hands `text` to the Swift side for the pasteboard.
+fn copy_text(browser: Option<&mut Browser>, text: &CefString) {
+    if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.copy_text {
+        let text = to_cstring(Some(text));
+        unsafe { f(cb.ctx, text.as_ptr()) };
+    }
+}
+
+wrap_context_menu_handler! {
+    struct TillerContextMenuHandler;
+
+    impl ContextMenuHandler {
+        /// Puts the link and image items above CEF's own when the menu is for
+        /// a link or an image, and Inspect Element at the bottom of every menu.
+        fn on_before_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            params: Option<&mut ContextMenuParams>,
+            model: Option<&mut MenuModel>,
+        ) {
+            let (Some(params), Some(model)) = (params, model) else { return };
+            let flags = params.type_flags().as_ref().0;
+            let link = sys::cef_context_menu_type_flags_t::CM_TYPEFLAG_LINK.0;
+            let media = sys::cef_context_menu_type_flags_t::CM_TYPEFLAG_MEDIA.0;
+            let mut items = Vec::new();
+            if flags & link != 0 {
+                items.push((MENU_OPEN_LINK, "Open Link in New Tab"));
+                items.push((MENU_OPEN_LINK_BACKGROUND, "Open Link in Background"));
+                items.push((MENU_COPY_LINK, "Copy Link"));
+            }
+            if flags & media != 0 && params.media_type() == ContextMenuMediaType::IMAGE {
+                items.push((MENU_OPEN_IMAGE, "Open Image in New Tab"));
+                items.push((MENU_COPY_IMAGE_ADDRESS, "Copy Image Address"));
+            }
+            for (index, (id, label)) in items.iter().enumerate() {
+                model.insert_item_at(index, *id, Some(&CefString::from(*label)));
+            }
+            if !items.is_empty() && model.count() > items.len() {
+                model.insert_separator_at(items.len());
+            }
+            if model.count() > 0 {
+                model.add_separator();
+            }
+            model.add_item(MENU_INSPECT, Some(&CefString::from("Inspect Element")));
+        }
+
+        fn on_context_menu_command(
+            &self,
+            browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            params: Option<&mut ContextMenuParams>,
+            command_id: i32,
+            _event_flags: EventFlags,
+        ) -> i32 {
+            let Some(params) = params else { return 0 };
+            match command_id {
+                MENU_OPEN_LINK => open_in_tab(browser, Some(&CefString::from(&params.link_url())), false),
+                MENU_OPEN_LINK_BACKGROUND => open_in_tab(browser, Some(&CefString::from(&params.link_url())), true),
+                MENU_COPY_LINK => copy_text(browser, &CefString::from(&params.link_url())),
+                // A foreground tab, as Safari and Chrome open it.
+                MENU_OPEN_IMAGE => open_in_tab(browser, Some(&CefString::from(&params.source_url())), false),
+                MENU_COPY_IMAGE_ADDRESS => copy_text(browser, &CefString::from(&params.source_url())),
+                MENU_INSPECT => {
+                    if let Some(host) = browser.and_then(|b| b.host()) {
+                        show_dev_tools(&host, Some(&Point { x: params.xcoord(), y: params.ycoord() }));
+                    }
+                }
+                _ => return 0,
+            }
+            1
         }
     }
 }
@@ -271,13 +467,23 @@ wrap_display_handler! {
 
         fn on_favicon_urlchange(&self, browser: Option<&mut Browser>, icon_urls: Option<&mut CefStringList>) {
             let Some(browser) = browser else { return };
+            let id = browser.identifier();
             let first = icon_urls.and_then(first_string);
+            let origin = page_origin(browser);
             let Some(url) = first else {
-                send_favicon(browser.identifier(), &[]);
+                set_icon_url(id, None, &origin);
+                send_favicon(id, &[]);
                 return;
             };
+            // Every page of a site names the same icon; the tab has it already.
+            if BROWSERS.with_borrow(|map| {
+                map.get(&id).is_some_and(|e| e.icon_url.as_deref() == Some(url.as_str()) && e.icon_origin == origin)
+            }) {
+                return;
+            }
             if let Some(host) = browser.host() {
-                let mut callback = TillerFaviconCallback::new(browser.identifier(), page_origin(browser));
+                set_icon_url(id, Some(url.clone()), &origin);
+                let mut callback = TillerFaviconCallback::new(id, origin);
                 host.download_image(Some(&CefString::from(url.as_str())), 1, 64, 0, Some(&mut callback));
             }
         }
@@ -286,6 +492,22 @@ wrap_display_handler! {
             if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.title_changed {
                 let title = to_cstring(title);
                 unsafe { f(cb.ctx, title.as_ptr()) };
+            }
+        }
+
+        /// The link under the mouse, or nothing when it leaves one.
+        fn on_status_message(&self, browser: Option<&mut Browser>, value: Option<&CefString>) {
+            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.status_changed {
+                let text = to_cstring(value);
+                unsafe { f(cb.ctx, text.as_ptr()) };
+            }
+        }
+
+        /// The page asked for the whole screen, as a video player does, or
+        /// gave it back. The app takes the window there and back.
+        fn on_fullscreen_mode_change(&self, browser: Option<&mut Browser>, fullscreen: i32) {
+            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.fullscreen_changed {
+                unsafe { f(cb.ctx, fullscreen != 0) };
             }
         }
 
@@ -340,6 +562,24 @@ fn send_favicon(id: i32, png: &[u8]) {
     }
 }
 
+fn set_icon_url(id: i32, url: Option<String>, origin: &str) {
+    BROWSERS.with_borrow_mut(|map| {
+        if let Some(entry) = map.get_mut(&id) {
+            entry.icon_url = url;
+            entry.icon_origin = origin.to_string();
+        }
+    });
+}
+
+/// Forgets `url` as the tab's icon, unless a later page set another.
+fn clear_icon_url(id: i32, url: &str) {
+    BROWSERS.with_borrow_mut(|map| {
+        if let Some(entry) = map.get_mut(&id) && entry.icon_url.as_deref() == Some(url) {
+            entry.icon_url = None;
+        }
+    });
+}
+
 wrap_download_image_callback! {
     struct TillerFaviconCallback {
         browser_id: i32,
@@ -350,8 +590,12 @@ wrap_download_image_callback! {
     }
 
     impl DownloadImageCallback {
-        fn on_download_image_finished(&self, _image_url: Option<&CefString>, _http_status_code: i32, image: Option<&mut Image>) {
+        fn on_download_image_finished(&self, image_url: Option<&CefString>, _http_status_code: i32, image: Option<&mut Image>) {
+            let url = image_url.map(|u| u.to_string()).unwrap_or_default();
             if get(self.browser_id).is_none_or(|b| page_origin(&b) != self.origin) {
+                // Not this site's any more. The next site may have named its
+                // own icon meanwhile, which stays.
+                clear_icon_url(self.browser_id, &url);
                 return;
             }
             // CEF returns nothing unless both size out-parameters are given.
@@ -362,7 +606,11 @@ wrap_download_image_callback! {
                     let bytes = unsafe { std::slice::from_raw_parts(png.raw_data().cast::<u8>(), png.size()) };
                     send_favicon(self.browser_id, bytes);
                 }
-                _ => send_favicon(self.browser_id, &[]),
+                _ => {
+                    // Nothing came, so the same URL is worth another try later.
+                    clear_icon_url(self.browser_id, &url);
+                    send_favicon(self.browser_id, &[]);
+                }
             }
         }
     }
@@ -437,12 +685,7 @@ wrap_life_span_handler! {
                 // Let CEF create the popup, preserving opener and request context.
                 return 0;
             }
-            // A new-tab link inside a native popup opens in its opener's window.
-            if let Some(cb) = tab_callbacks_for(browser) && let Some(f) = cb.open_tab {
-                let url = to_cstring(target_url);
-                let background = target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB;
-                unsafe { f(cb.ctx, url.as_ptr(), background) };
-            }
+            open_in_tab(browser, target_url, target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB);
             1
         }
 
@@ -458,22 +701,19 @@ wrap_life_span_handler! {
         /// send performClose: to it, tell Swift to remove the tab's view. Tearing
         /// down that view finishes the close and leads to `on_before_close`.
         fn do_close(&self, browser: Option<&mut Browser>) -> i32 {
-            let Some(browser) = browser else { return 0 };
-            let is_tab = BROWSERS.with_borrow(|map| map.contains_key(&browser.identifier()));
-            if is_tab {
-                // A closed popup finishes tearing down only on the main window's
-                // next redraw, so close popups while the last tab's view is still
-                // up rather than after the window is gone.
-                if BROWSERS.with_borrow(|map| map.len()) == 1 {
-                    close_popups();
-                }
-                if let Some(cb) = callbacks_for(Some(browser)) && let Some(f) = cb.close_ready {
-                    unsafe { f(cb.ctx) };
-                }
-                return 1;
+            // A browser of its own, such as the developer tools window or a
+            // native popup, closes the usual way.
+            let Some(cb) = callbacks_for(browser) else { return 0 };
+            // A closed popup finishes tearing down only on the main window's
+            // next redraw, so close popups while the last tab's view is still
+            // up rather than after the window is gone.
+            if BROWSERS.with_borrow(|map| map.len()) == 1 {
+                close_popups();
             }
-            // Native popups have no Swift tab; CEF owns their windows.
-            0
+            if let Some(f) = cb.close_ready {
+                unsafe { f(cb.ctx) };
+            }
+            1
         }
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
@@ -490,10 +730,10 @@ wrap_life_span_handler! {
                 return;
             }
             fail_devtools_calls(id);
-            let empty = BROWSERS.with_borrow_mut(|map| {
-                map.remove(&id);
-                map.is_empty()
-            });
+            let (entry, empty) = BROWSERS.with_borrow_mut(|map| (map.remove(&id), map.is_empty()));
+            // Released outside the borrow: dropping the browser and its
+            // DevTools registration can call back into the handlers.
+            drop(entry);
             // One window for now, so the last tab closing quits the app. Popups
             // left open close first, so no bare popup window lingers and CEF
             // never shuts down with a live browser.

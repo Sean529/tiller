@@ -1,4 +1,5 @@
-import Foundation
+import AppKit
+import os
 
 /// Where address bar searches go.
 enum SearchEngine: String, CaseIterable {
@@ -66,6 +67,70 @@ enum TabLayout: String, CaseIterable {
     }
 }
 
+/// Light or dark for the chrome and for pages, which see it as
+/// `prefers-color-scheme`.
+enum Appearance: String, CaseIterable {
+    case system
+    case light
+    case dark
+
+    var displayName: String {
+        switch self {
+        case .system: "Match System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    /// What `NSApp.appearance` is set to. Nil follows the system.
+    var appearance: NSAppearance? {
+        switch self {
+        case .system: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
+/// The color Tiller's own tinted surfaces use: selections, the message
+/// bubble, busy dots and the start page's wash. AppKit's controls, such as
+/// focus rings and text selection, keep the system accent either way.
+enum AccentTheme: String, CaseIterable {
+    case system
+    case graphite
+    case blue
+    case teal
+    case green
+    case orange
+    case pink
+
+    var displayName: String {
+        switch self {
+        case .system: "Match System"
+        case .graphite: "Graphite"
+        case .blue: "Blue"
+        case .teal: "Teal"
+        case .green: "Green"
+        case .orange: "Orange"
+        case .pink: "Pink"
+        }
+    }
+
+    /// A system color, so each one has its own light, dark and
+    /// high-contrast shades.
+    var color: NSColor {
+        switch self {
+        case .system: .controlAccentColor
+        case .graphite: .systemGray
+        case .blue: .systemBlue
+        case .teal: .systemTeal
+        case .green: .systemGreen
+        case .orange: .systemOrange
+        case .pink: .systemPink
+        }
+    }
+}
+
 /// Every setting the Settings window shows, stored in the current profile's
 /// user defaults. Launch arguments (`-homepage https://…`) override them like
 /// any default.
@@ -100,6 +165,34 @@ enum Settings {
         set {
             defaults.set(newValue.rawValue, forKey: "tabLayout")
             NotificationCenter.default.post(name: .tabLayoutDidChange, object: nil)
+        }
+    }
+
+    static var appearance: Appearance {
+        get { defaults.string(forKey: "appearance").flatMap(Appearance.init) ?? .system }
+        set {
+            defaults.set(newValue.rawValue, forKey: "appearance")
+            NotificationCenter.default.post(name: .themeDidChange, object: nil)
+        }
+    }
+
+    /// The accent last read or set. Every tinted color resolves it each time
+    /// it is drawn, from any thread, so it skips the defaults lookup.
+    private static let cachedAccentTheme = OSAllocatedUnfairLock<AccentTheme?>(initialState: nil)
+
+    static var accentTheme: AccentTheme {
+        get {
+            cachedAccentTheme.withLock { cached in
+                if let cached { return cached }
+                let theme = defaults.string(forKey: "accentTheme").flatMap(AccentTheme.init) ?? .system
+                cached = theme
+                return theme
+            }
+        }
+        set {
+            cachedAccentTheme.withLock { $0 = newValue }
+            defaults.set(newValue.rawValue, forKey: "accentTheme")
+            NotificationCenter.default.post(name: .themeDidChange, object: nil)
         }
     }
 
@@ -170,6 +263,23 @@ enum Settings {
 
     static var agentTools: [AgentTool] { AgentTool.allCases.filter(agentToolEnabled) }
 
+    /// The model options new chats with `kind` start with, each provider
+    /// keeping its own. All the CLI's own by default.
+    static func agentModelOptions(for kind: AgentChoice) -> AgentModelOptions {
+        defaults.data(forKey: "agentModelOptions.\(kind.rawValue)")
+            .flatMap { try? JSONDecoder().decode(AgentModelOptions.self, from: $0) } ?? AgentModelOptions()
+    }
+
+    static func setAgentModelOptions(_ options: AgentModelOptions, for kind: AgentChoice) {
+        let key = "agentModelOptions.\(kind.rawValue)"
+        if options.isDefault {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(try? JSONEncoder().encode(options), forKey: key)
+        }
+        NotificationCenter.default.post(name: .agentModelOptionsDidChange, object: nil)
+    }
+
     /// As typed. Empty means Tiller's own empty folder.
     static var agentFolder: String {
         get { defaults.string(forKey: "agentFolder") ?? "" }
@@ -214,7 +324,7 @@ enum Settings {
 }
 
 /// Groups of built-in agent tools that Settings can turn on.
-enum AgentTool: String, CaseIterable {
+enum AgentTool: String, CaseIterable, Codable {
     case read
     case write
     case shell
@@ -237,13 +347,26 @@ enum AgentTool: String, CaseIterable {
         case .shell: ["Bash"]
         }
     }
+
+    /// The tool names Grok Build uses.
+    var grokToolNames: [String] {
+        switch self {
+        case .read: ["read_file", "grep", "list_dir"]
+        case .write: ["write", "search_replace"]
+        case .shell: ["run_terminal_command", "get_command_or_subagent_output", "kill_command_or_subagent"]
+        }
+    }
 }
 
 extension Notification.Name {
     /// Posted when `AgentKind.current` changes, from the panel or from Settings.
     static let agentKindDidChange = Notification.Name("TillerAgentKindDidChange")
+    /// Posted when Settings' model options for new chats change.
+    static let agentModelOptionsDidChange = Notification.Name("TillerAgentModelOptionsDidChange")
     /// Posted when `Settings.agentTabs` changes.
     static let agentTabsDidChange = Notification.Name("TillerAgentTabsDidChange")
     /// Posted when `Settings.tabLayout` changes.
     static let tabLayoutDidChange = Notification.Name("TillerTabLayoutDidChange")
+    /// Posted when `Settings.appearance` or `Settings.accentTheme` changes.
+    static let themeDidChange = Notification.Name("TillerThemeDidChange")
 }

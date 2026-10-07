@@ -1,4 +1,5 @@
 import AppKit
+import os
 
 /// A profile has its own cookies and site data, history, open tabs, saved
 /// passwords, settings and agent chats. Each open profile is a separate Tiller
@@ -80,7 +81,10 @@ enum Profiles {
     }
 
     /// Makes the current profile the one a plain launch and the CLI pick.
+    /// Called on every activation, so the lock is only taken when the list
+    /// says another profile.
     static func markUsed() {
+        guard read().lastUsed != current.id else { return }
         update { $0.lastUsed = current.id }
     }
 
@@ -235,7 +239,7 @@ enum Profiles {
 
     // MARK: File
 
-    private struct List: Codable, Equatable {
+    private struct List: Codable, Equatable, Sendable {
         var profiles: [Profile] = []
         /// The id of the profile whose Tiller was active last.
         var lastUsed: String?
@@ -243,10 +247,19 @@ enum Profiles {
 
     private static var listURL: URL { URL(fileURLWithPath: root + "/profiles.json") }
 
+    /// The list as last decoded, with the file's modification date then.
+    /// Every activation and the Dock badge read the list, so the file is
+    /// only decoded again once another Tiller has written it.
+    private static let lastRead = OSAllocatedUnfairLock<(modified: Date?, list: List)?>(initialState: nil)
+
     private static func read() -> List {
+        let modified = (try? listURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        if let cached = lastRead.withLock({ $0 }), cached.modified == modified { return cached.list }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? Data(contentsOf: listURL)).flatMap { try? decoder.decode(List.self, from: $0) } ?? List()
+        let list = (try? Data(contentsOf: listURL)).flatMap { try? decoder.decode(List.self, from: $0) } ?? List()
+        lastRead.withLock { $0 = (modified, list) }
+        return list
     }
 
     /// Re-reads the list, applies `change` and writes it back if it changed,
@@ -274,6 +287,7 @@ enum Profiles {
         } catch {
             NSLog("Tiller: could not save profiles: %@", error.localizedDescription)
         }
+        lastRead.withLock { $0 = nil }
         return list
     }
 }

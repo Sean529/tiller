@@ -7,9 +7,9 @@ import AppKit
 /// tint from the left, as in Safari.
 final class AddressBarView: NSView {
     let field = AddressField()
-    let keyButton = NSButton()
+    let keyButton: NSButton = HoverButton()
     /// The page's zoom, when it isn't 100%. Clicking it resets.
-    let zoomButton = NSButton()
+    let zoomButton: NSButton = HoverButton()
     /// Room left at each end of the capsule.
     var inset: CGFloat = 12 {
         didSet {
@@ -21,8 +21,13 @@ final class AddressBarView: NSView {
     private let statusIcon = NSImageView()
     /// The symbol `statusIcon` shows, so it is only made when it changes.
     private var statusSymbol = ""
+    /// Whether the user is typing, when the icon says what Return would do.
+    private var isEditing = false
     private let glass = NSGlassEffectView()
-    private let progressFill = NSView()
+    private let progressFill = ProgressTintView()
+    /// The share of the capsule's width the load tint covers, kept so the
+    /// tint follows the capsule when it resizes.
+    private var progressFraction: CGFloat = 0
     private var capsuleLeading: NSLayoutConstraint!
     private var capsuleTrailing: NSLayoutConstraint!
     /// Whether the tint is tracking a load, as opposed to finishing or hidden.
@@ -37,7 +42,7 @@ final class AddressBarView: NSView {
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 13)
+        field.font = .systemFont(ofSize: Theme.FontSize.body)
         field.lineBreakMode = .byTruncatingTail
         field.usesSingleLineMode = true
         field.cell?.isScrollable = true
@@ -51,15 +56,14 @@ final class AddressBarView: NSView {
         keyButton.bezelStyle = .accessoryBarAction
         keyButton.isBordered = false
         keyButton.imagePosition = .imageOnly
-        keyButton.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: "Fill Password")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        keyButton.image = Theme.symbol("key.fill", size: Theme.Symbol.inline, label: "Fill Password")
         keyButton.contentTintColor = .secondaryLabelColor
         keyButton.toolTip = "Fill Saved Password"
         keyButton.isHidden = true
 
         zoomButton.bezelStyle = .accessoryBarAction
         zoomButton.isBordered = false
-        zoomButton.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        zoomButton.font = .monospacedDigitSystemFont(ofSize: Theme.FontSize.caption, weight: .medium)
         zoomButton.contentTintColor = .secondaryLabelColor
         zoomButton.toolTip = "Actual Size"
         zoomButton.isHidden = true
@@ -69,12 +73,10 @@ final class AddressBarView: NSView {
         buttons.spacing = 2
         buttons.setContentHuggingPriority(.required, for: .horizontal)
 
-        let content = NSView()
-        content.wantsLayer = true
+        let content = CapsuleContentView()
         content.layer?.cornerRadius = 15
         content.layer?.cornerCurve = .continuous
         content.layer?.masksToBounds = true
-        progressFill.wantsLayer = true
         progressFill.alphaValue = 0
         content.addSubview(progressFill)
         for view in [statusIcon, field, buttons] as [NSView] {
@@ -104,6 +106,13 @@ final class AddressBarView: NSView {
             buttons.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             keyButton.widthAnchor.constraint(equalToConstant: 20),
         ])
+        content.onResize = { [weak self] in self?.resizeProgress() }
+        field.onEditingChanged = { [weak self, weak content] editing in
+            guard let self else { return }
+            self.isEditing = editing
+            content?.isFocused = editing
+            self.showStatus(of: self.field.url)
+        }
         showStatus(of: "")
     }
 
@@ -120,40 +129,60 @@ final class AddressBarView: NSView {
     /// the tint runs to the end and fades out. Without `animated`, as when
     /// switching tabs, it jumps straight to the new state.
     func setProgress(_ progress: Double, loading: Bool, animated: Bool = true) {
-        guard let content = progressFill.superview else { return }
-        let bounds = content.bounds
-        let target = NSRect(x: 0, y: 0, width: bounds.width * min(1, max(0.08, progress)), height: bounds.height)
-        progressFill.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
+        // Under Reduce Motion the tint jumps to each state instead of sweeping.
+        let animated = animated && !Theme.reduceMotion
+        let fraction = min(1, max(0.08, progress))
         let started = loading && !showsLoad
         showsLoad = loading
         if !animated {
-            progressFill.frame = target
+            progressFraction = fraction
+            progressFill.frame = progressFrame(fraction)
             progressFill.alphaValue = loading ? 1 : 0
         } else if loading {
             if started {
                 // A new load starts from the left edge.
-                progressFill.frame = NSRect(x: 0, y: 0, width: 0, height: bounds.height)
+                progressFraction = 0
+                progressFill.frame = progressFrame(0)
                 progressFill.alphaValue = 1
             }
-            guard target.width > progressFill.frame.width else { return }
+            guard fraction > progressFraction else { return }
+            progressFraction = fraction
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.25
+                context.duration = Theme.Duration.panel
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                progressFill.animator().frame = target
+                progressFill.animator().frame = progressFrame(fraction)
             }
         } else if progressFill.alphaValue > 0 {
+            progressFraction = 1
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                progressFill.animator().frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
+                context.duration = Theme.Duration.slide
+                progressFill.animator().frame = progressFrame(1)
             } completionHandler: { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self, !self.showsLoad else { return }
                     NSAnimationContext.runAnimationGroup { context in
-                        context.duration = 0.25
+                        context.duration = Theme.Duration.panel
                         self.progressFill.animator().alphaValue = 0
                     }
                 }
             }
+        }
+    }
+
+    /// The load tint's frame at `fraction` of the capsule's current width.
+    private func progressFrame(_ fraction: CGFloat) -> NSRect {
+        let bounds = progressFill.superview?.bounds ?? .zero
+        return NSRect(x: 0, y: 0, width: bounds.width * fraction, height: bounds.height)
+    }
+
+    /// Fits the tint to a resized capsule at once, so it neither lags behind
+    /// a wider capsule nor gets stuck at the size it had before layout.
+    private func resizeProgress() {
+        guard progressFill.alphaValue > 0 else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            progressFill.frame = progressFrame(progressFraction)
         }
     }
 
@@ -164,9 +193,12 @@ final class AddressBarView: NSView {
     }
 
     /// A lock for https, a warning for http, and a magnifying glass where
-    /// there is no page yet.
+    /// there is no page yet or while typing, when Return searches or goes
+    /// to what was typed rather than the page shown before.
     private func showStatus(of url: String) {
-        let (symbol, description) = if url.hasPrefix("https://") {
+        let (symbol, description) = if isEditing {
+            ("magnifyingglass", "Search")
+        } else if url.hasPrefix("https://") {
             ("lock.fill", "Secure")
         } else if url.hasPrefix("http://") {
             ("exclamationmark.triangle", "Not Secure")
@@ -177,10 +209,63 @@ final class AddressBarView: NSView {
         }
         if statusSymbol != symbol {
             statusSymbol = symbol
-            statusIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
-                .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+            statusIcon.image = Theme.symbol(symbol, size: Theme.Symbol.inline, label: description)
         }
-        statusIcon.toolTip = url.hasPrefix("http") ? description : nil
+        statusIcon.toolTip = !isEditing && url.hasPrefix("http") ? description : nil
+    }
+}
+
+/// The load tint inside the capsule. Its color is set in `updateLayer`, so it
+/// follows light and dark mode and the accent color, which a layer color set
+/// once would not.
+private final class ProgressTintView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = Theme.accent(Theme.Accent.soft).layerColor
+    }
+}
+
+/// The capsule's content. While the field is being edited it takes a thin
+/// accent outline, set in `updateLayer` so it follows the appearance and the
+/// accent color. It reports a change of size so the load tint can follow.
+private final class CapsuleContentView: NSView {
+    var isFocused = false {
+        didSet { if isFocused != oldValue { needsDisplay = true } }
+    }
+    var onResize: (() -> Void)?
+    private var laidOutSize = NSSize.zero
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        let width = isFocused ? Theme.hairlineWidth : 0
+        let color = Theme.accent(Theme.Accent.outline).layerColor
+        withEasing {
+            layer?.borderWidth = width
+            layer?.borderColor = color
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        guard bounds.size != laidOutSize else { return }
+        laidOutSize = bounds.size
+        onResize?()
     }
 }
 
@@ -191,6 +276,9 @@ final class AddressField: NSTextField {
         didSet { if !isEditing { showURL() } }
     }
 
+    /// Called with true when typing starts and false when it ends.
+    var onEditingChanged: ((Bool) -> Void)?
+
     var isEditing: Bool { currentEditor() != nil }
 
     override func becomeFirstResponder() -> Bool {
@@ -200,6 +288,7 @@ final class AddressField: NSTextField {
             return false
         }
         currentEditor()?.selectAll(nil)
+        onEditingChanged?(true)
         return true
     }
 
@@ -228,6 +317,7 @@ final class AddressField: NSTextField {
             MainActor.assumeIsolated {
                 guard let self, !self.isEditing else { return }
                 self.showURL()
+                self.onEditingChanged?(false)
             }
         }
     }
@@ -243,7 +333,7 @@ final class AddressField: NSTextField {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         let text = NSMutableAttributedString(string: shown, attributes: [
-            .font: font ?? .systemFont(ofSize: 13),
+            .font: font ?? .systemFont(ofSize: Theme.FontSize.body),
             .foregroundColor: NSColor.secondaryLabelColor,
             .paragraphStyle: paragraph,
         ])
@@ -269,12 +359,33 @@ enum AddressInput {
             return input
         }
         let host = input.split(separator: "/", maxSplits: 1).first.map(String.init) ?? input
-        let looksLikeHost = !input.contains(" ")
-            && (host.contains(".") || host.hasPrefix("localhost") || host.contains(":"))
+        // A colon only belongs to a host when a port follows it, so search
+        // operators such as `site:example.com` stay searches.
+        var name = Substring(host)
+        var hasPort = false
+        if !host.hasPrefix("["), let colon = host.lastIndex(of: ":") {
+            let port = host[host.index(after: colon)...]
+            hasPort = !port.isEmpty && port.allSatisfy(\.isASCII) && port.allSatisfy(\.isNumber)
+            name = host[..<colon]
+        }
+        let looksLikeHost = !input.contains(" ") && !name.isEmpty
+            && (host.hasPrefix("[") || hasPort || name.contains(".") || name.hasPrefix("localhost"))
         if looksLikeHost {
-            let scheme = host.hasPrefix("localhost") || host.hasPrefix("127.") ? "http" : "https"
+            let scheme = isLocal(name) ? "http" : "https"
             return "\(scheme)://\(input)"
         }
         return Settings.searchURL(for: input)
+    }
+
+    /// Localhost and private IPv4 addresses, which seldom serve https.
+    private static func isLocal(_ name: Substring) -> Bool {
+        if name.hasPrefix("localhost") { return true }
+        let parts = name.split(separator: ".", omittingEmptySubsequences: false)
+        let octets = parts.compactMap { UInt8($0) }
+        guard parts.count == 4, octets.count == 4 else { return false }
+        switch (octets[0], octets[1]) {
+        case (10, _), (127, _), (192, 168), (172, 16...31): return true
+        default: return false
+        }
     }
 }

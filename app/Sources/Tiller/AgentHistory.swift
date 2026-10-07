@@ -5,14 +5,26 @@ import Foundation
 struct AgentConversation: Codable, Equatable {
     let id: String
     var kind: AgentKind
+    /// The provider the chat runs on, if the user added one for its CLI.
+    var provider: String? = nil
     /// The first message's first line until the agent names the chat.
     var title: String
     var sessionID: String?
     /// The folder the agent ran in. The CLIs keep sessions by folder, so
     /// resuming runs there again.
     var directory: String?
+    /// The built-in tools this chat allows. Nil for chats saved before chats
+    /// had their own, which use Settings'.
+    var tools: [AgentTool]?
+    /// The model, effort, context and fast mode this chat runs with. Nil for
+    /// chats saved before chats had them, which use Settings'.
+    var modelOptions: AgentModelOptions?
+    /// The scheduled prompt that started the chat, if one did.
+    var scheduleID: String?
     var created: Date
     var updated: Date
+
+    var choice: AgentChoice { AgentChoice(kind, provider: provider) }
 
     /// The first line of the first message, shortened.
     static func title(from text: String) -> String {
@@ -24,7 +36,7 @@ struct AgentConversation: Codable, Equatable {
 }
 
 /// One row of a saved transcript.
-enum AgentRecord: Codable, Equatable {
+enum AgentRecord: Codable, Equatable, Sendable {
     /// `images` are file names in the chat's folder.
     case user(text: String, images: [String])
     case text(String)
@@ -54,6 +66,11 @@ final class AgentHistoryStore {
     private var indexChanged = false
     /// Transcripts waiting to be written, by conversation id.
     private var pendingRecords: [String: [AgentRecord]] = [:]
+    /// The transcripts set this run whose write hasn't reached disk, by
+    /// conversation id, so a read never gets the file from before it. Each
+    /// is numbered, so a write finishing drops only what it wrote.
+    private var knownRecords: [String: (records: [AgentRecord], version: Int)] = [:]
+    private var recordsVersion = 0
     private var writeScheduled = false
 
     private init() {
@@ -86,9 +103,12 @@ final class AgentHistoryStore {
     func delete(_ id: String) {
         index.conversations.removeAll { $0.id == id }
         pendingRecords[id] = nil
+        knownRecords[id] = nil
         indexChanged = true
         scheduleWrite()
-        try? FileManager.default.removeItem(at: folder(for: id))
+        // After any write of its transcript still on its way.
+        let folder = folder(for: id)
+        Self.writer.async { try? FileManager.default.removeItem(at: folder) }
     }
 
     /// Where a chat keeps its transcript and images. Created when first written.
@@ -97,13 +117,25 @@ final class AgentHistoryStore {
     }
 
     func records(for id: String) -> [AgentRecord] {
-        if let pending = pendingRecords[id] { return pending }
-        let data = try? Data(contentsOf: folder(for: id).appendingPathComponent("transcript.json"))
+        unwrittenRecords(for: id) ?? Self.readRecords(in: folder(for: id))
+    }
+
+    /// The transcript set this run whose write hasn't reached disk, if any.
+    /// A chat reads this first, then the file off the main thread.
+    func unwrittenRecords(for id: String) -> [AgentRecord]? {
+        knownRecords[id]?.records
+    }
+
+    /// The transcript in a chat's folder. Safe off the main thread.
+    nonisolated static func readRecords(in folder: URL) -> [AgentRecord] {
+        let data = try? Data(contentsOf: folder.appendingPathComponent("transcript.json"))
         return data.flatMap { try? JSONDecoder().decode([AgentRecord].self, from: $0) } ?? []
     }
 
     func setRecords(_ records: [AgentRecord], for id: String) {
         pendingRecords[id] = records
+        recordsVersion += 1
+        knownRecords[id] = (records, recordsVersion)
         scheduleWrite()
     }
 
@@ -129,27 +161,54 @@ final class AgentHistoryStore {
 
     // MARK: Writing
 
-    /// Writes pending changes now rather than after the short delay.
+    /// Writes pending changes now rather than after the short delay. The
+    /// encoding and writing happen on a background queue, in order, from a
+    /// copy of what is pending: a long agent run saves its transcript twice
+    /// a second, and the whole of it each time.
     func flush() {
         writeScheduled = false
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            for (id, records) in pendingRecords where conversation(id) != nil {
-                let folder = folder(for: id)
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try Self.write(JSONEncoder().encode(records), to: folder.appendingPathComponent("transcript.json"))
+        let transcripts = pendingRecords.filter { conversation($0.key) != nil }
+        let versions = transcripts.keys.compactMap { id in knownRecords[id].map { (id, $0.version) } }
+        pendingRecords.removeAll()
+        let index = indexChanged ? self.index : nil
+        indexChanged = false
+        guard !transcripts.isEmpty || index != nil else { return }
+        let directory = directory, indexURL = indexURL
+        Self.writer.async {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                for (id, records) in transcripts {
+                    let folder = directory.appendingPathComponent(id, isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try Self.write(JSONEncoder().encode(records), to: folder.appendingPathComponent("transcript.json"))
+                }
+                if let index {
+                    try Self.write(JSONEncoder().encode(index), to: indexURL)
+                }
+            } catch {
+                NSLog("Tiller: could not save agent chats: %@", error.localizedDescription)
             }
-            pendingRecords.removeAll()
-            if indexChanged {
-                indexChanged = false
-                try Self.write(JSONEncoder().encode(index), to: indexURL)
+            // On disk now: the copies in memory can go, unless set again since.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let store = AgentHistoryStore.shared
+                    for (id, version) in versions where store.knownRecords[id]?.version == version {
+                        store.knownRecords[id] = nil
+                    }
+                }
             }
-        } catch {
-            NSLog("Tiller: could not save agent chats: %@", error.localizedDescription)
         }
     }
 
-    private static func write(_ data: Data, to url: URL) throws {
+    /// Blocks until every write so far is on disk. For quitting.
+    func waitForWrites() {
+        Self.writer.sync {}
+    }
+
+    /// One queue, so writes land in the order they were made.
+    private static let writer = DispatchQueue(label: "dev.sorrycc.tiller.agent-chats", qos: .utility)
+
+    nonisolated private static func write(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
@@ -169,26 +228,32 @@ final class AgentHistoryStore {
     /// Folders of chats that were never saved, left by the last run, and the
     /// images folder older versions of Tiller used.
     private func removeUnsavedFolders() {
-        let manager = FileManager.default
-        try? manager.removeItem(atPath: DataDirectory.path + "/agent-attachments")
-        let saved = Set(index.conversations.map(\.id))
-        for name in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? [] where name != "index.json" && !saved.contains(name) {
-            try? manager.removeItem(at: directory.appendingPathComponent(name))
+        // Deleting runs on the writer queue, after any write already on it
+        // and off the main thread, which is building the window meanwhile.
+        let directory = directory, saved = Set(index.conversations.map(\.id))
+        Self.writer.async {
+            let manager = FileManager.default
+            try? manager.removeItem(atPath: DataDirectory.path + "/agent-attachments")
+            for name in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? [] where name != "index.json" && !saved.contains(name) {
+                try? manager.removeItem(at: directory.appendingPathComponent(name))
+            }
         }
     }
 }
 
-/// The title Claude Code or Qoder CLI gave a session, from the session file
-/// it writes under its projects folder. Nil if there is none yet.
+/// The title Claude Code, Qoder CLI or Grok Build gave a session, from the
+/// session file it writes under its projects folder. Nil if there is none yet.
 enum AgentSessionTitle {
     nonisolated static func read(kind: AgentKind, sessionID: String, directory: String) -> String? {
         let home: String
         switch kind {
+        case .grok:
+            return grokTitle(sessionID: sessionID, directory: directory)
         case .claude:
             home = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] ?? NSHomeDirectory() + "/.claude"
         case .qodercli:
             home = NSHomeDirectory() + "/.qoder"
-        case .codex:
+        case .codex, .agy:
             return nil
         }
         // Both name a project's folder after its path, with every character
@@ -214,5 +279,18 @@ enum AgentSessionTitle {
             if let title, !title.isEmpty { return title }
         }
         return nil
+    }
+
+    /// grok keeps a session in a folder named after its folder's path,
+    /// percent-encoded, with the title in `summary.json`.
+    nonisolated private static func grokTitle(sessionID: String, directory: String) -> String? {
+        let home = ProcessInfo.processInfo.environment["GROK_HOME"] ?? NSHomeDirectory() + "/.grok"
+        let resolved = URL(fileURLWithPath: directory).resolvingSymlinksInPath().path
+        guard let project = resolved.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")),
+            let data = FileManager.default.contents(atPath: "\(home)/sessions/\(project)/\(sessionID)/summary.json"),
+            let summary = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let title = summary["generated_title"] as? String, !title.isEmpty
+        else { return nil }
+        return title
     }
 }

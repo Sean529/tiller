@@ -65,6 +65,9 @@ final class ExtensionBarView: NSStackView {
 
     @objc private func showMenu(_ sender: NSButton) {
         let menu = NSMenu()
+        // Items keep the enabled state set here: one with neither a popup nor
+        // an options page has nothing to open.
+        menu.autoenablesItems = false
         for manifest in ExtensionStore.shared.running {
             let item = MenuActionItem(title: manifest.name) { [weak self, weak sender] in
                 guard let self, let sender else { return }

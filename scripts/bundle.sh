@@ -90,6 +90,7 @@ write_plist() {
     <key>LSEnvironment</key><dict><key>MallocNanoZone</key><string>0</string></dict>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSBluetoothAlwaysUsageDescription</key><string>A website wants to connect to a Bluetooth device through the browser.</string>
     <key>NSCameraUsageDescription</key><string>A website wants to use the camera.</string>
     <key>NSMicrophoneUsageDescription</key><string>A website wants to use the microphone.</string>
     <key>NSAppleEventsUsageDescription</key><string>Tiller asks Finder to copy Chrome's data when security software blocks reading it directly.</string>

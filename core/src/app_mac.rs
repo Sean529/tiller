@@ -12,7 +12,8 @@ use objc2_app_kit::{NSApp, NSApplication, NSEvent};
 use std::cell::Cell;
 
 thread_local! {
-    /// Run by `terminate:` before any browser starts closing.
+    /// Run by `terminate:` in place of closing every browser. It closes the
+    /// app's tabs, those without a browser included.
     static QUIT_HANDLER: Cell<Option<unsafe extern "C" fn()>> = const { Cell::new(None) };
 }
 
@@ -47,13 +48,15 @@ define_class!(
 
         /// Chromium needs to leave the run loop to shut down cleanly, so the
         /// default `terminate:` (which calls exit()) is replaced by closing every
-        /// browser. The last `on_before_close` quits the message loop.
+        /// browser. The quit handler does that when the app set one, since it
+        /// knows about tabs that have no browser yet. The last `on_before_close`
+        /// quits the message loop.
         #[unsafe(method(terminate:))]
         unsafe fn terminate(&self, _sender: Option<&AnyObject>) {
-            if let Some(handler) = QUIT_HANDLER.get() {
-                unsafe { handler() };
+            match QUIT_HANDLER.get() {
+                Some(handler) => unsafe { handler() },
+                None => crate::browser::close_all(),
             }
-            crate::browser::close_all();
         }
     }
 

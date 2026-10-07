@@ -43,13 +43,27 @@ struct ExtensionManifest: Sendable {
 
     /// The extension's toolbar icon, or its general one, at `size` points.
     /// Without either, a tile with its initial, as Chrome shows.
-    func image(size: CGFloat) -> NSImage {
-        guard let image = icon.flatMap({ NSImage(contentsOfFile: folder + "/" + $0) }) else {
-            return initialTile(size: size)
+    @MainActor func image(size: CGFloat) -> NSImage {
+        let key = "\(folder)/\(icon ?? "")@\(size)" as NSString
+        if let cached = Self.images.object(forKey: key) { return cached }
+        let image: NSImage
+        if let file = icon, let loaded = NSImage(contentsOfFile: folder + "/" + file) {
+            loaded.size = NSSize(width: size, height: size)
+            image = loaded
+        } else {
+            image = initialTile(size: size)
         }
-        image.size = NSSize(width: size, height: size)
+        Self.images.setObject(image, forKey: key)
         return image
     }
+
+    /// Icons by folder, file and size: the menu and the bar ask for the same
+    /// ones each time they are built, and decoding a PNG isn't free.
+    @MainActor private static let images: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
 
     private func initialTile(size: CGFloat) -> NSImage {
         let initial = String(name.prefix(1)).uppercased()
@@ -241,7 +255,10 @@ final class ExtensionStore {
     /// these to its log while it starts, before any window opens.
     private lazy var loadErrors: [String: String] = Self.readLoadErrors()
     /// What Chromium loaded and runs.
-    var running: [ExtensionManifest] { loaded.filter { loadError(forFolder: $0.folder) == nil } }
+    var running: [ExtensionManifest] {
+        // Nothing loaded means nothing to check the log for.
+        loaded.isEmpty ? [] : loaded.filter { loadError(forFolder: $0.folder) == nil }
+    }
 
     /// Why Chromium couldn't load the extension in `folder` at launch.
     func loadError(forFolder folder: String) -> String? {
@@ -263,7 +280,16 @@ final class ExtensionStore {
         }
         self.loaded = loaded
         launchPaths = loaded.map(\.folder)
-        pruneFolders()
+        Self.removeLater(unusedFolders())
+    }
+
+    /// Deletes folders off the main thread. An unpacked extension can be
+    /// thousands of files; the window needn't wait for them.
+    private nonisolated static func removeLater(_ folders: [String]) {
+        guard !folders.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for folder in folders { try? FileManager.default.removeItem(atPath: folder) }
+        }
     }
 
     /// The folders for `tiller_core_start`, one per line.
@@ -379,7 +405,7 @@ final class ExtensionStore {
             let entry = entries.remove(at: index)
             manifests[entry.path] = nil
             if entry.source.owned && !launchPaths.contains(entry.path) {
-                try? FileManager.default.removeItem(atPath: entry.path)
+                Self.removeLater([entry.path])
             }
         }
         save()
@@ -433,13 +459,13 @@ final class ExtensionStore {
         }
         let old = entries[index]
         guard old.source.owned else {
-            try? FileManager.default.removeItem(atPath: folder)
+            Self.removeLater([folder])
             throw ExtensionError.alreadyAdded(manifest.name)
         }
         entries[index].path = folder
         entries[index].source = source
         manifests[old.path] = nil
-        if !launchPaths.contains(old.path) { try? FileManager.default.removeItem(atPath: old.path) }
+        if !launchPaths.contains(old.path) { Self.removeLater([old.path]) }
         save()
         return manifest
     }
@@ -460,14 +486,12 @@ final class ExtensionStore {
         "\(target)/\(id)_\(UUID().uuidString.prefix(8).lowercased())"
     }
 
-    /// Deletes folders under `Extensions` that no entry uses any more, such
-    /// as ones removed while they were loaded.
-    private func pruneFolders() {
+    /// Folders under `Extensions` that no entry uses any more, such as ones
+    /// removed while they were loaded.
+    private func unusedFolders() -> [String] {
         let used = Set(entries.map(\.path))
         let items = (try? FileManager.default.contentsOfDirectory(atPath: Self.folder)) ?? []
-        for item in items where !used.contains(Self.folder + "/" + item) {
-            try? FileManager.default.removeItem(atPath: Self.folder + "/" + item)
-        }
+        return items.map { Self.folder + "/" + $0 }.filter { !used.contains($0) }
     }
 
     private func save() {

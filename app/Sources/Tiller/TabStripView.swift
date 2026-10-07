@@ -7,6 +7,8 @@ protocol TabStripDelegate: AnyObject {
     /// The user dragged `tab` to `index`.
     func tabStrip(_ strip: TabStripView, move tab: Tab, to index: Int)
     func tabStripNewTab(_ strip: TabStripView)
+    /// The menu for a right-click on `tab`.
+    func tabStrip(_ strip: TabStripView, menuFor tab: Tab) -> NSMenu?
 }
 
 /// The tabs, as a row in the toolbar or a column in the sidebar. In a row,
@@ -27,6 +29,8 @@ final class TabStripView: NSView {
             guard orientation != oldValue else { return }
             drag = nil
             scrollOffset = 0
+            frozenLength = nil
+            userScrolled = false
             newTabRow.isHidden = !isVertical
             layoutItems(animated: false)
         }
@@ -34,10 +38,11 @@ final class TabStripView: NSView {
 
     private static let maxTabWidth: CGFloat = 240
     /// Below this, tabs show only their icon.
-    private static let titleMinWidth: CGFloat = 64
+    private static let titleMinWidth: CGFloat = 104
     private static let minTabWidth: CGFloat = 34
     private static let rowHeight: CGFloat = 34
-    private static let animationDuration = 0.18
+    private static let animationDuration = Theme.Duration.slide
+    private static let edgeFadeLength: CGFloat = 16
 
     private var items: [TabItemView] = []
     private var selectedItem: TabItemView?
@@ -47,12 +52,28 @@ final class TabStripView: NSView {
     private var drag: (item: TabItemView, start: CGFloat, origin: CGFloat, moved: Bool)?
     /// Follows the last tab of a column.
     private let newTabRow = NewTabRowView()
+    /// The tab width held while tabs close under the mouse, so the next
+    /// close button stays where the last one was, as in Safari. Let go when
+    /// the mouse leaves the row.
+    private var frozenLength: CGFloat?
+    /// The user scrolled the row, so a layout doesn't scroll it back to the
+    /// selected tab until the selection changes.
+    private var userScrolled = false
+    /// Fades the ends of a row that is scrolled past them.
+    private let edgeFade = CAGradientLayer()
 
     override var isFlipped: Bool { true }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         clipsToBounds = true
+        wantsLayer = true
+        edgeFade.startPoint = CGPoint(x: 0, y: 0.5)
+        edgeFade.endPoint = CGPoint(x: 1, y: 0.5)
+        // VoiceOver reads the tabs as one group, with each one's place in it.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.tabGroup)
+        setAccessibilityLabel("Tabs")
         newTabRow.isHidden = true
         newTabRow.onClick = { [weak self] in self.map { $0.delegate?.tabStripNewTab($0) } }
         addSubview(newTabRow)
@@ -65,6 +86,8 @@ final class TabStripView: NSView {
     func update(tabs: [Tab], selected: Tab?) {
         // The row changed under a drag; the drag's order no longer holds.
         drag = nil
+        let lengthBefore = tabLength
+        let selectedBefore = selectedItem
         var existing = Dictionary(uniqueKeysWithValues: items.map { (ObjectIdentifier($0.tab), $0) })
         var added: [TabItemView] = []
         items = tabs.map { tab in
@@ -79,10 +102,16 @@ final class TabStripView: NSView {
         }
         existing.values.forEach { $0.removeFromSuperview() }
         selectedItem = items.first { $0.tab === selected }
-        for item in items {
-            item.isSelected = item === selectedItem
-            item.refresh()
+        if selectedItem !== selectedBefore { userScrolled = false }
+        if !added.isEmpty {
+            frozenLength = nil
+        } else if !existing.isEmpty, !isVertical, isMouseInside {
+            frozenLength = frozenLength ?? lengthBefore
         }
+        // Selection changes redraw the two tabs concerned on their own; a tab
+        // whose title or icon changed came through `refresh(_:)` already.
+        for item in items { item.isSelected = item === selectedItem }
+        added.forEach { $0.refresh() }
         let animate = window != nil && !items.isEmpty && (added.count < items.count || !existing.isEmpty)
         layoutItems(animated: animate, fadeIn: animate ? added : [])
     }
@@ -93,15 +122,48 @@ final class TabStripView: NSView {
 
     override func layout() {
         super.layout()
-        // A column stays where the user scrolled it.
-        layoutItems(animated: false, reveal: !isVertical)
+        // A column, or a row the user scrolled, stays where it was put.
+        layoutItems(animated: false, reveal: !isVertical && !userScrolled)
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard isVertical else { return super.scrollWheel(with: event) }
-        scrollOffset -= event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 1 : 10)
+        var delta = event.scrollingDeltaY
+        if !isVertical {
+            guard overflows else { return super.scrollWheel(with: event) }
+            // A trackpad swipes sideways; a plain mouse wheel only turns.
+            if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) { delta = event.scrollingDeltaX }
+            userScrolled = true
+        }
+        scrollOffset -= delta * (event.hasPreciseScrollingDeltas ? 1 : 10)
         layoutItems(animated: false, reveal: false)
     }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard frozenLength != nil else { return }
+        frozenLength = nil
+        layoutItems(animated: true, reveal: !userScrolled)
+    }
+
+    private var isMouseInside: Bool {
+        guard let window else { return false }
+        return bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+    }
+
+    // MARK: Accessibility
+
+    // In the order shown, which the subviews lose while a tab is dragged.
+    override func accessibilityChildren() -> [Any]? {
+        isVertical ? items as [NSView] + [newTabRow] : items
+    }
+
+    override func accessibilityTabs() -> [Any]? { items }
 
     // MARK: Layout
 
@@ -113,9 +175,16 @@ final class TabStripView: NSView {
     /// A tab's size along the row or column.
     private var tabLength: CGFloat {
         if isVertical { return Self.rowHeight }
+        if let frozenLength { return frozenLength }
         let count = CGFloat(max(1, items.count))
         let fit = (bounds.width - spacing * (count - 1)) / count
         return min(Self.maxTabWidth, max(Self.minTabWidth, fit)).rounded(.down)
+    }
+
+    /// The tabs, and a column's New Tab row, take more room than there is.
+    private var overflows: Bool {
+        let slots = CGFloat(items.count + (isVertical ? 1 : 0))
+        return slots * (tabLength + spacing) - spacing > extent
     }
 
     private func slot(_ index: Int, length: CGFloat) -> NSRect {
@@ -128,6 +197,8 @@ final class TabStripView: NSView {
     /// `reveal` scrolls the selected tab into view.
     private func layoutItems(animated: Bool, fadeIn: [TabItemView] = [], reveal: Bool = true) {
         guard !items.isEmpty else { return }
+        // Under Reduce Motion tabs land in their new places at once.
+        let animated = animated && !Theme.reduceMotion
         let length = tabLength
         let extent = extent
         let compact = (isVertical ? bounds.width : length) < Self.titleMinWidth
@@ -142,6 +213,7 @@ final class TabStripView: NSView {
             }
             scrollOffset = min(max(0, scrollOffset), total - extent)
         }
+        updateEdgeFade(overflowing: total > extent, total: total)
         for item in fadeIn {
             item.frame = slot(items.firstIndex(of: item) ?? 0, length: length)
             item.alphaValue = 0
@@ -170,6 +242,28 @@ final class TabStripView: NSView {
                 newTabRow.frame = frame
             }
         }
+    }
+
+    /// Fades a row's leading end when tabs are scrolled past it and its
+    /// trailing end when more follow, so clipped tabs show they are there.
+    private func updateEdgeFade(overflowing: Bool, total: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard !isVertical, overflowing, bounds.width > 0 else {
+            layer?.mask = nil
+            return
+        }
+        let fade = min(Self.edgeFadeLength / bounds.width, 0.5)
+        let opaque = CGColor(gray: 0, alpha: 1)
+        let clear = CGColor(gray: 0, alpha: 0)
+        edgeFade.colors = [
+            scrollOffset > 0.5 ? clear : opaque, opaque, opaque,
+            scrollOffset < total - extent - 0.5 ? clear : opaque,
+        ]
+        edgeFade.locations = [0, NSNumber(value: Double(fade)), NSNumber(value: Double(1 - fade)), 1]
+        edgeFade.frame = bounds
+        if layer?.mask !== edgeFade { layer?.mask = edgeFade }
     }
 
     // MARK: Dragging
@@ -228,7 +322,9 @@ final class TabItemView: NSView {
     var isSelected = false {
         didSet {
             guard isSelected != oldValue else { return }
-            titleLabel.font = .systemFont(ofSize: 12, weight: isSelected ? .medium : .regular)
+            titleLabel.font = .systemFont(ofSize: Theme.FontSize.secondary, weight: isSelected ? .medium : .regular)
+            setAccessibilityValue(isSelected)
+            setAccessibilitySelected(isSelected)
             updateAppearance()
         }
     }
@@ -259,8 +355,9 @@ final class TabItemView: NSView {
     private let icon = FaviconView()
     private let spinner = NSProgressIndicator()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let closeButton = NSButton()
-    private var isHovered = false { didSet { updateAppearance() } }
+    private let closeButton = HoverButton()
+    private var isHovered = false { didSet { if isHovered != oldValue { updateAppearance() } } }
+    private var isPressed = false { didSet { updateAppearance() } }
     private var iconLeading: NSLayoutConstraint!
     private var iconCentered: NSLayoutConstraint!
     private var closeOverIcon: NSLayoutConstraint!
@@ -268,22 +365,31 @@ final class TabItemView: NSView {
     private var titleToClose: NSLayoutConstraint!
 
     private static let globe = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
-    private static let closeImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")?
-        .withSymbolConfiguration(.init(pointSize: 9, weight: .bold))
+    private static let closeImage = Theme.closeImage(size: 9, label: "Close Tab")
+    private static let closeSize: CGFloat = 18
 
     init(tab: Tab) {
         self.tab = tab
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
+        // VoiceOver reads a tab as one of a group of radio buttons, as it
+        // does the tabs of a tab view.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.radioButton)
+        setAccessibilityValue(false)
+        setAccessibilitySelected(false)
+        setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: "Close Tab", target: self, selector: #selector(closeFromAccessibility)),
+        ])
 
         icon.imageScaling = .scaleProportionallyDown
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
-        titleLabel.font = .systemFont(ofSize: 12)
+        titleLabel.font = .systemFont(ofSize: Theme.FontSize.secondary)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.cell?.truncatesLastVisibleLine = true
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -295,6 +401,8 @@ final class TabItemView: NSView {
         closeButton.target = self
         closeButton.action = #selector(closeClicked)
         closeButton.toolTip = "Close Tab"
+        // A round plate under the mouse, as in Safari.
+        closeButton.plateRadius = Self.closeSize / 2
 
         for view in [icon, spinner, titleLabel, closeButton] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -318,8 +426,8 @@ final class TabItemView: NSView {
             spinner.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
             closeOverIcon,
             closeButton.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
-            closeButton.widthAnchor.constraint(equalToConstant: 18),
-            closeButton.heightAnchor.constraint(equalToConstant: 18),
+            closeButton.widthAnchor.constraint(equalToConstant: Self.closeSize),
+            closeButton.heightAnchor.constraint(equalToConstant: Self.closeSize),
 
             titleLeading,
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
@@ -335,6 +443,7 @@ final class TabItemView: NSView {
         if titleLabel.stringValue != title {
             titleLabel.stringValue = title
             toolTip = title
+            setAccessibilityLabel(title)
         }
         icon.image = tab.favicon ?? Self.globe
         icon.contentTintColor = .secondaryLabelColor
@@ -342,10 +451,15 @@ final class TabItemView: NSView {
     }
 
     private func updateAppearance() {
-        let fill: NSColor = isSelected ? .labelColor.withAlphaComponent(0.11)
-            : isHovered ? .labelColor.withAlphaComponent(0.05) : .clear
-        layer?.backgroundColor = fill.cgColor
-        titleLabel.textColor = isSelected ? .labelColor : .secondaryLabelColor
+        let fill = Theme.fill(hovered: isHovered, pressed: isPressed, selected: isSelected)
+        // The fill eases between rest, hover and selected rather than snapping.
+        withEasing { layer?.backgroundColor = fill.layerColor }
+        // Under Increase Contrast the selected tab gets an outline too.
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.selectionOutline(selected: isSelected).layerColor
+        // Unselected titles in secondary gray read as disabled; the weight
+        // alone marks the selected one.
+        titleLabel.textColor = .labelColor
         // A compact tab only offers to close when it is the selected one, so a
         // pass of the mouse along a crowded row can't hit a close button.
         let showsClose = closesOnTrailing ? isHovered || isSelected : isHovered && (!isCompact || isSelected)
@@ -374,28 +488,59 @@ final class TabItemView: NSView {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(
             rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
+        // A tab that slides under a still mouse, or out from under it, gets
+        // no enter or exit event.
+        if let window, NSApp.isActive {
+            isHovered = bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        }
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
 
     override func mouseDown(with event: NSEvent) {
+        isPressed = true
         onSelect?()
         strip?.beginDrag(self, with: event)
     }
 
     override func mouseDragged(with event: NSEvent) { strip?.continueDrag(with: event) }
-    override func mouseUp(with event: NSEvent) { strip?.endDrag() }
+
+    override func mouseUp(with event: NSEvent) {
+        isPressed = false
+        strip?.endDrag()
+    }
 
     // Middle click closes, as in other browsers.
     override func otherMouseUp(with event: NSEvent) {
         if event.buttonNumber == 2 { onClose?() }
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let strip else { return nil }
+        return strip.delegate?.tabStrip(strip, menuFor: tab)
+    }
+
     // Clicks in the tab select it instead of dragging the window.
     override var mouseDownCanMoveWindow: Bool { false }
 
     @objc private func closeClicked() { onClose?() }
+
+    // MARK: Accessibility
+
+    override func accessibilityPerformPress() -> Bool {
+        onSelect?()
+        return true
+    }
+
+    @objc private func closeFromAccessibility() -> Bool {
+        onClose?()
+        return true
+    }
 }
 
 /// The row after the last tab of a sidebar, which opens a new tab.
@@ -415,20 +560,23 @@ final class NewTabRowView: NSView {
     private let icon = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "New Tab")
     private var isHovered = false { didSet { needsDisplay = true } }
+    private var isPressed = false { didSet { needsDisplay = true } }
     private var iconLeading: NSLayoutConstraint!
     private var iconCentered: NSLayoutConstraint!
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = Theme.Radius.row
         layer?.cornerCurve = .continuous
         toolTip = "New Tab"
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("New Tab")
 
-        icon.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        icon.image = Theme.symbol("plus", size: Theme.Symbol.row, label: "New Tab")
         icon.contentTintColor = .secondaryLabelColor
-        titleLabel.font = .systemFont(ofSize: 12)
+        titleLabel.font = .systemFont(ofSize: Theme.FontSize.secondary)
         titleLabel.textColor = .secondaryLabelColor
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -458,7 +606,8 @@ final class NewTabRowView: NSView {
 
     override func updateLayer() {
         super.updateLayer()
-        layer?.backgroundColor = (isHovered ? NSColor.labelColor.withAlphaComponent(0.05) : .clear).cgColor
+        let fill = Theme.fill(hovered: isHovered, pressed: isPressed)
+        withEasing { layer?.backgroundColor = fill.layerColor }
     }
 
     override func updateTrackingAreas() {
@@ -469,9 +618,22 @@ final class NewTabRowView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseDown(with event: NSEvent) { isPressed = true }
+
     override func mouseUp(with event: NSEvent) {
+        isPressed = false
         if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
     }
 
     override var mouseDownCanMoveWindow: Bool { false }

@@ -1,12 +1,29 @@
 import AppKit
 import UniformTypeIdentifiers
 
+/// A bitmap on its way to becoming an attachment, handed to a background
+/// task. CGImage is immutable, which is what makes that safe.
+struct AttachmentSource: @unchecked Sendable {
+    let image: CGImage
+
+    /// The image's bitmap, which may decode it, so it is taken on the main
+    /// thread before the scaling and encoding leave it.
+    init?(_ image: NSImage) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        self.image = cgImage
+    }
+}
+
 /// An image attached to an agent message, scaled down and saved to a file.
-/// Claude Code and Qoder CLI get its bytes; Codex and Quick Look read the file.
-struct AgentAttachment {
+/// Claude Code and Qoder CLI get its bytes; Codex, Antigravity CLI, Grok
+/// Build and Quick Look read the file.
+/// Made off the main thread; nothing changes it after.
+struct AgentAttachment: @unchecked Sendable {
     let url: URL
     let data: Data
     let mediaType: String
+    /// A small copy for the composer's and the message's thumbnails. The
+    /// file holds the image itself.
     let image: NSImage
 
     static let maxCount = 5
@@ -14,10 +31,14 @@ struct AgentAttachment {
     private static let maxPixels = 2000
     /// PNGs larger than this are sent as JPEG, to stay under the APIs' image size limits.
     private static let maxPNGBytes = 3_500_000
+    /// The long edge of the thumbnail kept in memory, enough for a 64-point
+    /// thumbnail on a Retina screen with room to spare.
+    private static let thumbnailPixels = 256
 
-    init?(image: NSImage, in directory: URL) {
-        guard let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-            let scaled = Self.scaled(source),
+    /// Scales, encodes and writes the image. Slow for a screenshot, so it
+    /// runs off the main thread.
+    nonisolated init?(source: AttachmentSource, in directory: URL) {
+        guard let scaled = Self.scaled(source.image),
             var data = NSBitmapImageRep(cgImage: scaled).representation(using: .png, properties: [:])
         else { return nil }
         var mediaType = "image/png", ext = "png"
@@ -35,13 +56,29 @@ struct AgentAttachment {
         self.url = url
         self.data = data
         self.mediaType = mediaType
-        self.image = NSImage(cgImage: scaled, size: NSSize(width: scaled.width, height: scaled.height))
+        let small = Self.scaled(scaled, longEdge: Self.thumbnailPixels) ?? scaled
+        self.image = NSImage(cgImage: small, size: NSSize(width: small.width, height: small.height))
     }
 
-    private static func scaled(_ image: CGImage) -> CGImage? {
+    /// A small copy of the image file at `url`, at most `side` pixels on its
+    /// long edge, made without decoding the whole image.
+    static func thumbnail(at url: URL, side: CGFloat) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(side * 2),
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+
+    /// `image` with its long edge brought down to `limit` pixels, or as it
+    /// is when already that small.
+    nonisolated private static func scaled(_ image: CGImage, longEdge limit: Int = maxPixels) -> CGImage? {
         let longEdge = max(image.width, image.height)
-        guard longEdge > maxPixels else { return image }
-        let scale = CGFloat(maxPixels) / CGFloat(longEdge)
+        guard longEdge > limit else { return image }
+        let scale = CGFloat(limit) / CGFloat(longEdge)
         let width = max(1, Int(CGFloat(image.width) * scale)), height = max(1, Int(CGFloat(image.height) * scale))
         guard let context = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
@@ -73,7 +110,9 @@ struct AgentAttachment {
     /// image wins.
     static func images(on pasteboard: NSPasteboard) -> [NSImage] {
         if pasteboard.types?.contains(.fileURL) == true {
-            return imageFiles(on: pasteboard).compactMap(NSImage.init(contentsOf:))
+            // One more than a message holds, so a drop of too many still
+            // beeps without every file being read.
+            return imageFiles(on: pasteboard).prefix(maxCount + 1).compactMap(NSImage.init(contentsOf:))
         }
         guard let type = pasteboard.availableType(from: imageDataTypes),
             let data = pasteboard.data(forType: type), let image = NSImage(data: data)

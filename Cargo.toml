@@ -10,13 +10,13 @@ publish = false
 [workspace.dependencies]
 cef = { version = "=154.2.0", default-features = false }
 
+# Speed over size: the Rust code is under a megabyte next to a Chromium of
+# hundreds, and the core's hot paths (DevTools replies with screenshots in
+# them, favicon and status callbacks) run on the UI thread. Symbol names stay
+# in the binaries so crash reports can be read; only debug info is dropped.
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = true
-
-# The core parses DevTools replies, screenshots among them, on the UI thread.
-[profile.release.package.serde_json]
-opt-level = 3
+strip = "debuginfo"

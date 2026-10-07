@@ -4,7 +4,7 @@ Tiller's settings, the switches it passes to Chromium, and where it stores data.
 
 ## Settings
 
-Tiller > Settings… (Cmd+,) has five panes: General, Passwords, Extensions (see [Extensions](browser.md#extensions)), Agent and Profiles (see [Profiles](browser.md#profiles)). Changes are saved as you make them, and apply to the current profile only, except the default browser, which macOS keeps for the app.
+Tiller > Settings… (Cmd+,) has seven panes: General, Passwords, Extensions (see [Extensions](browser.md#extensions)), Agent, Skills (see [Skills](agent.md#tillers-skill-library)), Scheduled (see [Scheduled prompts](agent.md#scheduled-prompts)) and Profiles (see [Profiles](browser.md#profiles)). Changes are saved as you make them, and apply to the current profile only, except the default browser, which macOS keeps for the app.
 
 | Pane | Setting | Default | Takes effect |
 |---|---|---|---|
@@ -13,13 +13,18 @@ Tiller > Settings… (Cmd+,) has five panes: General, Passwords, Extensions (see
 | General | At launch, open: Tabs from Last Time or Homepage | Tabs from Last Time | next launch |
 | General | New tabs open with: Blank Page or Homepage | Blank Page | next new tab |
 | General | Show tabs: Along the Top or In a Sidebar | Along the Top | right away |
+| General | Appearance: Match System, Light or Dark, for Tiller's windows and for pages, which see it as `prefers-color-scheme` | Match System | right away |
+| General | Accent color: Match System, Graphite, Blue, Teal, Green, Orange or Pink, for Tiller's selections, chat bubbles, busy dots and the start page. Buttons, focus rings and text selection keep the system accent | Match System | right away |
 | General | Search engine: Google, Bing, DuckDuckGo or Custom | Google | next search |
 | General | Custom search URL, with `%s` for the query | empty | next search; Google is used while it isn't a valid http(s) URL with `%s` |
-| Agent | New chats use: Qoder CLI, Claude Code or Codex | Qoder CLI | next new chat; same as the picker in the panel |
+| Agent | New chats use: Qoder CLI, Claude Code, Codex, Antigravity CLI or Grok Build | Qoder CLI | next new chat; same as the picker in the panel |
 | Agent | Chat tabs: how many chats the panel keeps open at once, 1 to 9 | 3 | right away; tabs already open stay |
 | Agent | Show and hide shortcut: click, then press a combination with Cmd or Ctrl. Delete clears it; one already in a menu is refused | Cmd+Shift+S | right away |
-| Agent | Path for each CLI | empty, meaning look it up | next new chat |
+| Agent | Command: pick a CLI, then the file to run it from | empty, meaning look it up | next new chat |
+| Agent | Model: pick a CLI, then its model, thinking effort, context window and fast mode (see [Model and effort](agent.md#model-and-effort)) | the CLI's own | next new chat |
 | Agent | Extra instructions, added after Tiller's system prompt | empty | next new chat |
+| Skills | Each skill in the library: on or off, added from a folder, archive or Git, or removed | none | a chat's next agent start |
+| Scheduled | Each scheduled prompt: on or off, its name, agent, tools, rule and prompt, added, edited, run now or removed | none | right away |
 
 Settings live in the profile's own user defaults, `dev.sorrycc.tiller.profile.<id>`. Window position and size stay in `dev.sorrycc.tiller`, shared by every profile. Agents opening tabs with `new_tab` always get a blank page when they pass no URL, whatever the new tab setting says.
 
@@ -48,7 +53,9 @@ Tiller keeps its data in `~/Library/Application Support/Tiller`. Set `TILLER_DAT
 | Path | What it is |
 |---|---|
 | `profiles.json` | Every profile's id, name and creation date, and the id of the one used last |
-| `Profiles/<id>/` | One profile: Chromium's data, `history.sqlite`, `passwords.json`, `session.json`, `extensions.json`, `Extensions/`, `agent-chats/`, the agent's working folder and the control socket |
+| `Profiles/<id>/` | One profile: Chromium's data, `history.sqlite`, `passwords.json`, `session.json`, `extensions.json`, `Extensions/`, `agent-chats/`, `agent-skills/`, `agent-schedules.json`, the agent's working folder and the control socket |
+| `Profiles/<id>/agent-skills/` | The [skill library](agent.md#tillers-skill-library): `skills.json` lists each skill's name, where it came from (a folder, an archive, Git or an agent) and whether it's on; `library/` holds the skills and `exposed/` links the ones that are on |
+| `Profiles/<id>/agent-schedules.json` | The [scheduled prompts](agent.md#scheduled-prompts): each one's name, prompt, agent, tools, model options, rule, whether it's on, its next run, and its last run with how it went and its chat |
 | `Profiles/<id>/extensions.json` | The profile's extensions: each one's folder, where it came from (a folder, a CRX file or Chrome), and whether it's on and pinned |
 | `Profiles/<id>/Extensions/` | Extensions Tiller unpacked or copied, one folder each, named by id plus a random suffix so an update never overwrites files Chromium has loaded. Folders nothing uses any more are deleted at launch |
 

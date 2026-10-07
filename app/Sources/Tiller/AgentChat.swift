@@ -21,9 +21,20 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     var input: NSView { composer.textView }
     var isEmpty: Bool { conversation == nil }
     var isBusy: Bool { session?.isBusy == true }
-    /// A new chat uses the agent picked for new chats until its first message.
-    var kind: AgentKind { conversation?.kind ?? .current }
+    /// A new chat uses the agent picked for new chats until its first
+    /// message, unless it was made for another.
+    var choice: AgentChoice { conversation?.choice ?? presetKind ?? .current }
+    var kind: AgentKind { choice.kind }
     var title: String { conversation?.title ?? "New Chat" }
+    /// The built-in tools this chat allows. A new chat starts with Settings'.
+    private(set) var tools: [AgentTool]
+    /// The model, effort, context and fast mode this chat runs with. A new
+    /// chat follows Settings' for its agent until one is picked for it.
+    var modelOptions: AgentModelOptions {
+        (conversation?.modelOptions ?? pickedOptions ?? choice.defaultModelOptions).supported(by: choice)
+    }
+    /// Picked for a new chat before its first message.
+    private var pickedOptions: AgentModelOptions?
 
     /// Where the panel puts its tab bar, between the transcript and the field.
     let tabBarHost = NSView()
@@ -31,8 +42,25 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private let separator = NSBox()
     private let transcript = TranscriptView()
     private let scrollView = NSScrollView()
+    /// Fades the transcript out under the header and above the tab bar, so a
+    /// line is never sliced at either edge.
+    private let topFade = EdgeFadeView(edge: .top)
+    private let bottomFade = EdgeFadeView(edge: .bottom)
+    /// Room above the first message and below the last, inside the scroll
+    /// view, so neither sits on the fades.
+    private static let insets = NSEdgeInsets(top: 8, left: 0, bottom: 10, right: 0)
     private let emptyState = AgentEmptyState()
     private let composer = Composer()
+    private lazy var skillCompletion = SkillCompletion(textView: composer.textView) { [weak self] in
+        self?.availableSkills ?? []
+    }
+    /// The skills the running agent said it loaded. Until then, `/` offers
+    /// what Tiller finds on disk.
+    private var loadedSkills: [AgentSkill]?
+    /// The agent a new chat was made for, such as a scheduled run's.
+    private let presetKind: AgentChoice?
+    /// Called once when a scheduled run's turn ends, with how it went.
+    private var runCompletion: ((AgentRunOutcome) -> Void)?
 
     private var session: AgentSession?
     /// Set while a session resumes a saved conversation and hasn't started yet.
@@ -48,24 +76,125 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// Running tool calls: their rows and where they are in `records`.
     private var toolRows: [String: (row: ToolRowView, record: Int)] = [:]
     private let quickLook = QuickLookItems()
+    /// Brings the newest message back into view after scrolling up.
+    private let scrollDownButton = ScrollDownButton()
+    private let queueView = QueuedMessagesView()
+
+    private typealias Message = (text: String, images: [AgentAttachment])
+    /// Messages written while a turn runs. They go together as one message
+    /// once it finishes, except that one starting with `/` goes on its own,
+    /// since a skill is called only at the very start.
+    private var queued: [Message] = [] {
+        didSet { updateQueue() }
+    }
+    /// Set when a turn ends without finishing, by Stop, an error or the agent
+    /// exiting, so the queue waits for Enter or Send Now.
+    private var queuePaused = false {
+        didSet { updateQueue() }
+    }
+    /// Ctrl+Enter's message, sent ahead of the queue once the turn it
+    /// interrupted has ended.
+    private var pendingDirect: Message?
 
     private var folder: URL { AgentHistoryStore.shared.folder(for: id) }
+    /// A saved chat opens at its newest message once it has a size.
+    private var pendingScrollToBottom = false
 
-    /// A new chat, or a saved one with its transcript.
-    init(conversation: AgentConversation? = nil) {
+    /// Where the saved transcript is: still in its file, on its way from
+    /// disk, or drawn. A saved chat waits until it is first shown or written
+    /// to, so a launch with several tabs of long chats doesn't build them all
+    /// behind a hidden panel.
+    private enum LoadState {
+        case unloaded
+        /// Numbered, so a read that was overtaken is dropped when it lands.
+        case loading(Int)
+        case loaded
+    }
+    private var loadState: LoadState
+    private var loadCount = 0
+    private var recordsLoaded: Bool {
+        if case .loaded = loadState { return true }
+        return false
+    }
+
+    /// A new chat, or a saved one with its transcript. A new chat can be
+    /// given its agent, tools and model options instead of those in Settings.
+    init(
+        conversation: AgentConversation? = nil, kind: AgentChoice? = nil, tools: [AgentTool]? = nil,
+        modelOptions: AgentModelOptions? = nil
+    ) {
         id = conversation?.id ?? UUID().uuidString
         self.conversation = conversation
+        presetKind = conversation == nil ? kind : nil
+        self.tools = conversation?.tools ?? tools ?? Settings.agentTools
+        pickedOptions = conversation == nil ? modelOptions : nil
+        loadState = conversation == nil ? .loaded : .unloaded
         super.init(frame: .zero)
         build()
-        if conversation != nil {
-            records = AgentHistoryStore.shared.records(for: id)
-            records.forEach(show)
-            transcript.closeToolGroup()
-        }
         showIdle()
         NotificationCenter.default.addObserver(
             self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
         )
+    }
+
+    /// Reads and draws the saved transcript, once. The file and the
+    /// thumbnails of its images are read off the main thread, since a long
+    /// chat with screenshots would hold the tab switch up. `now` reads them
+    /// here instead, for a send that is about to add to them.
+    func loadIfNeeded(now: Bool = false) {
+        switch loadState {
+        case .loaded: return
+        case .loading where !now: return
+        case .loading, .unloaded: break
+        }
+        let folder = folder
+        // The newest records may still be on their way to disk.
+        let unwritten = AgentHistoryStore.shared.unwrittenRecords(for: id)
+        if now {
+            let records = unwritten ?? AgentHistoryStore.readRecords(in: folder)
+            finishLoading(records, thumbnails: Self.thumbnails(for: records, in: folder))
+            return
+        }
+        loadCount += 1
+        let count = loadCount
+        loadState = .loading(count)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let records = unwritten ?? AgentHistoryStore.readRecords(in: folder)
+            let thumbnails = Self.thumbnails(for: records, in: folder)
+            await MainActor.run {
+                guard let self, case .loading(count) = self.loadState else { return }
+                self.finishLoading(records, thumbnails: thumbnails)
+            }
+        }
+    }
+
+    /// Thumbnails for every image a transcript names, by file name. Read
+    /// from the files, not the whole images: a saved chat can hold a dozen
+    /// screenshots.
+    nonisolated private static func thumbnails(for records: [AgentRecord], in folder: URL) -> Thumbnails {
+        var images: [String: NSImage] = [:]
+        for case .user(_, let names) in records {
+            for name in names where images[name] == nil {
+                images[name] = AgentAttachment.thumbnail(at: folder.appendingPathComponent(name), side: 128)
+            }
+        }
+        return Thumbnails(images: images)
+    }
+
+    /// Images made on a background thread and only used on the main one
+    /// once they are handed over.
+    private struct Thumbnails: @unchecked Sendable {
+        let images: [String: NSImage]
+    }
+
+    private func finishLoading(_ records: [AgentRecord], thumbnails: Thumbnails) {
+        loadState = .loaded
+        self.records = records
+        for record in records { show(record, thumbnails: thumbnails) }
+        transcript.closeToolGroup()
+        pendingScrollToBottom = !records.isEmpty
+        showIdle()
+        if pendingScrollToBottom { needsLayout = true }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -80,11 +209,17 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             keepLiveText()
             addNote("Stopped")
         }
+        finishRun(.stopped)
         finishToolRows()
+        transcript.hideThinking()
         transcript.closeToolGroup()
         endSession()
-        for attachment in composer.attachments { try? FileManager.default.removeItem(at: attachment.url) }
+        let unsent = composer.attachments + queued.flatMap(\.images) + (pendingDirect?.images ?? [])
+        for attachment in unsent { try? FileManager.default.removeItem(at: attachment.url) }
         composer.attachments = []
+        queued = []
+        queuePaused = false
+        pendingDirect = nil
         AgentHistoryStore.shared.discardUnsaved(id)
     }
 
@@ -92,6 +227,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         session?.stop()
         session = nil
         resuming = false
+        loadedSkills = nil
     }
 
     // MARK: Layout
@@ -105,6 +241,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = Self.insets
         // Shows the rule at the top only once the transcript scrolls under it.
         scrollView.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
@@ -124,7 +261,14 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             self.preview(self.composer.attachments.map(\.url), at: index)
         }
 
-        for view in [scrollView, separator, emptyState, tabBarHost, composer] as [NSView] {
+        scrollDownButton.target = self
+        scrollDownButton.action = #selector(scrollDown(_:))
+
+        queueView.onEdit = { [weak self] index in self?.editQueued(at: index) }
+        queueView.onRemove = { [weak self] index in self?.removeQueued(at: index) }
+        queueView.onSendNow = { [weak self] in self?.submit() }
+
+        for view in [scrollView, topFade, bottomFade, separator, emptyState, scrollDownButton, queueView, tabBarHost, composer, skillCompletion.picker] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -140,16 +284,33 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             scrollView.topAnchor.constraint(equalTo: separator.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: tabBarHost.topAnchor, constant: -4),
+            scrollView.bottomAnchor.constraint(equalTo: queueView.topAnchor),
 
             transcript.topAnchor.constraint(equalTo: clip.topAnchor),
             transcript.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
             transcript.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            transcript.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
+            // Less the insets, so a short transcript doesn't scroll.
+            transcript.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor, constant: -(Self.insets.top + Self.insets.bottom)),
+
+            topFade.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            topFade.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            topFade.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            topFade.heightAnchor.constraint(equalToConstant: EdgeFadeView.height),
+            bottomFade.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
+            bottomFade.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            bottomFade.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            bottomFade.heightAnchor.constraint(equalToConstant: EdgeFadeView.height),
 
             emptyState.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor, constant: -10),
             emptyState.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             emptyState.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+
+            scrollDownButton.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            scrollDownButton.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: -10),
+
+            queueView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            queueView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            queueView.bottomAnchor.constraint(equalTo: tabBarHost.topAnchor, constant: -4),
 
             tabBarHost.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             tabBarHost.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -159,23 +320,87 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             composer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+
+            skillCompletion.picker.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            skillCompletion.picker.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            skillCompletion.picker.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
         ])
     }
 
+    override func layout() {
+        super.layout()
+        guard bounds.height > 0, !isHiddenOrHasHiddenAncestor else { return }
+        loadIfNeeded()
+        guard pendingScrollToBottom else { return }
+        pendingScrollToBottom = false
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.scrollToBottom() } }
+    }
+
+    /// Shown for the first time, or the panel came back: draw the saved chat.
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        if !recordsLoaded { needsLayout = true }
+    }
+
     @objc private func transcriptScrolled(_ notification: Notification) {
-        let scrolled = scrollView.contentView.bounds.minY > 1
-        if (separator.alphaValue > 0) != scrolled { separator.alphaValue = scrolled ? 1 : 0 }
+        // At the top the clip's origin sits at minus the top inset.
+        let scrolled = scrollView.contentView.bounds.minY > 1 - Self.insets.top
+        if (separator.alphaValue > 0) != scrolled {
+            withEasing(Theme.Duration.quick) { separator.animator().alphaValue = scrolled ? 1 : 0 }
+        }
+        updateScrollDownButton()
+    }
+
+    /// The button shows once the newest message is more than a screen's
+    /// worth out of view.
+    private func updateScrollDownButton() {
+        let clip = scrollView.contentView.bounds
+        let away = transcript.frame.height - (clip.maxY - Self.insets.bottom)
+        scrollDownButton.setShown(away > max(80, clip.height * 0.5))
+    }
+
+    @objc private func scrollDown(_ sender: Any?) {
+        layoutSubtreeIfNeeded()
+        let clip = scrollView.contentView
+        let y = bottomOffset
+        if Theme.reduceMotion {
+            clip.scroll(to: NSPoint(x: 0, y: y))
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Theme.Duration.panel
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                clip.animator().setBoundsOrigin(NSPoint(x: 0, y: y))
+            }
+        }
+        scrollView.reflectScrolledClipView(clip)
+    }
+
+    /// A provider's name may have changed.
+    func providersChanged() {
+        if session == nil { showIdle() }
     }
 
     /// Settings or the picker changed the agent for new chats.
     @objc private func currentAgentChanged(_ notification: Notification) {
+        // Options picked for one agent don't carry over to another.
+        if conversation == nil, presetKind == nil { pickedOptions = nil }
         if session == nil { showIdle() }
     }
 
     // MARK: Sending
 
     #if DEBUG
-    func stopForTesting() { sendOrStop(nil) }
+    func stopForTesting() { stopTurn() }
+
+    /// Enter, or with `direct` Ctrl+Enter, in the message field.
+    func submitForTesting(direct: Bool) { submit(direct: direct) }
+
+    /// Replaces the message field's text, as typing would, so the skill
+    /// picker follows it.
+    func setTextForTesting(_ text: String) {
+        composer.text = text
+        skillCompletion.update()
+    }
 
     /// Pastes the clipboard into the composer twice, as Cmd+V would, then
     /// sends `text` with it after a few seconds.
@@ -191,18 +416,32 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
     #endif
 
+    /// While a turn runs, the button queues what is written, or stops the
+    /// turn when nothing is.
     @objc private func sendOrStop(_ sender: Any?) {
-        if isBusy {
-            session?.interrupt()
-            setStatus("Stopping…", busy: true)
+        if isBusy, composerIsEmpty {
+            stopTurn()
         } else {
             submit()
         }
     }
 
-    /// Enter sends. Option+Enter or Shift+Enter adds a line. Escape stops a
-    /// running turn.
+    private func stopTurn() {
+        guard isBusy else { return }
+        session?.interrupt()
+        // Antigravity CLI and Grok Build have already stopped.
+        if isBusy { setStatus("Stopping…", busy: true) }
+    }
+
+    private var composerIsEmpty: Bool {
+        composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && composer.attachments.isEmpty
+    }
+
+    /// Enter sends, or queues while a turn runs. Ctrl+Enter stops the turn
+    /// and sends right away. Option+Enter or Shift+Enter adds a line. Escape
+    /// stops a running turn.
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if skillCompletion.handle(selector) { return true }
         switch selector {
         case #selector(NSResponder.insertNewline(_:)):
             let flags = NSApp.currentEvent?.modifierFlags ?? []
@@ -212,12 +451,16 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 submit()
             }
             return true
+        // What Ctrl+Return is bound to.
+        case #selector(NSResponder.insertLineBreak(_:)):
+            submit(direct: true)
+            return true
         case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
             textView.insertNewlineIgnoringFieldEditor(nil)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             guard isBusy else { return false }
-            sendOrStop(nil)
+            stopTurn()
             return true
         default:
             return false
@@ -226,6 +469,14 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {
         composer.textChanged()
+        skillCompletion.update()
+    }
+
+    // MARK: Skills
+
+    /// What `/` can call in this chat.
+    private var availableSkills: [AgentSkill] {
+        loadedSkills ?? AgentSkillCatalog.skills(for: kind)
     }
 
     /// The composer keeps its own undo, which a sent message clears.
@@ -233,36 +484,134 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         composer.undoManager
     }
 
-    private func submit() {
+    /// While a turn runs, the message is queued, or with `direct` sent as
+    /// soon as the turn is stopped. Otherwise it goes after anything queued.
+    private func submit(direct: Bool = false) {
         let text = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let images = composer.attachments
-        guard !text.isEmpty || !images.isEmpty, !isBusy else { return }
+        let written = !text.isEmpty || !images.isEmpty
+        guard written || (!isBusy && !queued.isEmpty) else { return }
         composer.text = ""
         composer.attachments = []
-        send(text, images: images)
+        skillCompletion.hide()
+        if isBusy {
+            if direct {
+                // A second Ctrl+Enter before the turn has stopped joins the first.
+                pendingDirect = pendingDirect.map { Self.merged([$0, (text, images)]) } ?? (text, images)
+                stopTurn()
+            } else {
+                queued.append((text, images))
+            }
+            return
+        }
+        if written { queued.append((text, images)) }
+        queuePaused = false
+        sendQueued()
     }
 
-    func send(_ text: String, images: [AgentAttachment] = []) {
+    // MARK: Queue
+
+    /// Sends Ctrl+Enter's message if there is one, else what is queued,
+    /// unless the queue is paused. Called once a turn has ended.
+    private func sendQueued() {
+        guard !isBusy else { return }
+        if let direct = pendingDirect {
+            pendingDirect = nil
+            send(direct.text, images: direct.images)
+            return
+        }
+        guard !queuePaused, !queued.isEmpty else { return }
+        // Up to the next message that calls a skill.
+        let count = queued.dropFirst().firstIndex { $0.text.hasPrefix("/") } ?? queued.count
+        let batch = Self.merged(Array(queued.prefix(count)))
+        queued.removeFirst(count)
+        send(batch.text, images: batch.images)
+    }
+
+    private static func merged(_ messages: [Message]) -> Message {
+        (messages.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n"), messages.flatMap(\.images))
+    }
+
+    /// A turn that didn't finish pauses the queue. What is next is sent
+    /// after the event that ended the turn has been handled, since that may
+    /// still be stopping the process.
+    private func turnEnded(finished: Bool) {
+        if !finished, !queued.isEmpty { queuePaused = true }
+        guard pendingDirect != nil || !queued.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.sendQueued() } }
+    }
+
+    /// Takes a queued message back into the field, after what is written there.
+    private func editQueued(at index: Int) {
+        guard queued.indices.contains(index) else { return }
+        let message = queued.remove(at: index)
+        let written = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        composer.text = written.isEmpty ? message.text : written + "\n\n" + message.text
+        composer.attachments += message.images
+        window?.makeFirstResponder(composer.textView)
+        composer.textView.setSelectedRange(NSRange(location: (composer.text as NSString).length, length: 0))
+    }
+
+    private func removeQueued(at index: Int) {
+        guard queued.indices.contains(index) else { return }
+        for image in queued.remove(at: index).images { try? FileManager.default.removeItem(at: image.url) }
+    }
+
+    private func updateQueue() {
+        if queued.isEmpty, queuePaused { queuePaused = false }
+        queueView.show(queued.map { ($0.text, $0.images.count) }, paused: queuePaused)
+        composer.hasQueued = !queued.isEmpty
+    }
+
+    /// `contextOverride` replaces the selected tab's description, and
+    /// `schedule` marks the message as that schedule's run.
+    func send(
+        _ text: String, images: [AgentAttachment] = [], contextOverride: String? = nil, schedule: ScheduledPrompt? = nil
+    ) {
+        loadIfNeeded(now: true)
         var conversation = conversation ?? AgentConversation(
-            id: id, kind: .current, title: AgentConversation.title(from: text), created: Date(), updated: Date()
+            id: id, kind: kind, provider: choice.provider, title: schedule?.name ?? AgentConversation.title(from: text), created: Date(), updated: Date()
         )
+        if let schedule, conversation.scheduleID == nil { conversation.scheduleID = schedule.id }
+        conversation.tools = tools
+        conversation.modelOptions = modelOptions
         conversation.updated = Date()
         save(conversation)
         let session = self.session ?? makeSession()
-        emptyState.isHidden = true
+        hideEmptyState()
+        if let schedule { addNote("Scheduled run of “\(schedule.name)”") }
         records.append(.user(text: text, images: images.map(\.url.lastPathComponent)))
         saveRecords()
+        // Only the files are kept for Quick Look, not the images' bytes.
+        let urls = images.map(\.url)
         transcript.add(UserMessageView(text: text, images: images.map(\.image)) { [weak self] index in
-            self?.preview(images.map(\.url), at: index)
+            self?.preview(urls, at: index)
         })
+        lastSent = (text, images)
         do {
-            try session.send(text, images: images, context: context?() ?? "")
+            try session.send(
+                text, images: images, context: contextOverride ?? context?() ?? "",
+                // Only a message starting with / can call a skill, so the
+                // skill folders are read only then.
+                skill: text.hasPrefix("/") ? SkillCompletion.skill(calledBy: text, in: availableSkills) : nil
+            )
             if session.isRunning { setStatus("Working…", busy: true) }
             setBusy(true)
-        } catch {
-            addError((error as? ControlError)?.message ?? error.localizedDescription)
+            transcript.showThinking()
+        } catch let error as AgentSetupError {
+            // A CLI that can't be found or run is fixed in Settings.
+            addError(error.message, action: openSettings)
             endSession()
             showIdle()
+            finishRun(.failed(error.message))
+            turnEnded(finished: false)
+        } catch {
+            let message = (error as? ControlError)?.message ?? error.localizedDescription
+            addError(message, action: tryAgain)
+            endSession()
+            showIdle()
+            finishRun(.failed(message))
+            turnEnded(finished: false)
         }
         scrollToBottom()
     }
@@ -275,7 +624,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     }
 
     private func saveRecords() {
-        guard conversation != nil else { return }
+        // An unloaded chat has nothing new; writing would empty its file.
+        guard conversation != nil, recordsLoaded else { return }
         AgentHistoryStore.shared.setRecords(records, for: id)
     }
 
@@ -286,7 +636,10 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         if conversation.sessionID != nil, let path = conversation.directory {
             directory = URL(fileURLWithPath: path)
         }
-        let session = AgentSession(kind: conversation.kind, resuming: conversation.sessionID, in: directory)
+        let session = AgentSession(
+            kind: conversation.kind, provider: conversation.provider, tools: tools, options: modelOptions, chat: id, resuming: conversation.sessionID,
+            in: directory
+        )
         session.onEvent = { [weak self] event in self?.handle(event) }
         self.session = session
         resuming = conversation.sessionID != nil
@@ -294,16 +647,69 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         return session
     }
 
+    // MARK: Tools
+
+    /// Changes the built-in tools. The CLIs take them when they start, so a
+    /// running agent is stopped and the next message resumes its session with
+    /// the new ones. Not while a turn is running.
+    func setTools(_ tools: [AgentTool]) {
+        guard !isBusy, tools != self.tools else { return }
+        self.tools = tools
+        if var conversation {
+            conversation.tools = tools
+            save(conversation)
+        }
+        if session != nil {
+            endSession()
+            showIdle()
+        }
+        onChange?()
+    }
+
+    /// Changes the model options. Like the tools, the CLIs take them when they
+    /// start, so a running agent is stopped and the next message resumes its
+    /// session with the new ones. Not while a turn is running.
+    func setModelOptions(_ options: AgentModelOptions) {
+        guard !isBusy, options != modelOptions else { return }
+        if var conversation {
+            conversation.modelOptions = options
+            save(conversation)
+        } else {
+            pickedOptions = options
+        }
+        if session != nil {
+            endSession()
+            showIdle()
+        }
+        onChange?()
+    }
+
     // MARK: Images
 
     /// Adds pasted, dropped or chosen images to the message, up to the limit.
     /// Beeps for any that don't fit or can't be read.
     private func attach(_ images: [NSImage]) {
-        let room = max(0, AgentAttachment.maxCount - composer.attachments.count)
-        let added = images.prefix(room).compactMap { AgentAttachment(image: $0, in: folder) }
-        if added.count < images.count { NSSound.beep() }
-        composer.attachments += added
+        let room = max(0, AgentAttachment.maxCount - composer.attachments.count - pendingAttachments)
+        let sources = images.prefix(room).compactMap(AttachmentSource.init)
+        if sources.count < images.count { NSSound.beep() }
+        guard !sources.isEmpty else { return }
+        // Scaling and encoding a screenshot takes a moment, so it happens
+        // off the main thread and the thumbnails follow.
+        pendingAttachments += sources.count
+        let folder = folder
+        Task { [weak self] in
+            let added = await Task.detached(priority: .userInitiated) {
+                sources.compactMap { AgentAttachment(source: $0, in: folder) }
+            }.value
+            guard let self else { return }
+            self.pendingAttachments -= sources.count
+            if added.count < sources.count { NSSound.beep() }
+            self.composer.attachments += added
+        }
     }
+
+    /// Images still being encoded, which count against the limit.
+    private var pendingAttachments = 0
 
     @objc private func chooseImages(_ sender: Any?) {
         guard let window else { return }
@@ -345,14 +751,17 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
 
+    // AppKit calls these on the main thread without saying so.
     override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        panel.dataSource = quickLook
-        panel.reloadData()
-        panel.currentPreviewItemIndex = quickLook.index
+        MainActor.assumeIsolated {
+            panel.dataSource = quickLook
+            panel.reloadData()
+            panel.currentPreviewItemIndex = quickLook.index
+        }
     }
 
     override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        panel.dataSource = nil
+        MainActor.assumeIsolated { panel.dataSource = nil }
     }
 
     // MARK: Agent events
@@ -372,6 +781,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             guard var conversation else { break }
             conversation.title = title
             save(conversation)
+        case .skills(let skills):
+            loadedSkills = skills
         case .textStarted:
             liveTextBuffer = ""
             let label = AgentMarkdown.label("")
@@ -404,35 +815,89 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 records[index] = .tool(name: name, detail: detail, isError: isError, summary: summary)
                 saveRecords()
             }
+            // The agent is deciding what to do with the result.
+            if toolRows.isEmpty, isBusy { transcript.showThinking() }
         case .retrying:
             setStatus("Retrying…", busy: true)
         case .error(let message):
             addError(message)
+        case .notice(let message):
+            addNote(message)
         case .turnFinished(let error, let stopped):
             keepLiveText()
+            // A call the turn ended without answering won't be answered now.
+            finishToolRows()
+            transcript.hideThinking()
             transcript.closeToolGroup()
-            if let error { addError(error) }
+            if let error { addError(error, action: tryAgain) }
             if stopped { addNote("Stopped") }
             showIdle()
             readTitle()
+            finishRun(error.map { .failed($0) } ?? (stopped ? .stopped : .finished(lastAgentText)))
+            if error == nil { announce(stopped ? "Stopped" : Self.firstLine(of: lastAgentText) ?? "\(choice.displayName) finished") }
+            turnEnded(finished: error == nil && !stopped)
         case .exited(let message):
             keepLiveText()
             finishToolRows()
+            transcript.hideThinking()
             transcript.closeToolGroup()
             if resuming {
                 // The saved session couldn't be continued, so start over.
                 conversation?.sessionID = nil
                 if let conversation { save(conversation) }
-                addError((message ?? "\(kind.displayName) couldn't continue this chat.")
-                    + "\nThe next message starts a new conversation, without what was said before.")
+                addError((message ?? "\(choice.displayName) couldn't continue this chat.")
+                    + "\nThe next message starts a new conversation, without what was said before.", action: tryAgain)
             } else if let message {
-                addError(message + "\nThe next message continues the conversation.")
+                addError(message + "\nThe next message continues the conversation.", action: tryAgain)
             }
             session = nil
             resuming = false
             showIdle()
+            finishRun(.failed(message ?? "\(choice.displayName) stopped."))
+            turnEnded(finished: false)
         }
-        if follow { scrollToBottom() }
+        if follow { scrollToBottom() } else { updateScrollDownButtonAfterLayout() }
+    }
+
+    /// New output below the visible part grows the transcript without moving
+    /// the clip, so the button is checked again once the rows are laid out.
+    private func updateScrollDownButtonAfterLayout() {
+        layoutSubtreeIfNeeded()
+        updateScrollDownButton()
+    }
+
+    // MARK: Scheduled runs
+
+    /// What a scheduled run tells the agent instead of the selected tab.
+    private static func scheduledContext(_ name: String) -> String {
+        "[Tiller: scheduled run of \"\(name)\", sent by Tiller on a timer rather than typed. "
+            + "No tab is yours: open the tabs you need with new_tab background.]"
+    }
+
+    /// Sends the schedule's prompt in this new chat. `completion` gets how
+    /// its turn ended, once.
+    func runScheduled(_ schedule: ScheduledPrompt, completion: @escaping (AgentRunOutcome) -> Void) {
+        runCompletion = completion
+        send(schedule.prompt, contextOverride: Self.scheduledContext(schedule.name), schedule: schedule)
+    }
+
+    private func finishRun(_ outcome: AgentRunOutcome) {
+        guard let completion = runCompletion else { return }
+        runCompletion = nil
+        // After whatever started the run has finished with the chat.
+        DispatchQueue.main.async { completion(outcome) }
+    }
+
+    /// The agent's last text since the last message sent.
+    private var lastAgentText: String? {
+        for record in records.reversed() {
+            switch record {
+            case .user: return nil
+            case .text(let text): return text
+            default: continue
+            }
+        }
+        return nil
     }
 
     /// Keeps the text a turn was streaming when it ended without the complete block.
@@ -474,7 +939,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 guard let liveText = self.liveText else { return }
                 let follow = self.transcript.isNearBottom(of: self.scrollView)
                 liveText.text = self.liveTextBuffer
-                if follow { self.scrollToBottom() }
+                if follow { self.scrollToBottom() } else { self.updateScrollDownButtonAfterLayout() }
             }
         }
     }
@@ -482,9 +947,28 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private func showIdle() {
         setBusy(false)
         setStatus(session == nil ? "" : "Ready", busy: false)
-        composer.placeholder = "Ask \(kind.displayName) about this page…"
-        emptyState.kind = kind
-        emptyState.isHidden = !transcript.isEmpty
+        composer.placeholder = "Ask \(choice.displayName) about this page…"
+        composer.shortPlaceholder = "Ask \(choice.displayName)…"
+        emptyState.kind = choice
+        let showEmpty = transcript.isEmpty && recordsLoaded
+        if showEmpty { emptyState.alphaValue = 1 }
+        emptyState.isHidden = !showEmpty
+    }
+
+    /// Fades the suggestions out as the first message goes in, rather than
+    /// dropping them in the same frame. `showIdle` brings them back at full
+    /// strength, and a fade it overtook leaves them shown.
+    private func hideEmptyState() {
+        guard !emptyState.isHidden else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.reduceMotion ? 0 : Theme.Duration.standard
+            emptyState.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.emptyState.alphaValue == 0 else { return }
+                self.emptyState.isHidden = true
+            }
+        }
     }
 
     private func setBusy(_ busy: Bool) {
@@ -506,20 +990,55 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         transcript.add(NoteView(text: message))
     }
 
-    private func addError(_ message: String) {
+    /// `action` offers a way out under the message, such as Try Again. It
+    /// shows only now; a saved error has none.
+    private func addError(_ message: String, action: (title: String, run: () -> Void)? = nil) {
         records.append(.error(message))
         saveRecords()
-        transcript.add(ErrorMessageView(text: message))
+        transcript.add(ErrorMessageView(text: message, action: action))
+        announce(message)
+    }
+
+    /// Tells VoiceOver how a turn went, since the reply lands somewhere in
+    /// the transcript with no focus change. Only for the chat in front: a
+    /// scheduled run in another tab or window stays quiet.
+    private func announce(_ text: String) {
+        guard window?.isKeyWindow == true, !isHiddenOrHasHiddenAncestor else { return }
+        NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [
+            .announcement: text,
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
+    }
+
+    private static func firstLine(of text: String?) -> String? {
+        text?.split(whereSeparator: \.isNewline).first { !$0.allSatisfy(\.isWhitespace) }.map(String.init)
+    }
+
+    /// The last message sent, for trying again after a failure.
+    private var lastSent: (text: String, images: [AgentAttachment])?
+
+    /// Sends the last message again, unless a turn is running.
+    private var tryAgain: (title: String, run: () -> Void)? {
+        guard let lastSent else { return nil }
+        return ("Try Again", { [weak self] in
+            guard let self, !self.isBusy else { return }
+            self.send(lastSent.text, images: lastSent.images)
+        })
+    }
+
+    /// Opens the Agent pane, where a missing CLI's path is set.
+    private var openSettings: (title: String, run: () -> Void) {
+        ("Open Settings…", { (NSApp.delegate as? AppDelegate)?.showAgentSettings() })
     }
 
     /// Draws a saved row.
-    private func show(_ record: AgentRecord) {
+    private func show(_ record: AgentRecord, thumbnails: Thumbnails) {
         switch record {
         case .user(let text, let names):
-            let loaded = names.map { folder.appendingPathComponent($0) }
-                .compactMap { url in NSImage(contentsOf: url).map { (url, $0) } }
+            let loaded = names.compactMap { name in thumbnails.images[name].map { (folder.appendingPathComponent(name), $0) } }
+            let urls = loaded.map(\.0)
             transcript.add(UserMessageView(text: text, images: loaded.map(\.1)) { [weak self] index in
-                self?.preview(loaded.map(\.0), at: index)
+                self?.preview(urls, at: index)
             })
         case .text(let text):
             transcript.add(AgentMarkdown.label(text))
@@ -539,8 +1058,144 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     func scrollToBottom() {
         layoutSubtreeIfNeeded()
         let clip = scrollView.contentView
-        let y = max(0, transcript.frame.height - clip.bounds.height)
-        clip.scroll(to: NSPoint(x: 0, y: y))
+        clip.scroll(to: NSPoint(x: 0, y: bottomOffset))
         scrollView.reflectScrolledClipView(clip)
+    }
+
+    /// The clip's origin with the last message just above the bottom inset.
+    /// The clip spans the insets too, so the top rests at minus the top inset.
+    private var bottomOffset: CGFloat {
+        let clipHeight = scrollView.contentView.bounds.height
+        return max(-Self.insets.top, transcript.frame.height - clipHeight + Self.insets.bottom)
+    }
+}
+
+/// A strip over one edge of the transcript that fades from the panel's
+/// background to clear. It only draws: clicks and scrolls pass through.
+final class EdgeFadeView: NSView {
+    enum Edge { case top, bottom }
+    static let height: CGFloat = 10
+    private let edge: Edge
+
+    init(edge: Edge) {
+        self.edge = edge
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func makeBackingLayer() -> CALayer { CAGradientLayer() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    /// The panel draws nothing of its own, so it shows the window's
+    /// background. Resolved here, where the view's appearance is current, so
+    /// it follows light and dark mode.
+    override func updateLayer() {
+        guard let gradient = layer as? CAGradientLayer else { return }
+        // Opaque at the edge, clear toward the transcript. Layer y runs up.
+        gradient.startPoint = CGPoint(x: 0.5, y: edge == .top ? 1 : 0)
+        gradient.endPoint = CGPoint(x: 0.5, y: edge == .top ? 0 : 1)
+        gradient.colors = [
+            NSColor.windowBackgroundColor.layerColor,
+            NSColor.windowBackgroundColor.dynamic(alpha: 0).layerColor,
+        ]
+    }
+}
+
+/// A round button with a down arrow that floats over the transcript while
+/// the newest message is out of view. It fades in and out, and its plate
+/// darkens under the mouse and while pressed.
+final class ScrollDownButton: NSButton {
+    private var shown = false
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        image = Theme.symbol("arrow.down", size: Theme.Symbol.row, weight: .semibold, label: "Scroll to Newest")
+        imagePosition = .imageOnly
+        isBordered = false
+        bezelStyle = .accessoryBarAction
+        contentTintColor = .labelColor
+        toolTip = "Scroll to Newest"
+        setAccessibilityLabel("Scroll to Newest")
+        alphaValue = 0
+        isHidden = true
+        // A little larger than a bar button, since it floats over text.
+        let side = Theme.ButtonSize.bar + 4
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: side),
+            heightAnchor.constraint(equalToConstant: side),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setShown(_ show: Bool) {
+        guard show != shown else { return }
+        shown = show
+        if show { isHidden = false }
+        let reduceMotion = Theme.reduceMotion
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduceMotion ? 0 : Theme.Duration.standard
+            animator().alphaValue = show ? 1 : 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.shown else { return }
+                self.isHidden = true
+            }
+        }
+    }
+
+    /// Only this area is replaced, so the ones AppKit keeps for the tooltip stay.
+    private var hoverArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    // A hidden view gets no exit event, so the hover is dropped on hiding.
+    override func viewDidHide() {
+        super.viewDidHide()
+        isHovered = false
+    }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        needsDisplay = true
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        guard let layer else { return }
+        layer.cornerRadius = bounds.height / 2
+        // The plate stays opaque over the text, so the hover and pressed
+        // fills are mixed into it rather than laid on top. Mixed here, where
+        // the view's appearance is current.
+        let fill = isHighlighted ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : 0
+        let plate = NSColor.windowBackgroundColor.blended(withFraction: fill, of: .labelColor) ?? .windowBackgroundColor
+        withEasing(Theme.Duration.quick) { layer.backgroundColor = plate.layerColor }
+        layer.borderWidth = Theme.hairlineWidth
+        layer.borderColor = Theme.hairline.layerColor
+        layer.shadowColor = NSColor.black.layerColor
+        layer.shadowOpacity = 0.18
+        layer.shadowRadius = 4
+        layer.shadowOffset = CGSize(width: 0, height: -1)
+        layer.shadowPath = CGPath(ellipseIn: bounds, transform: nil)
     }
 }

@@ -14,6 +14,12 @@ protocol AgentPanelDelegate: AnyObject {
 /// surface with the toolbar.
 final class AgentPanelView: NSView {
     weak var delegate: AgentPanelDelegate?
+    /// Called when any chat starts or stops working.
+    var onBusyChange: ((Bool) -> Void)?
+    /// Whether any chat's agent is working.
+    private(set) var isBusy = false {
+        didSet { if isBusy != oldValue { onBusyChange?(isBusy) } }
+    }
 
     /// The message being written in the selected tab.
     var input: NSView { active.input }
@@ -23,6 +29,9 @@ final class AgentPanelView: NSView {
     private let chatArea = NSView()
     private let tabBar = AgentTabBar()
     private var chats: [AgentChatView] = []
+    /// Scheduled runs going on in the background. They take no tab until
+    /// opened, and leave once their turn ends.
+    private var scheduledChats: [AgentChatView] = []
     private var activeIndex = 0
     private var active: AgentChatView { chats[activeIndex] }
     private var historyPopover: NSPopover?
@@ -37,15 +46,38 @@ final class AgentPanelView: NSView {
         NotificationCenter.default.addObserver(
             self, selector: #selector(tabLimitChanged(_:)), name: .agentTabsDidChange, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(providersChanged(_:)), name: .agentProvidersDidChange, object: nil
+        )
+        // A new chat follows Settings' options, and the button names the models.
+        for name in [Notification.Name.agentModelOptionsDidChange, .agentModelsDidChange] {
+            NotificationCenter.default.addObserver(self, selector: #selector(tabLimitChanged(_:)), name: name, object: nil)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// The panel is on screen: have the selected chat's CLI looked up now,
+    /// so the first message doesn't wait on a login shell.
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        AgentEnvironment.warmUp(active.kind)
+        AgentModelCatalog.refreshAll()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, !isHiddenOrHasHiddenAncestor else { return }
+        AgentEnvironment.warmUp(active.kind)
+        AgentModelCatalog.refreshAll()
+    }
+
     /// Ends every tab's agent and saves the chats. Called when the window closes.
     func shutDown() {
         saveTabs()
-        chats.forEach { $0.shutDown() }
+        (chats + scheduledChats).forEach { $0.shutDown() }
         AgentHistoryStore.shared.flush()
+        AgentHistoryStore.shared.waitForWrites()
     }
 
     var hasKeyboardFocus: Bool {
@@ -59,13 +91,9 @@ final class AgentPanelView: NSView {
     // MARK: Layout
 
     private func build() {
-        for kind in AgentKind.allCases {
-            agentPicker.addItem(withTitle: kind.displayName)
-            agentPicker.lastItem?.representedObject = kind.rawValue
-            agentPicker.lastItem?.image = kind.logo(size: 16)
-        }
+        fillAgentPicker()
         agentPicker.isBordered = false
-        agentPicker.font = .systemFont(ofSize: 13, weight: .semibold)
+        agentPicker.font = .systemFont(ofSize: Theme.FontSize.body, weight: .semibold)
         agentPicker.toolTip = "Agent for this chat"
         agentPicker.target = self
         agentPicker.action = #selector(agentChanged(_:))
@@ -75,6 +103,8 @@ final class AgentPanelView: NSView {
         tabBar.onNewTab = { [weak self] in self?.newTab() }
         tabBar.onNewChat = { [weak self] in self?.newChat() }
         tabBar.onHistory = { [weak self] button in self?.showHistory(from: button) }
+        tabBar.onTools = { [weak self] button in self?.showTools(from: button) }
+        tabBar.onModel = { [weak self] button in self?.showModelOptions(from: button) }
 
         for view in [agentPicker, status, chatArea] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -108,14 +138,24 @@ final class AgentPanelView: NSView {
     }
 
     private func add(_ chat: AgentChatView, at index: Int? = nil) {
+        attach(chat)
+        chats.insert(chat, at: index ?? chats.count)
+    }
+
+    /// Puts the chat in the panel, hidden, without giving it a tab.
+    private func attach(_ chat: AgentChatView) {
         chat.context = { [weak self] in
             guard let self else { return "" }
             return self.delegate?.agentPanelContext(self) ?? ""
         }
         chat.onChange = { [weak self, weak chat] in
-            guard let self, let chat, self.chats.contains(chat) else { return }
-            self.refresh()
-            self.saveTabs()
+            guard let self, let chat else { return }
+            if self.chats.contains(chat) {
+                self.refresh()
+                self.saveTabs()
+            } else if self.scheduledChats.contains(chat) {
+                self.refresh()
+            }
         }
         chat.isHidden = true
         chat.translatesAutoresizingMaskIntoConstraints = false
@@ -126,7 +166,6 @@ final class AgentPanelView: NSView {
             chat.leadingAnchor.constraint(equalTo: chatArea.leadingAnchor),
             chat.trailingAnchor.constraint(equalTo: chatArea.trailingAnchor),
         ])
-        chats.insert(chat, at: index ?? chats.count)
     }
 
     /// Shows the tab at `index`, with the tab bar moved into it.
@@ -191,13 +230,81 @@ final class AgentPanelView: NSView {
     /// The header and tab bar show the selected chat.
     private func refresh() {
         let chat = active
-        agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: chat.kind) ?? 0)
+        isBusy = (chats + scheduledChats).contains { $0.isBusy }
+        if let stale = agentPicker.lastItem, stale.representedObject == nil, !stale.isSeparatorItem {
+            agentPicker.menu?.removeItem(stale)
+        }
+        if let index = agentPicker.itemArray.firstIndex(where: { $0.representedObject as? String == chat.choice.rawValue }) {
+            agentPicker.selectItem(at: index)
+        } else {
+            // A removed provider's chat names it, without offering it.
+            agentPicker.addItem(withTitle: chat.choice.displayName)
+            agentPicker.lastItem?.image = chat.choice.logo(size: 16)
+            agentPicker.lastItem?.isHidden = true
+            agentPicker.select(agentPicker.lastItem)
+        }
         status.show(chat.statusText, busy: chat.statusBusy)
         tabBar.update(
             tabs: chats.map { (title: $0.title, busy: $0.isBusy) },
             selected: activeIndex,
-            canAddTab: chats.count < Settings.agentTabs
+            canAddTab: chats.count < Settings.agentTabs,
+            tools: chat.tools,
+            model: (chat.modelOptions.summary(for: chat.choice), chat.modelOptions.isDefault)
         )
+    }
+
+    // MARK: Model
+
+    /// The selected chat's model, effort, context and fast mode. Locked while
+    /// a turn runs, since a change restarts the agent.
+    private func showModelOptions(from button: NSView) {
+        let chat = active
+        AgentModelMenu.popUp(
+            below: button, kind: chat.choice, options: chat.modelOptions, locked: chat.isBusy,
+            note: chat.isBusy ? "Stop the agent to change the model." : "Settings sets them for new chats."
+        ) { [weak chat] options in
+            chat?.setModelOptions(options)
+        }
+    }
+
+    // MARK: Tools
+
+    /// The selected chat's built-in tools, each a checkmark item. Codex can
+    /// always read and run read-only commands, so only writing changes for
+    /// it, and Antigravity CLI always has them all.
+    /// Locked while a turn runs, since a change restarts the agent.
+    private func showTools(from button: NSView) {
+        let chat = active
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(.sectionHeader(title: "Also allow in this chat"))
+        for tool in AgentTool.allCases {
+            let item = NSMenuItem(title: tool.displayName, action: #selector(toggleTool(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = tool.rawValue
+            let alwaysOn = chat.kind.alwaysAllows(tool)
+            item.state = alwaysOn || chat.tools.contains(tool) ? .on : .off
+            item.isEnabled = !alwaysOn && !chat.isBusy
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let note = NSMenuItem(
+            title: chat.isBusy ? "Stop the agent to change tools." : "They run without asking. Settings sets them for new chats.",
+            action: nil, keyEquivalent: ""
+        )
+        note.isEnabled = false
+        menu.addItem(note)
+        // Just below the button. The menu moves up if the screen runs out.
+        let below = button.isFlipped ? button.bounds.maxY + 4 : button.bounds.minY - 4
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: below), in: button)
+    }
+
+    @objc private func toggleTool(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let tool = AgentTool(rawValue: raw) else { return }
+        let chat = active
+        var tools = Set(chat.tools)
+        if tools.contains(tool) { tools.remove(tool) } else { tools.insert(tool) }
+        chat.setTools(AgentTool.allCases.filter(tools.contains))
     }
 
     @objc private func tabLimitChanged(_ notification: Notification) {
@@ -232,18 +339,46 @@ final class AgentPanelView: NSView {
     }
 
     /// Switches to the chat if a tab has it, or opens it in the selected tab.
-    private func open(_ id: String) {
+    func open(_ id: String) {
+        open(id, newTabIfRoom: false)
+    }
+
+    /// Shows a scheduled run's chat: in a new tab while there is room, else
+    /// in the selected tab.
+    func openScheduled(_ id: String) {
+        open(id, newTabIfRoom: true)
+    }
+
+    /// A run still going keeps going in its new tab.
+    private func open(_ id: String, newTabIfRoom: Bool) {
         if let index = chats.firstIndex(where: { $0.id == id }) {
             return select(index, focus: true)
         }
-        guard let conversation = AgentHistoryStore.shared.conversation(id) else { return }
-        let chat = AgentChatView(conversation: conversation)
-        replace(activeIndex, with: chat)
+        let chat: AgentChatView
+        if let index = scheduledChats.firstIndex(where: { $0.id == id }) {
+            chat = scheduledChats.remove(at: index)
+            chat.removeFromSuperview()
+        } else {
+            guard let conversation = AgentHistoryStore.shared.conversation(id) else { return }
+            chat = AgentChatView(conversation: conversation)
+        }
+        if newTabIfRoom, chats.count < Settings.agentTabs {
+            add(chat)
+            select(chats.count - 1, focus: true)
+        } else {
+            replace(activeIndex, with: chat)
+        }
         chat.scrollToBottom()
     }
 
     /// A tab showing the chat gets a new one instead.
     private func delete(_ id: String) {
+        if let index = scheduledChats.firstIndex(where: { $0.id == id }) {
+            let chat = scheduledChats.remove(at: index)
+            chat.shutDown()
+            chat.removeFromSuperview()
+            refresh()
+        }
         if let index = chats.firstIndex(where: { $0.id == id }) {
             let old = chats.remove(at: index)
             old.shutDown()
@@ -259,12 +394,30 @@ final class AgentPanelView: NSView {
     /// Picking another agent starts a new chat with it, unless the selected
     /// tab has no messages yet.
     @objc private func agentChanged(_ sender: NSPopUpButton) {
-        guard let raw = sender.selectedItem?.representedObject as? String, let kind = AgentKind(rawValue: raw),
-            kind != active.kind || kind != AgentKind.current
+        guard let raw = sender.selectedItem?.representedObject as? String, let kind = AgentChoice(rawValue: raw),
+            kind != active.choice || kind != AgentChoice.current
         else { return }
-        let startOver = !active.isEmpty && kind != active.kind
-        AgentKind.current = kind
+        let startOver = !active.isEmpty && kind != active.choice
+        AgentChoice.current = kind
         if startOver { newChat() } else { refresh() }
+    }
+
+    /// The CLIs, then the providers added in Settings.
+    private func fillAgentPicker() {
+        agentPicker.removeAllItems()
+        for (index, choice) in AgentChoice.all.enumerated() {
+            if index == AgentKind.allCases.count { agentPicker.menu?.addItem(.separator()) }
+            agentPicker.addItem(withTitle: choice.displayName)
+            agentPicker.lastItem?.representedObject = choice.rawValue
+            agentPicker.lastItem?.image = choice.logo(size: 16)
+        }
+    }
+
+    /// A provider was added, renamed or removed in Settings.
+    @objc private func providersChanged(_ notification: Notification) {
+        fillAgentPicker()
+        refresh()
+        (chats + scheduledChats).forEach { $0.providersChanged() }
     }
 
     /// Settings changed the agent for new chats, which an empty tab shows.
@@ -278,10 +431,62 @@ final class AgentPanelView: NSView {
     func stopForTesting() { active.stopForTesting() }
 
     func pasteAndSendForTesting(_ text: String) { active.pasteAndSendForTesting(text) }
+
+    /// One of the tab bar's buttons, by name, for `ui.agentAction`.
+    func performForTesting(_ action: String) {
+        switch action {
+        case "newChat": newChat()
+        case "newTab": newTab()
+        case "closeTab": closeTab(activeIndex)
+        case "history": tabBar.historyForTesting()
+        case "tools": tabBar.toolsForTesting()
+        case "model": tabBar.modelForTesting()
+        case "focus": window?.makeFirstResponder(input)
+        case "enter": active.submitForTesting(direct: false)
+        case "ctrlEnter": active.submitForTesting(direct: true)
+        default:
+            if action.hasPrefix("tab"), let index = Int(action.dropFirst(3)), chats.indices.contains(index - 1) {
+                select(index - 1, focus: true)
+            }
+        }
+    }
+
+    /// Puts `text` in the selected chat's message field, as if typed.
+    func setTextForTesting(_ text: String) {
+        window?.makeFirstResponder(input)
+        active.setTextForTesting(text)
+    }
     #endif
 
     func send(_ text: String) {
         active.send(text)
+    }
+
+    // MARK: Scheduled runs
+
+    func isChatBusy(_ id: String) -> Bool {
+        (chats + scheduledChats).contains { $0.id == id && $0.isBusy }
+    }
+
+    /// Sends a scheduled prompt in a new chat in the background, taking no
+    /// tab. Once its turn ends the chat leaves, unless opened in a tab by
+    /// then; it stays in history. `completion` gets the chat's id and how
+    /// its turn ended.
+    func runScheduled(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String {
+        let chat = AgentChatView(kind: schedule.choice, tools: schedule.tools, modelOptions: schedule.modelOptions)
+        attach(chat)
+        scheduledChats.append(chat)
+        let id = chat.id
+        chat.runScheduled(schedule) { [weak self, weak chat] outcome in
+            completion(id, outcome)
+            guard let self, let chat, let index = self.scheduledChats.firstIndex(of: chat) else { return }
+            self.scheduledChats.remove(at: index)
+            chat.shutDown()
+            chat.removeFromSuperview()
+            self.refresh()
+        }
+        refresh()
+        return id
     }
 }
 
@@ -297,8 +502,8 @@ private final class StatusPill: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         dot.wantsLayer = true
-        dot.layer?.cornerRadius = 3
-        label.font = .systemFont(ofSize: 11)
+        dot.layer?.cornerRadius = Theme.busyDot / 2
+        label.font = .systemFont(ofSize: Theme.FontSize.caption)
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -309,14 +514,19 @@ private final class StatusPill: NSView {
         NSLayoutConstraint.activate([
             dot.leadingAnchor.constraint(equalTo: leadingAnchor),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-            dot.widthAnchor.constraint(equalToConstant: 6),
-            dot.heightAnchor.constraint(equalToConstant: 6),
+            dot.widthAnchor.constraint(equalToConstant: Theme.busyDot),
+            dot.heightAnchor.constraint(equalToConstant: Theme.busyDot),
             label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
             label.trailingAnchor.constraint(equalTo: trailingAnchor),
             label.topAnchor.constraint(equalTo: topAnchor),
             label.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The dot's color is the only other sign of the state, so VoiceOver
+        // reads the pill as one element whose label says it in words.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        label.setAccessibilityElement(false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -325,11 +535,12 @@ private final class StatusPill: NSView {
         label.stringValue = text
         isHidden = text.isEmpty
         toolTip = text
+        setAccessibilityLabel("Agent status: \(text)")
         guard busy != self.busy else { return }
         self.busy = busy
         needsDisplay = true
         dot.layer?.removeAnimation(forKey: "pulse")
-        if busy {
+        if busy, !Theme.reduceMotion {
             let pulse = CABasicAnimation(keyPath: "opacity")
             pulse.fromValue = 1
             pulse.toValue = 0.25
@@ -344,7 +555,7 @@ private final class StatusPill: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        dot.layer?.backgroundColor = (busy ? NSColor.controlAccentColor : NSColor.systemGreen).cgColor
+        dot.layer?.backgroundColor = (busy ? Theme.accentColor : NSColor.systemGreen).layerColor
     }
 }
 
@@ -353,9 +564,9 @@ private final class StatusPill: NSView {
 /// What a new chat shows: what the agent can do, and a few things to ask.
 final class AgentEmptyState: NSView {
     var onSuggestion: ((String) -> Void)?
-    var kind: AgentKind? {
+    var kind: AgentChoice? {
         didSet {
-            guard let kind, kind != oldValue else { return }
+            guard let kind, kind != oldValue || title.stringValue != "Ask \(kind.displayName)" else { return }
             title.stringValue = "Ask \(kind.displayName)"
             badge.logo = kind.logo(size: 28)
         }
@@ -363,6 +574,8 @@ final class AgentEmptyState: NSView {
 
     private let badge = SymbolBadge(symbol: "sparkles")
     private let title = NSTextField(labelWithString: "")
+    private let subtitle = NSTextField(wrappingLabelWithString: "It can read the page, click, type and open tabs for you. Type / for skills.")
+    private static let subtitleWidth: CGFloat = 240
 
     private static let suggestions: [(symbol: String, text: String)] = [
         ("text.alignleft", "Summarize this page"),
@@ -372,14 +585,13 @@ final class AgentEmptyState: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.font = .systemFont(ofSize: Theme.FontSize.title, weight: .semibold)
         title.alignment = .center
 
-        let subtitle = NSTextField(wrappingLabelWithString: "It can read the page, click, type and open tabs for you.")
-        subtitle.font = .systemFont(ofSize: 12)
+        subtitle.font = .systemFont(ofSize: Theme.FontSize.secondary)
         subtitle.textColor = .secondaryLabelColor
         subtitle.alignment = .center
-        subtitle.preferredMaxLayoutWidth = 240
+        subtitle.preferredMaxLayoutWidth = Self.subtitleWidth
 
         let buttons = NSStackView()
         buttons.orientation = .vertical
@@ -409,6 +621,14 @@ final class AgentEmptyState: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The subtitle wraps to the space there is, when the panel is narrower
+    /// than its usual width. Set before the stack lays out, so it lays out once.
+    override func layout() {
+        let width = min(Self.subtitleWidth, bounds.width)
+        if width > 0, subtitle.preferredMaxLayoutWidth != width { subtitle.preferredMaxLayoutWidth = width }
+        super.layout()
+    }
 }
 
 /// An SF Symbol on a soft accent-colored circle, or a logo on a plain one.
@@ -417,7 +637,7 @@ private final class SymbolBadge: NSView {
     var logo: NSImage? {
         didSet {
             image.image = logo ?? symbol
-            image.contentTintColor = logo == nil ? .controlAccentColor : nil
+            image.contentTintColor = logo == nil ? Theme.accentColor : nil
             needsDisplay = true
         }
     }
@@ -431,7 +651,7 @@ private final class SymbolBadge: NSView {
         image = NSImageView(image: self.symbol)
         super.init(frame: .zero)
         wantsLayer = true
-        image.contentTintColor = .controlAccentColor
+        image.contentTintColor = Theme.accentColor
         image.translatesAutoresizingMaskIntoConstraints = false
         addSubview(image)
         NSLayoutConstraint.activate([
@@ -448,8 +668,8 @@ private final class SymbolBadge: NSView {
 
     override func updateLayer() {
         layer?.cornerRadius = 24
-        let color = logo == nil ? NSColor.controlAccentColor.withAlphaComponent(0.14) : .labelColor.withAlphaComponent(0.06)
-        layer?.backgroundColor = color.cgColor
+        let color = logo == nil ? Theme.accent(Theme.Accent.soft) : Theme.fill(0.06)
+        layer?.backgroundColor = color.layerColor
     }
 }
 
@@ -468,7 +688,7 @@ private final class SuggestionButton: NSView {
             .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!)
         icon.contentTintColor = .secondaryLabelColor
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 12)
+        label.font = .systemFont(ofSize: Theme.FontSize.secondary)
         let stack = NSStackView(views: [icon, label])
         stack.spacing = 7
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -488,12 +708,12 @@ private final class SuggestionButton: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.cornerRadius = 14
+        layer?.cornerRadius = Theme.Radius.plate
         layer?.cornerCurve = .continuous
-        let alpha = isPressed ? 0.14 : isHovered ? 0.09 : 0.05
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        let alpha = isPressed ? Theme.Fill.pressed : isHovered ? Theme.Fill.hover : Theme.Fill.rest
+        withEasing(Theme.Duration.quick) { layer?.backgroundColor = Theme.fill(alpha).layerColor }
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.hairline.layerColor
     }
 
     override func updateTrackingAreas() {
@@ -503,7 +723,11 @@ private final class SuggestionButton: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
     override func mouseDown(with event: NSEvent) { isPressed = true }
 
     override func mouseUp(with event: NSEvent) {
@@ -526,7 +750,7 @@ private final class SuggestionButton: NSView {
 final class Composer: NSView {
     let textView = PlaceholderTextView()
     let sendButton = NSButton()
-    let attachButton = NSButton()
+    let attachButton = Theme.iconButton("paperclip", label: "Attach Images")
     var onImages: (([NSImage]) -> Void)?
     var onOpenImage: ((Int) -> Void)?
     private let undo = UndoManager()
@@ -549,7 +773,7 @@ final class Composer: NSView {
         }
     }
 
-    private static let font = NSFont.systemFont(ofSize: 13)
+    private static let font = NSFont.systemFont(ofSize: Theme.FontSize.body)
     private static let maxLines: CGFloat = 8
     private static let sendImage = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: "Send")?
         .withSymbolConfiguration(.init(pointSize: 22, weight: .regular))
@@ -573,7 +797,18 @@ final class Composer: NSView {
         set { textView.placeholder = newValue }
     }
 
+    /// Drawn instead of `placeholder` when that doesn't fit the field.
+    var shortPlaceholder: String {
+        get { textView.shortPlaceholder }
+        set { textView.shortPlaceholder = newValue }
+    }
+
     var isBusy = false {
+        didSet { updateSendButton() }
+    }
+
+    /// Messages wait to be sent, which an empty field can send.
+    var hasQueued = false {
         didSet { updateSendButton() }
     }
 
@@ -596,6 +831,9 @@ final class Composer: NSView {
         textView.onFocusChange = { [weak self] in self?.needsDisplay = true }
         textView.onPasteboardImages = { [weak self] pasteboard in self?.takeImages(from: pasteboard) ?? false }
         textView.imageDropTarget = self
+        // The placeholder is drawn by hand, so VoiceOver gets it, and a
+        // name for the field, from here.
+        textView.setAccessibilityLabel("Message")
         registerForDraggedTypes(AgentAttachment.pasteboardTypes)
 
         thumbnails.isHidden = true
@@ -617,14 +855,6 @@ final class Composer: NSView {
         sendButton.imagePosition = .imageOnly
         updateSendButton()
 
-        attachButton.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach Images")?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
-        attachButton.toolTip = "Attach Images"
-        attachButton.isBordered = false
-        attachButton.bezelStyle = .accessoryBarAction
-        attachButton.imagePosition = .imageOnly
-        attachButton.contentTintColor = .secondaryLabelColor
-
         for view in [thumbnails, scrollView, attachButton, sendButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -643,20 +873,16 @@ final class Composer: NSView {
             textHeight,
             attachButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             attachButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            attachButton.widthAnchor.constraint(equalToConstant: 26),
-            attachButton.heightAnchor.constraint(equalToConstant: 26),
             sendButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             sendButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            sendButton.widthAnchor.constraint(equalToConstant: 26),
-            sendButton.heightAnchor.constraint(equalToConstant: 26),
+            sendButton.widthAnchor.constraint(equalToConstant: Theme.ButtonSize.bar),
+            sendButton.heightAnchor.constraint(equalToConstant: Theme.ButtonSize.bar),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private static var lineHeight: CGFloat {
-        NSLayoutManager().defaultLineHeight(for: font)
-    }
+    private static let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
 
     func textChanged() {
         guard let layoutManager = textView.layoutManager, let container = textView.textContainer else { return }
@@ -670,22 +896,32 @@ final class Composer: NSView {
 
     private func updateSendButton() {
         let empty = textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty
-        sendButton.image = isBusy ? Self.stopImage : Self.sendImage
-        sendButton.toolTip = isBusy ? "Stop (Esc)" : "Send (Return)"
-        sendButton.contentTintColor = isBusy ? .labelColor : empty ? .tertiaryLabelColor : .controlAccentColor
-        sendButton.isEnabled = isBusy || !empty
+        // While a turn runs, a written message is queued instead.
+        let stops = isBusy && empty
+        sendButton.image = stops ? Self.stopImage : Self.sendImage
+        sendButton.toolTip = stops ? "Stop (⎋)" : isBusy ? "Queue (↩) · Stop and Send (⌃↩)" : "Send (↩)"
+        // A disabled button fades its image itself, so an empty field's
+        // arrow starts from secondary rather than fading twice.
+        sendButton.contentTintColor = stops ? .labelColor : empty && !hasQueued ? .secondaryLabelColor : Theme.accentColor
+        sendButton.isEnabled = isBusy || !empty || hasQueued
     }
 
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
         let focused = window?.firstResponder === textView
-        layer?.cornerRadius = 16
+        // The same corners as the skill picker that opens above it.
+        layer?.cornerRadius = Theme.Radius.plate
         layer?.cornerCurve = .continuous
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.7).cgColor
-        layer?.borderWidth = isDropTarget ? 2 : 1
-        layer?.borderColor = (isDropTarget ? NSColor.controlAccentColor
-            : focused ? NSColor.controlAccentColor.withAlphaComponent(0.6) : NSColor.separatorColor).cgColor
+        // See-through over the panel's material, unless Reduce Transparency is on.
+        let background: CGFloat = Theme.reduceTransparency ? 1 : 0.7
+        layer?.backgroundColor = NSColor.controlBackgroundColor.dynamic(alpha: background).layerColor
+        let border: NSColor = isDropTarget ? Theme.accentColor
+            : focused ? Theme.accent(Theme.Accent.outline) : Theme.hairline
+        withEasing(Theme.Duration.quick) {
+            layer?.borderWidth = isDropTarget ? 2 : Theme.hairlineWidth
+            layer?.borderColor = border.layerColor
+        }
     }
 
     /// Clicks anywhere in the box go to the text.
@@ -722,6 +958,170 @@ final class Composer: NSView {
     }
 }
 
+// MARK: Queued messages
+
+/// The messages written while a turn runs, above the tab bar: one row each,
+/// which a click takes back into the field and its close button removes.
+/// Empty, it takes no room.
+final class QueuedMessagesView: NSView {
+    var onEdit: ((Int) -> Void)?
+    var onRemove: ((Int) -> Void)?
+    var onSendNow: (() -> Void)?
+
+    private let stack = NSStackView()
+    private let header = NSStackView()
+    private let headerLabel = NSTextField(labelWithString: "")
+    private let sendNowButton = NSButton(title: "Send Now", target: nil, action: nil)
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        headerLabel.font = .systemFont(ofSize: Theme.FontSize.caption, weight: .medium)
+        headerLabel.textColor = .secondaryLabelColor
+        headerLabel.lineBreakMode = .byTruncatingTail
+        headerLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sendNowButton.bezelStyle = .accessoryBarAction
+        sendNowButton.controlSize = .small
+        sendNowButton.font = .systemFont(ofSize: Theme.FontSize.caption, weight: .medium)
+        sendNowButton.target = self
+        sendNowButton.action = #selector(sendNow(_:))
+        header.orientation = .horizontal
+        header.spacing = 6
+        header.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 0)
+        header.setViews([headerLabel, sendNowButton], in: .leading)
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Each message's text and how many images it has.
+    func show(_ messages: [(text: String, images: Int)], paused: Bool) {
+        for view in stack.arrangedSubviews { view.removeFromSuperview() }
+        // Room from the transcript only while there is something to show.
+        stack.edgeInsets = NSEdgeInsets(top: messages.isEmpty ? 0 : 6, left: 0, bottom: 0, right: 0)
+        guard !messages.isEmpty else { return }
+        headerLabel.stringValue = paused ? "Queued · paused" : "Queued · sends when this turn finishes"
+        sendNowButton.isHidden = !paused
+        stack.addArrangedSubview(header)
+        for (index, message) in messages.enumerated() {
+            let row = QueuedMessageRow(text: message.text, images: message.images)
+            row.onEdit = { [weak self] in self?.onEdit?(index) }
+            row.onRemove = { [weak self] in self?.onRemove?(index) }
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+    }
+
+    @objc private func sendNow(_ sender: Any?) { onSendNow?() }
+}
+
+/// A queued message's first line, with its image count and a close button.
+private final class QueuedMessageRow: NSView {
+    var onEdit: (() -> Void)?
+    var onRemove: (() -> Void)?
+
+    private let closeButton = HoverButton()
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
+
+    init(text: String, images: Int) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = Theme.Radius.row
+        layer?.cornerCurve = .continuous
+
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        let imageNote = images == 0 ? nil : images == 1 ? "1 image" : "\(images) images"
+        let label = NSTextField(labelWithString: firstLine.isEmpty ? imageNote ?? "" : firstLine)
+        label.font = .systemFont(ofSize: Theme.FontSize.secondary)
+        label.textColor = firstLine.isEmpty ? .secondaryLabelColor : .labelColor
+        label.lineBreakMode = .byTruncatingTail
+        label.cell?.truncatesLastVisibleLine = true
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let count = NSTextField(labelWithString: firstLine.isEmpty ? "" : imageNote ?? "")
+        count.font = .systemFont(ofSize: Theme.FontSize.caption)
+        count.textColor = .secondaryLabelColor
+        count.isHidden = count.stringValue.isEmpty
+
+        closeButton.image = Theme.closeImage(size: 8, label: "Remove from Queue")
+        closeButton.isBordered = false
+        closeButton.bezelStyle = .accessoryBarAction
+        closeButton.imagePosition = .imageOnly
+        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.toolTip = "Remove from Queue"
+        closeButton.plateRadius = 8
+        closeButton.target = self
+        closeButton.action = #selector(remove(_:))
+
+        for view in [label, count, closeButton] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 26),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            count.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
+            count.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.leadingAnchor.constraint(greaterThanOrEqualTo: count.trailingAnchor, constant: 4),
+            closeButton.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 16),
+            closeButton.heightAnchor.constraint(equalToConstant: 16),
+        ])
+
+        toolTip = "Click to edit"
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Queued: " + (firstLine.isEmpty ? imageNote ?? "" : firstLine))
+        setAccessibilityHelp("Takes the message back into the field to edit")
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = Theme.fill(isHovered ? Theme.Fill.hover : Theme.Fill.rest).layerColor
+        layer?.borderWidth = Theme.hairlineWidth
+        layer?.borderColor = Theme.hairline.layerColor
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onEdit?() }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onEdit?()
+        return true
+    }
+
+    @objc private func remove(_ sender: Any?) { onRemove?() }
+}
+
 /// The images Quick Look shows for the panel.
 final class QuickLookItems: NSObject, QLPreviewPanelDataSource {
     var urls: [URL] = []
@@ -739,6 +1139,14 @@ final class QuickLookItems: NSObject, QLPreviewPanelDataSource {
 /// it go to `imageDropTarget`.
 final class PlaceholderTextView: NSTextView {
     var placeholder = "" {
+        didSet {
+            needsDisplay = true
+            setAccessibilityPlaceholderValue(placeholder)
+        }
+    }
+    /// Drawn when `placeholder` would truncate. VoiceOver still reads the
+    /// full one.
+    var shortPlaceholder = "" {
         didSet { needsDisplay = true }
     }
     var onFocusChange: (() -> Void)?
@@ -789,13 +1197,26 @@ final class PlaceholderTextView: NSTextView {
         super.draw(dirtyRect)
         guard string.isEmpty, !placeholder.isEmpty else { return }
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: font ?? .systemFont(ofSize: 13),
+            .font: font ?? .systemFont(ofSize: Theme.FontSize.body),
             .foregroundColor: NSColor.placeholderTextColor,
         ]
-        let origin = NSPoint(x: textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0), y: textContainerOrigin.y)
-        NSAttributedString(string: placeholder, attributes: attributes)
-            .draw(with: NSRect(origin: origin, size: NSSize(width: bounds.width - origin.x, height: bounds.height)),
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        let origin = NSPoint(x: textContainerOrigin.x + padding, y: textContainerOrigin.y)
+        let available = bounds.width - origin.x - textContainerOrigin.x - padding
+        var text = NSAttributedString(string: placeholder, attributes: attributes)
+        // A shorter hint whole reads better than the long one cut off.
+        if !shortPlaceholder.isEmpty, ceil(text.size().width) > available {
+            text = NSAttributedString(string: shortPlaceholder, attributes: attributes)
+        }
+        text.draw(with: NSRect(origin: origin, size: NSSize(width: available, height: bounds.height)),
                   options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    }
+
+    /// The hint that fits depends on the width, so it is drawn again on a resize.
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged, string.isEmpty, !placeholder.isEmpty { needsDisplay = true }
     }
 
     override func becomeFirstResponder() -> Bool {

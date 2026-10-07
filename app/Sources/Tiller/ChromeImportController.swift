@@ -226,7 +226,7 @@ final class ChromeImportController: NSWindowController {
 
     private func buildContent() {
         let heading = NSTextField(labelWithString: "Import from Google Chrome")
-        heading.font = .boldSystemFont(ofSize: 13)
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
 
         let grid = NSGridView()
         grid.rowSpacing = 6
@@ -276,9 +276,10 @@ final class ChromeImportController: NSWindowController {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        let inset = Theme.Padding.sheet
+        stack.edgeInsets = NSEdgeInsets(top: inset, left: inset, bottom: inset, right: inset)
         stack.setCustomSpacing(10, after: heading)
-        buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
+        buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * inset).isActive = true
         stack.widthAnchor.constraint(equalToConstant: 460).isActive = true
         window?.contentView = stack
         window?.setContentSize(stack.fittingSize)
@@ -425,7 +426,7 @@ final class ChromeImportController: NSWindowController {
         for (index, result) in results.enumerated() {
             if index > 0 { text.append(NSAttributedString(string: "\n", attributes: body)) }
             var bold = body
-            bold[.font] = NSFont.boldSystemFont(ofSize: 12)
+            bold[.font] = NSFont.systemFont(ofSize: 12, weight: .semibold)
             text.append(NSAttributedString(string: result.title + ": ", attributes: bold))
             var detail = body
             if result.error != nil { detail[.foregroundColor] = NSColor.systemRed }

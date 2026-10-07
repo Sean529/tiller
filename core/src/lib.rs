@@ -4,6 +4,7 @@
 mod app_mac;
 mod browser;
 mod cookies;
+mod downloads;
 mod ipc;
 
 use cef::*;
@@ -86,14 +87,34 @@ pub unsafe extern "C" fn tiller_core_start(data_dir: *const c_char, extensions: 
 #[unsafe(no_mangle)]
 pub extern "C" fn tiller_core_run() {
     run_message_loop();
+    // No request may reach the UI thread once CEF starts coming down.
+    ipc::stop();
     shutdown();
 }
 
 /// Sets a function run on the main thread when the app is asked to quit (Cmd+Q,
-/// the Dock, logging out), before any tab starts closing. Null clears it.
+/// the Dock, logging out). The handler is then responsible for closing every
+/// tab; the message loop quits when the last browser is gone. Without a handler
+/// the core closes every browser itself. Null clears it.
 #[unsafe(no_mangle)]
 pub extern "C" fn tiller_core_set_quit_handler(handler: Option<unsafe extern "C" fn()>) {
     app_mac::set_quit_handler(handler);
+}
+
+/// Sets the function told about every download's progress, on the main
+/// thread. Null clears it. See `TillerDownloadCallback` in tiller_core.h.
+///
+/// # Safety
+/// `ctx` must stay valid for as long as the handler is set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tiller_core_set_download_handler(ctx: *mut c_void, handler: Option<downloads::Callback>) {
+    downloads::set_handler(ctx, handler);
+}
+
+/// Cancels a download still under way. Its callback reports the change.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_download_cancel(id: u32) {
+    downloads::cancel(id);
 }
 
 /// Creates a browser filling `parent_view` (an `NSView *`). Returns the browser
@@ -211,6 +232,40 @@ pub extern "C" fn tiller_browser_stop_finding(id: c_int) {
     }
 }
 
+/// Opens the system print dialog for the page.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_print(id: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        host.print();
+    }
+}
+
+/// Opens Chromium's developer tools for the tab in a window of their own, or
+/// brings that window forward.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_show_dev_tools(id: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        browser::show_dev_tools(&host, None);
+    }
+}
+
+/// Opens the page's source. It arrives through `open_tab`, as a view-source: page.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_view_source(id: c_int) {
+    if let Some(frame) = browser::get(id).and_then(|b| b.main_frame()) {
+        frame.view_source();
+    }
+}
+
+/// Takes a page out of the fullscreen it asked for, as when the user leaves
+/// the window's full screen first.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_browser_exit_fullscreen(id: c_int) {
+    if let Some(host) = browser::get(id).and_then(|b| b.host()) {
+        host.exit_fullscreen(1);
+    }
+}
+
 /// Runs `code` in the tab's main frame. Nothing comes back.
 ///
 /// # Safety
@@ -276,10 +331,18 @@ pub unsafe extern "C" fn tiller_ipc_start(socket_path: *const c_char, ctx: *mut 
 /// `reply_json` must be a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tiller_ipc_reply(token: u64, reply_json: *const c_char) {
-    let reply = unsafe { cstr(reply_json) };
-    match serde_json::from_str(&reply) {
-        Ok(value) => ipc::reply(token, value),
-        Err(e) => ipc::reply_error(token, format!("bad reply from app: {e}")),
+    if reply_json.is_null() {
+        return ipc::reply_error(token, "bad reply from app: not a JSON object");
+    }
+    // The app serializes the reply itself, so only its shape is checked here,
+    // on the UI thread, rather than every byte of it. The bytes are copied
+    // once and turned into text on the connection's thread.
+    let reply = unsafe { CStr::from_ptr(reply_json) }.to_bytes();
+    let body = reply.trim_ascii();
+    if body.first() == Some(&b'{') && body.last() == Some(&b'}') {
+        ipc::reply_bytes(token, reply.to_vec());
+    } else {
+        ipc::reply_error(token, "bad reply from app: not a JSON object");
     }
 }
 

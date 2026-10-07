@@ -12,7 +12,8 @@ typedef struct TillerBrowserCallbacks {
     void (*loading_state_changed)(void *ctx, bool is_loading, bool can_go_back, bool can_go_forward);
     // PNG bytes of the page's favicon, or len 0 when it has none.
     void (*favicon_changed)(void *ctx, const uint8_t *png, size_t len);
-    // A popup or new-window link. The URL should open in a new tab.
+    // A popup, new-window link, modifier click or link menu item. The URL
+    // should open in a new tab.
     void (*open_tab)(void *ctx, const char *url, bool background);
     // beforeunload passed. Remove the browser's view to finish closing it.
     void (*close_ready)(void *ctx);
@@ -26,6 +27,13 @@ typedef struct TillerBrowserCallbacks {
     void (*find_result)(void *ctx, int count, int active, bool final_update);
     // The page's new size in points, once auto-resize is on. May be NULL.
     void (*auto_resize)(void *ctx, int width, int height);
+    // The page's context menu asked to copy `text`, such as a link's URL.
+    void (*copy_text)(void *ctx, const char *text);
+    // The link under the mouse, or an empty string once it leaves one.
+    void (*status_changed)(void *ctx, const char *text);
+    // The page asked for the whole screen (true), as a video player does, or
+    // gave it back (false).
+    void (*fullscreen_changed)(void *ctx, bool fullscreen);
 } TillerBrowserCallbacks;
 
 // Static version string. Do not free.
@@ -43,6 +51,19 @@ void tiller_core_run(void);
 // Called on the main thread when the app is asked to quit (Cmd+Q, the Dock,
 // logging out), before any tab starts closing. NULL clears it.
 void tiller_core_set_quit_handler(void (*handler)(void));
+
+// A download started, moved on or ended. Called on the main thread.
+// `browser_id` is the tab it came from (-1 if unknown), `path` is where the
+// file is being saved (empty until chosen), `url` is the file's URL and
+// `original_url` the one requested before any redirect, `total` is -1 while
+// the size is unknown, and `state` is 0 while in progress, 1 complete,
+// 2 canceled, 3 failed.
+typedef void (*TillerDownloadCallback)(void *ctx, int browser_id, uint32_t id, const char *path, const char *url,
+                                       const char *original_url, int64_t received, int64_t total, int32_t state);
+// Downloads go to ~/Downloads and are reported through `handler`. NULL clears it.
+void tiller_core_set_download_handler(void *ctx, TillerDownloadCallback handler);
+// Cancels a download still under way. The callback reports the change.
+void tiller_download_cancel(uint32_t id);
 
 // Creates a browser filling `parent_view` (an NSView *). Returns its id or -1.
 int tiller_browser_create(void *parent_view, int width, int height, const char *url,
@@ -68,6 +89,15 @@ void tiller_browser_set_auto_resize(int id, int min_width, int min_height, int m
 void tiller_browser_find(int id, const char *text, bool forward, bool find_next);
 // Ends the search and clears its highlights.
 void tiller_browser_stop_finding(int id);
+
+// Opens the system print dialog for the page.
+void tiller_browser_print(int id);
+// Opens Chromium's developer tools for the tab in their own window.
+void tiller_browser_show_dev_tools(int id);
+// Opens the page's source, which arrives through open_tab as a view-source: page.
+void tiller_browser_view_source(int id);
+// Takes the page out of the fullscreen it asked for.
+void tiller_browser_exit_fullscreen(int id);
 
 // Runs JavaScript in the tab's main frame. Nothing comes back.
 void tiller_browser_execute_js(int id, const char *code);
