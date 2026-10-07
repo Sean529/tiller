@@ -2,7 +2,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// The Settings window (Cmd+,), with General, Passwords, Extensions, Agent,
-/// Skills, Scheduled and Profiles panes. Every change is saved as it is made, in the current profile.
+/// Providers, Skills, Scheduled and Profiles panes. Every change is saved as it is made, in the current profile.
 @MainActor
 final class SettingsWindowController: NSWindowController {
     private let tabs = SettingsTabViewController()
@@ -16,6 +16,7 @@ final class SettingsWindowController: NSWindowController {
             (PasswordsSettingsPane(), "key"),
             (ExtensionsSettingsPane(), "puzzlepiece.extension"),
             (AgentSettingsPane(), "sparkles"),
+            (ProvidersSettingsPane(), "server.rack"),
             (SkillsSettingsPane(), "wand.and.stars"),
             (ScheduledSettingsPane(), "calendar.badge.clock"),
             (ProfilesSettingsPane(), "person.2"),
@@ -347,6 +348,17 @@ class SettingsPane: NSViewController {
         action: Selector
     ) -> NSPopUpButton where T: Equatable {
         let button = NSPopUpButton()
+        fill(button, cases, title: title, image: image, selected: selected)
+        button.target = target
+        button.action = action
+        return button
+    }
+
+    /// Replaces the pop-up's items with `cases`, `selected` picked.
+    static func fill<T: RawRepresentable<String>>(
+        _ button: NSPopUpButton, _ cases: [T], title: (T) -> String, image: ((T) -> NSImage?)? = nil, selected: T
+    ) where T: Equatable {
+        button.removeAllItems()
         for value in cases {
             let icon = image?(value)
             // The pop-up leaves only a couple of points after an item's
@@ -357,9 +369,6 @@ class SettingsPane: NSViewController {
             button.lastItem?.image = icon
         }
         button.selectItem(at: cases.firstIndex(of: selected) ?? 0)
-        button.target = target
-        button.action = action
-        return button
     }
 }
 
@@ -1067,8 +1076,8 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     /// Picks which CLI's model options `modelButton` shows.
     private var modelKindPopUp: NSPopUpButton?
     private lazy var modelButton = NSButton(title: "", target: self, action: #selector(chooseModel(_:)))
-    private var modelKind: AgentKind {
-        (modelKindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentKind.init) ?? .current
+    private var modelKind: AgentChoice {
+        (modelKindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentChoice.init) ?? .current
     }
     /// What the lookup found, for kinds whose lookup has finished. Nil values mean not found.
     private var detected: [AgentKind: String?] = [:]
@@ -1094,7 +1103,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     override func buildRows() {
         let popUp = Self.popUp(
-            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
+            AgentChoice.all, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
             target: self, action: #selector(agentChanged(_:))
         )
         agentPopUp = popUp
@@ -1141,7 +1150,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
         // Like the command row, the popup picks whose options the button shows.
         let modelKindPopUp = Self.popUp(
-            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
+            AgentChoice.all, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
             target: self, action: #selector(modelKindChanged(_:))
         )
         self.modelKindPopUp = modelKindPopUp
@@ -1158,6 +1167,9 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         showModelOptions()
         NotificationCenter.default.addObserver(
             self, selector: #selector(modelsChanged(_:)), name: .agentModelsDidChange, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(providersChanged(_:)), name: .agentProvidersDidChange, object: nil
         )
 
         let checkboxes = AgentTool.allCases.enumerated().map { index, tool in
@@ -1291,7 +1303,19 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     @objc private func modelKindChanged(_ sender: NSPopUpButton) {
         showModelOptions()
-        AgentModelCatalog.refresh(modelKind)
+        if modelKind.provider == nil { AgentModelCatalog.refresh(modelKind.kind) }
+    }
+
+    /// Providers added, renamed or removed in their pane show here too.
+    @objc private func providersChanged(_ notification: Notification) {
+        for popUp in [agentPopUp, modelKindPopUp].compactMap({ $0 }) {
+            let selected = (popUp.selectedItem?.representedObject as? String).flatMap(AgentChoice.init)
+            Self.fill(
+                popUp, AgentChoice.all, title: \.displayName, image: { $0.logo(size: 16) },
+                selected: selected.flatMap { $0.exists ? $0 : nil } ?? .current
+            )
+        }
+        showModelOptions()
     }
 
     @objc private func modelsChanged(_ notification: Notification) {
@@ -1347,8 +1371,8 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     }
 
     @objc private func agentChanged(_ sender: NSPopUpButton) {
-        guard let kind = (sender.selectedItem?.representedObject as? String).flatMap(AgentKind.init) else { return }
-        AgentKind.current = kind
+        guard let kind = (sender.selectedItem?.representedObject as? String).flatMap(AgentChoice.init) else { return }
+        AgentChoice.current = kind
     }
 
     @objc private func tabsChanged(_ sender: NSPopUpButton) {
@@ -1388,7 +1412,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     /// The panel's picker changed the agent.
     @objc private func currentAgentChanged(_ notification: Notification) {
-        agentPopUp?.selectItem(at: AgentKind.allCases.firstIndex(of: .current) ?? 0)
+        agentPopUp?.selectItem(at: AgentChoice.all.firstIndex(of: .current) ?? 0)
     }
 
     @objc private func choosePath(_ sender: NSButton) {

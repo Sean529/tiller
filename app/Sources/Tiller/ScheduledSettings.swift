@@ -296,8 +296,8 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
 
     private static let fieldWidth: CGFloat = 420
 
-    private var kind: AgentKind {
-        (kindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentKind.init) ?? .current
+    private var kind: AgentChoice {
+        (kindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentChoice.init) ?? .current
     }
 
     init(schedule: ScheduledPrompt?) {
@@ -321,7 +321,9 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         addRow("Name:", nameField)
 
         let popUp = SettingsPane.popUp(
-            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: schedule?.kind ?? .current,
+            AgentChoice.all, title: \.displayName, image: { $0.logo(size: 16) },
+            // A removed provider's schedule offers its CLI instead.
+            selected: schedule.map { $0.choice.exists ? $0.choice : AgentChoice($0.kind) } ?? .current,
             target: self, action: #selector(kindChanged(_:))
         )
         kindPopUp = popUp
@@ -431,7 +433,7 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         textView.setAccessibilityLabel("Prompt")
         promptView = textView
         completion = SkillCompletion(textView: textView) { [weak self] in
-            AgentSkillCatalog.skills(for: self?.kind ?? .current)
+            AgentSkillCatalog.skills(for: self?.kind.kind ?? .current)
         }
         let promptRow = addRow("Prompt:", box)
         promptRow.rowAlignment = .none
@@ -635,10 +637,10 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         var name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { name = AgentConversation.title(from: prompt) }
         let tools = zip(AgentTool.allCases, toolBoxes).filter { $0.1.state == .on }.map(\.0)
-        var schedule = original ?? ScheduledPrompt(name: name, prompt: prompt, kind: kind, tools: tools, rule: rule)
+        var schedule = original ?? ScheduledPrompt(name: name, prompt: prompt, choice: kind, tools: tools, rule: rule)
         schedule.name = name
         schedule.prompt = prompt
-        schedule.kind = kind
+        schedule.choice = kind
         schedule.tools = tools
         schedule.modelOptions = modelOptions
         schedule.rule = rule

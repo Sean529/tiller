@@ -98,6 +98,14 @@ Each chat can change its own with the wrench button in the row above the message
 
 The names go in `--tools` and the allow list. Qoder CLI's `dont_ask` refuses built-in tools even when allowed, so with any on Tiller uses `--permission-mode bypass_permissions`; `--tools` still limits which tools exist. The system prompt tells the agent which tools it has and not to act on instructions from pages with them. Your user settings still load, so your hooks, model choice and user-level instructions (such as `~/.claude/CLAUDE.md`) apply.
 
+## Custom providers
+
+Settings > Providers runs Claude Code against another Anthropic-compatible API, such as DeepSeek's `https://api.deepseek.com/anthropic`. Add… asks for a name, the base URL, the API key, how to send the key (`ANTHROPIC_API_KEY`, sent as `x-api-key`, or `ANTHROPIC_AUTH_TOKEN`, sent as a Bearer token), the models, comma separated, and optional `KEY=VALUE` lines of extra environment. The key is kept in the Keychain; the rest in the profile's settings.
+
+Each provider shows as an agent of its own, after the CLIs, in the panel's menu, in Settings > Agent and in the Scheduled sheet, and `save_schedule` takes it as `claude:<id>` (`list_schedules` lists every agent under `agents`). Its model menu lists the provider's models and Custom…, with thinking effort but no context window or fast mode. A chat on it runs the same `claude` with Tiller's `ANTHROPIC_*` variables cleared, then `ANTHROPIC_BASE_URL`, the key, and the chat's model (or the provider's first) as `ANTHROPIC_MODEL`, the Opus, Sonnet and Haiku defaults, `ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL`, so background requests such as titles stay on the provider. The extra lines come last and can override any of them. An `env` block in `~/.claude/settings.json` still wins over all of these.
+
+Removing a provider deletes its key. Its chats stay in history but can't continue, and schedules on it fail until they are given another agent.
+
 ## Antigravity CLI
 
 Antigravity CLI has no flags to limit its tools, choose its MCP servers or add to its system prompt, so it is the least contained of the agents:

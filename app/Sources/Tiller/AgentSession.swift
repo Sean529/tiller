@@ -39,15 +39,9 @@ enum AgentKind: String, CaseIterable, Codable {
     /// The path set in Settings, which overrides the lookup.
     var pathDefaultsKey: String { "agentPath.\(rawValue)" }
 
-    /// The agent new chats start with.
-    static var current: AgentKind {
-        get { Settings.defaults.string(forKey: "agent").flatMap(AgentKind.init) ?? .qodercli }
-        set {
-            guard newValue != current else { return }
-            Settings.defaults.set(newValue.rawValue, forKey: "agent")
-            NotificationCenter.default.post(name: .agentKindDidChange, object: nil)
-        }
-    }
+    /// The CLI new chats start with, whichever provider they use.
+    @MainActor
+    static var current: AgentKind { AgentChoice.current.kind }
 
     /// Print mode with stream-json both ways, only the built-in tools in
     /// `tools`, only the `tiller` MCP server, and all of those allowed without
@@ -200,6 +194,8 @@ struct AgentSetupError: Error {
 @MainActor
 final class AgentSession {
     let kind: AgentKind
+    /// The provider the CLI is pointed at, if the user added one for it.
+    let provider: String?
     /// The built-in tools the agent gets, fixed for the life of the process.
     let tools: [AgentTool]
     /// The model, effort, context and fast mode, also fixed for the process.
@@ -255,10 +251,11 @@ final class AgentSession {
     /// it was started in, since the CLIs keep sessions by folder. `chat` is
     /// the chat's id, which tiller_mcp passes on so Tiller knows who asks.
     init(
-        kind: AgentKind, tools: [AgentTool], options: AgentModelOptions = AgentModelOptions(), chat: String,
-        resuming sessionID: String? = nil, in directory: URL? = nil
+        kind: AgentKind, provider: String? = nil, tools: [AgentTool], options: AgentModelOptions = AgentModelOptions(),
+        chat: String, resuming sessionID: String? = nil, in directory: URL? = nil
     ) {
         self.kind = kind
+        self.provider = provider
         self.chat = chat
         self.tools = tools
         self.options = options
@@ -277,6 +274,13 @@ final class AgentSession {
             }
             throw AgentSetupError("\(kind.rawValue) not found. Install it, or set its path in Settings (Cmd+,).")
         }
+        var providerConfig: AgentProvider?
+        if let provider {
+            guard let config = AgentProviderStore.shared.provider(provider) else {
+                throw AgentSetupError("This chat's provider was removed. Start a new chat, or add the provider again in Settings (Cmd+,).")
+            }
+            providerConfig = config
+        }
         // Creates the skill folders that --add-dir and Codex's skills root name.
         _ = AgentSkillStore.shared
         if kind == .agy { try AgentEnvironment.writeAgyPlugin() }
@@ -294,7 +298,9 @@ final class AgentSession {
         let directory = try self.directory ?? AgentEnvironment.workingDirectory()
         self.directory = directory
         process.currentDirectoryURL = directory
-        process.environment = try AgentEnvironment.environment(for: kind, chat: chat)
+        var environment = try AgentEnvironment.environment(for: kind, chat: chat)
+        providerConfig?.apply(to: &environment, model: options.model)
+        process.environment = environment
 
         // Writing to an agent that has exited should fail, not kill Tiller.
         signal(SIGPIPE, SIG_IGN)

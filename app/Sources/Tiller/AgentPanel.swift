@@ -46,6 +46,9 @@ final class AgentPanelView: NSView {
         NotificationCenter.default.addObserver(
             self, selector: #selector(tabLimitChanged(_:)), name: .agentTabsDidChange, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(providersChanged(_:)), name: .agentProvidersDidChange, object: nil
+        )
         // A new chat follows Settings' options, and the button names the models.
         for name in [Notification.Name.agentModelOptionsDidChange, .agentModelsDidChange] {
             NotificationCenter.default.addObserver(self, selector: #selector(tabLimitChanged(_:)), name: name, object: nil)
@@ -88,11 +91,7 @@ final class AgentPanelView: NSView {
     // MARK: Layout
 
     private func build() {
-        for kind in AgentKind.allCases {
-            agentPicker.addItem(withTitle: kind.displayName)
-            agentPicker.lastItem?.representedObject = kind.rawValue
-            agentPicker.lastItem?.image = kind.logo(size: 16)
-        }
+        fillAgentPicker()
         agentPicker.isBordered = false
         agentPicker.font = .systemFont(ofSize: Theme.FontSize.body, weight: .semibold)
         agentPicker.toolTip = "Agent for this chat"
@@ -232,14 +231,25 @@ final class AgentPanelView: NSView {
     private func refresh() {
         let chat = active
         isBusy = (chats + scheduledChats).contains { $0.isBusy }
-        agentPicker.selectItem(at: AgentKind.allCases.firstIndex(of: chat.kind) ?? 0)
+        if let stale = agentPicker.lastItem, stale.representedObject == nil, !stale.isSeparatorItem {
+            agentPicker.menu?.removeItem(stale)
+        }
+        if let index = agentPicker.itemArray.firstIndex(where: { $0.representedObject as? String == chat.choice.rawValue }) {
+            agentPicker.selectItem(at: index)
+        } else {
+            // A removed provider's chat names it, without offering it.
+            agentPicker.addItem(withTitle: chat.choice.displayName)
+            agentPicker.lastItem?.image = chat.choice.logo(size: 16)
+            agentPicker.lastItem?.isHidden = true
+            agentPicker.select(agentPicker.lastItem)
+        }
         status.show(chat.statusText, busy: chat.statusBusy)
         tabBar.update(
             tabs: chats.map { (title: $0.title, busy: $0.isBusy) },
             selected: activeIndex,
             canAddTab: chats.count < Settings.agentTabs,
             tools: chat.tools,
-            model: (chat.modelOptions.summary(for: chat.kind), chat.modelOptions.isDefault)
+            model: (chat.modelOptions.summary(for: chat.choice), chat.modelOptions.isDefault)
         )
     }
 
@@ -250,7 +260,7 @@ final class AgentPanelView: NSView {
     private func showModelOptions(from button: NSView) {
         let chat = active
         AgentModelMenu.popUp(
-            below: button, kind: chat.kind, options: chat.modelOptions, locked: chat.isBusy,
+            below: button, kind: chat.choice, options: chat.modelOptions, locked: chat.isBusy,
             note: chat.isBusy ? "Stop the agent to change the model." : "Settings sets them for new chats."
         ) { [weak chat] options in
             chat?.setModelOptions(options)
@@ -384,12 +394,30 @@ final class AgentPanelView: NSView {
     /// Picking another agent starts a new chat with it, unless the selected
     /// tab has no messages yet.
     @objc private func agentChanged(_ sender: NSPopUpButton) {
-        guard let raw = sender.selectedItem?.representedObject as? String, let kind = AgentKind(rawValue: raw),
-            kind != active.kind || kind != AgentKind.current
+        guard let raw = sender.selectedItem?.representedObject as? String, let kind = AgentChoice(rawValue: raw),
+            kind != active.choice || kind != AgentChoice.current
         else { return }
-        let startOver = !active.isEmpty && kind != active.kind
-        AgentKind.current = kind
+        let startOver = !active.isEmpty && kind != active.choice
+        AgentChoice.current = kind
         if startOver { newChat() } else { refresh() }
+    }
+
+    /// The CLIs, then the providers added in Settings.
+    private func fillAgentPicker() {
+        agentPicker.removeAllItems()
+        for (index, choice) in AgentChoice.all.enumerated() {
+            if index == AgentKind.allCases.count { agentPicker.menu?.addItem(.separator()) }
+            agentPicker.addItem(withTitle: choice.displayName)
+            agentPicker.lastItem?.representedObject = choice.rawValue
+            agentPicker.lastItem?.image = choice.logo(size: 16)
+        }
+    }
+
+    /// A provider was added, renamed or removed in Settings.
+    @objc private func providersChanged(_ notification: Notification) {
+        fillAgentPicker()
+        refresh()
+        (chats + scheduledChats).forEach { $0.providersChanged() }
     }
 
     /// Settings changed the agent for new chats, which an empty tab shows.
@@ -445,7 +473,7 @@ final class AgentPanelView: NSView {
     /// then; it stays in history. `completion` gets the chat's id and how
     /// its turn ended.
     func runScheduled(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String {
-        let chat = AgentChatView(kind: schedule.kind, tools: schedule.tools, modelOptions: schedule.modelOptions)
+        let chat = AgentChatView(kind: schedule.choice, tools: schedule.tools, modelOptions: schedule.modelOptions)
         attach(chat)
         scheduledChats.append(chat)
         let id = chat.id
@@ -536,9 +564,9 @@ private final class StatusPill: NSView {
 /// What a new chat shows: what the agent can do, and a few things to ask.
 final class AgentEmptyState: NSView {
     var onSuggestion: ((String) -> Void)?
-    var kind: AgentKind? {
+    var kind: AgentChoice? {
         didSet {
-            guard let kind, kind != oldValue else { return }
+            guard let kind, kind != oldValue || title.stringValue != "Ask \(kind.displayName)" else { return }
             title.stringValue = "Ask \(kind.displayName)"
             badge.logo = kind.logo(size: 28)
         }

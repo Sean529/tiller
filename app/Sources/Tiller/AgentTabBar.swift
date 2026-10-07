@@ -386,7 +386,7 @@ final class AgentHistoryController: NSViewController, NSTableViewDataSource, NST
         let subtitle = item.tab.map { "Open in tab \($0 + 1)" } ?? Self.dateText(item.conversation.updated)
         return HistoryCellView(
             title: item.conversation.title,
-            subtitle: subtitle + " · " + item.conversation.kind.displayName
+            subtitle: subtitle + " · " + item.conversation.choice.displayName
                 + (item.conversation.scheduleID == nil ? "" : " · Scheduled"),
             logo: item.conversation.kind.logo(size: 18),
             isCurrent: isCurrent

@@ -291,7 +291,6 @@ private final class SuggestionRow: NSView {
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         url.font = .systemFont(ofSize: Theme.FontSize.secondary)
         url.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
-        url.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.4).isActive = true
         let stack = NSStackView(views: [icon, title, url])
         stack.spacing = 8
         stack.setCustomSpacing(10, after: icon)
@@ -301,6 +300,8 @@ private final class SuggestionRow: NSView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            // Only once the address is in the row: the two need a common ancestor.
+            url.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.4),
         ])
     }
 

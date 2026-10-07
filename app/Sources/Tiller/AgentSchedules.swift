@@ -204,6 +204,8 @@ struct ScheduledPrompt: Codable, Equatable {
     /// What is sent. A leading `/name` calls that skill.
     var prompt: String
     var kind: AgentKind
+    /// The provider its runs use, if the user added one for its CLI.
+    var provider: String?
     var tools: [AgentTool]
     /// The model, effort, context and fast mode its runs use. Nil follows
     /// Settings' for its agent.
@@ -217,14 +219,23 @@ struct ScheduledPrompt: Codable, Equatable {
     /// The chat of the last run.
     var lastChat: String?
 
-    init(name: String, prompt: String, kind: AgentKind, tools: [AgentTool], rule: ScheduleRule) {
+    init(name: String, prompt: String, choice: AgentChoice, tools: [AgentTool], rule: ScheduleRule) {
         id = UUID().uuidString
         self.name = name
         self.prompt = prompt
-        self.kind = kind
+        kind = choice.kind
+        provider = choice.provider
         self.tools = tools
         self.rule = rule
         enabled = true
+    }
+
+    var choice: AgentChoice {
+        get { AgentChoice(kind, provider: provider) }
+        set {
+            kind = newValue.kind
+            provider = newValue.provider
+        }
     }
 
     /// What has to hold before it is saved, from Settings or a chat.
@@ -502,7 +513,7 @@ final class AgentScheduler: NSObject, UNUserNotificationCenterDelegate {
 @MainActor
 enum AgentScheduleControl {
     private struct Caller {
-        var kind: AgentKind?
+        var kind: AgentChoice?
         var tools: Set<AgentTool> = []
         var isScheduledRun = false
     }
@@ -522,7 +533,10 @@ enum AgentScheduleControl {
         }
         switch method {
         case "schedules.list":
-            return ["schedules": store.schedules.map(describe)]
+            return [
+                "schedules": store.schedules.map(describe),
+                "agents": AgentChoice.all.map { ["agent": $0.rawValue, "name": $0.displayName] },
+            ]
         case "schedules.save":
             return try save(params, caller: caller)
         case "schedules.delete":
@@ -542,7 +556,7 @@ enum AgentScheduleControl {
     private static func caller(_ chat: String?) -> Caller {
         guard let chat, let conversation = AgentHistoryStore.shared.conversation(chat) else { return Caller() }
         return Caller(
-            kind: conversation.kind,
+            kind: conversation.choice,
             tools: conversation.kind == .agy ? Set(AgentTool.allCases) : Set(conversation.tools ?? Settings.agentTools),
             isScheduledRun: conversation.scheduleID != nil
         )
@@ -560,8 +574,8 @@ enum AgentScheduleControl {
         let prompt = (params["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let rule = try params["rule"].map(parseRule)
         let kind = try (params["agent"] as? String).map { name in
-            guard let kind = AgentKind(rawValue: name) else {
-                throw ControlError("agent is one of \(AgentKind.allCases.map(\.rawValue).joined(separator: ", ")).")
+            guard let kind = AgentChoice(rawValue: name), kind.exists else {
+                throw ControlError("agent is one of \(AgentChoice.all.map(\.rawValue).joined(separator: ", ")).")
             }
             return kind
         }
@@ -578,7 +592,7 @@ enum AgentScheduleControl {
         var schedule: ScheduledPrompt
         if let original {
             schedule = original
-            let changesWhatRuns = (prompt != nil && prompt != original.prompt) || (kind != nil && kind != original.kind)
+            let changesWhatRuns = (prompt != nil && prompt != original.prompt) || (kind != nil && kind != original.choice)
                 || (tools != nil && Set(tools!) != Set(original.tools))
             if changesWhatRuns, !effectiveTools(of: original).isSubset(of: caller.tools) {
                 throw ControlError("“\(original.name)” can \(names(effectiveTools(of: original).subtracting(caller.tools))), which this chat can't, so its prompt, agent and tools can only be changed in Settings > Scheduled. Its name, timing and whether it is on can still be changed here.")
@@ -587,7 +601,7 @@ enum AgentScheduleControl {
             guard let prompt, !prompt.isEmpty else { throw ControlError("prompt is required for a new schedule.") }
             guard let rule else { throw ControlError("rule is required for a new schedule.") }
             schedule = ScheduledPrompt(
-                name: AgentConversation.title(from: prompt), prompt: prompt, kind: caller.kind ?? .current, tools: [], rule: rule
+                name: AgentConversation.title(from: prompt), prompt: prompt, choice: caller.kind ?? .current, tools: [], rule: rule
             )
         }
         if let tools {
@@ -599,15 +613,15 @@ enum AgentScheduleControl {
         }
         if let prompt { schedule.prompt = prompt }
         if let rule { schedule.rule = rule }
-        if let kind, kind != schedule.kind {
-            schedule.kind = kind
+        if let kind, kind != schedule.choice {
+            schedule.choice = kind
             // Options for one agent don't carry over to another.
             schedule.modelOptions = nil
         }
         if let modelChange {
-            var options = schedule.modelOptions ?? schedule.kind.defaultModelOptions
+            var options = schedule.modelOptions ?? schedule.choice.defaultModelOptions
             modelChange(&options)
-            try checkModelOptions(options, for: schedule.kind)
+            try checkModelOptions(options, for: schedule.choice)
             schedule.modelOptions = options
         }
         if let name = (params["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
@@ -650,7 +664,7 @@ enum AgentScheduleControl {
     }
 
     /// Refuses options the agent doesn't have, saying which it does.
-    private static func checkModelOptions(_ options: AgentModelOptions, for kind: AgentKind) throws {
+    private static func checkModelOptions(_ options: AgentModelOptions, for kind: AgentChoice) throws {
         let name = kind.displayName
         if let effort = options.effort, !kind.effortLevels(model: options.model).contains(effort) {
             let levels = kind.effortLevels(model: options.model)
@@ -660,10 +674,10 @@ enum AgentScheduleControl {
             let sizes = kind.contextSizes.map(\.value)
             if sizes.isEmpty { throw ControlError("\(name) has no context window choice.") }
             if !sizes.contains(context) { throw ControlError("context for \(name) is one of \(sizes.joined(separator: ", ")).") }
-            if kind == .claude, options.model == nil { throw ControlError("context 1m for \(name) needs a model, such as opus.") }
+            if kind.kind == .claude, options.model == nil { throw ControlError("context 1m for \(name) needs a model, such as opus.") }
         }
         if options.fast, kind.fastTier(model: options.model) == nil {
-            throw ControlError("\(name) has no fast mode\(kind == .codex ? " for this model" : "").")
+            throw ControlError("\(name) has no fast mode\(kind.kind == .codex ? " for this model" : "").")
         }
     }
 
@@ -710,10 +724,10 @@ enum AgentScheduleControl {
         }
         rule["text"] = schedule.rule.displayText
         var result: [String: Any] = [
-            "id": schedule.id, "name": schedule.name, "prompt": schedule.prompt, "agent": schedule.kind.rawValue,
+            "id": schedule.id, "name": schedule.name, "prompt": schedule.prompt, "agent": schedule.choice.rawValue,
             "tools": schedule.tools.map(\.rawValue), "rule": rule, "enabled": schedule.enabled,
         ]
-        let options = schedule.modelOptions ?? schedule.kind.defaultModelOptions
+        let options = schedule.modelOptions ?? schedule.choice.defaultModelOptions
         if let model = options.model { result["model"] = model }
         if let effort = options.effort { result["effort"] = effort }
         if let context = options.context { result["context"] = context }

@@ -30,19 +30,19 @@ struct AgentModelOptions: Codable, Equatable {
     /// Only what `kind` can take: options left from another agent, or from a
     /// model without them, are dropped.
     @MainActor
-    func supported(by kind: AgentKind) -> AgentModelOptions {
+    func supported(by kind: AgentChoice) -> AgentModelOptions {
         var options = self
         if let effort, !kind.effortLevels(model: model).contains(effort) { options.effort = nil }
         if let context, !kind.contextSizes.contains(where: { $0.value == context }) { options.context = nil }
         // Claude Code's 1M is a suffix on a model.
-        if kind == .claude, model == nil { options.context = nil }
+        if kind.kind == .claude, model == nil { options.context = nil }
         if fast, kind.fastTier(model: model) == nil { options.fast = false }
         return options
     }
 
     /// Like `opus · high · 1M · fast`, or `default` when nothing is set.
     @MainActor
-    func summary(for kind: AgentKind) -> String {
+    func summary(for kind: AgentChoice) -> String {
         var parts = [model.map { kind.modelName($0) } ?? "default model"]
         if let effort { parts.append(effort) }
         if let context, let size = kind.contextSizes.first(where: { $0.value == context }) { parts.append(size.title) }
@@ -105,7 +105,28 @@ extension AgentKind {
 
     /// The options a new chat with this agent starts with.
     @MainActor
-    var defaultModelOptions: AgentModelOptions { Settings.agentModelOptions(for: self) }
+    var defaultModelOptions: AgentModelOptions { Settings.agentModelOptions(for: AgentChoice(self)) }
+}
+
+/// The CLI's options, except that a provider has its own models and none of
+/// the CLI's context sizes or fast mode, which are Anthropic's.
+extension AgentChoice {
+    @MainActor
+    func effortLevels(model: String?) -> [String] { kind.effortLevels(model: model) }
+
+    var contextSizes: [(value: String, title: String)] { provider == nil ? kind.contextSizes : [] }
+
+    @MainActor
+    func fastTier(model: String?) -> String? { provider == nil ? kind.fastTier(model: model) : nil }
+
+    @MainActor
+    func modelName(_ id: String) -> String { provider == nil ? kind.modelName(id) : id }
+
+    @MainActor
+    var models: [AgentModel] {
+        guard provider != nil else { return AgentModelCatalog.models(for: kind) }
+        return (providerConfig?.models ?? []).map { AgentModel(id: $0, name: $0, efforts: nil, fastTier: nil, isDefault: false) }
+    }
 }
 
 /// The models each CLI offers, asked of the CLI once per launch and kept in
@@ -283,14 +304,14 @@ enum AgentModelCatalog {
 /// has them. Each choice calls `onChange` with the new options.
 @MainActor
 final class AgentModelMenu: NSObject {
-    private let kind: AgentKind
+    private let kind: AgentChoice
     private var options: AgentModelOptions
     private let onChange: (AgentModelOptions) -> Void
     private let menu = NSMenu()
     private var locked = false
     private var note: String?
 
-    private init(kind: AgentKind, options: AgentModelOptions, onChange: @escaping (AgentModelOptions) -> Void) {
+    private init(kind: AgentChoice, options: AgentModelOptions, onChange: @escaping (AgentModelOptions) -> Void) {
         self.kind = kind
         self.options = options
         self.onChange = onChange
@@ -302,10 +323,10 @@ final class AgentModelMenu: NSObject {
     /// Pops the menu up just below `view`. `locked` greys every choice out,
     /// with `note` saying why; `note` otherwise goes at the bottom.
     static func popUp(
-        below view: NSView, kind: AgentKind, options: AgentModelOptions, locked: Bool = false, note: String? = nil,
+        below view: NSView, kind: AgentChoice, options: AgentModelOptions, locked: Bool = false, note: String? = nil,
         onChange: @escaping (AgentModelOptions) -> Void
     ) {
-        AgentModelCatalog.refresh(kind)
+        if kind.provider == nil { AgentModelCatalog.refresh(kind.kind) }
         let controller = AgentModelMenu(kind: kind, options: options, onChange: onChange)
         current = controller
         controller.locked = locked
@@ -341,12 +362,12 @@ final class AgentModelMenu: NSObject {
 
         menu.addItem(.sectionHeader(title: "Model"))
         add("Default", checked: options.model == nil) { $0.model = nil }
-        let models = AgentModelCatalog.models(for: kind)
+        let models = kind.models
         for model in models {
             add(model.isDefault ? model.name + " (default)" : model.name, checked: options.model == model.id) { $0.model = model.id }
         }
         if models.isEmpty {
-            let loading = AgentModelCatalog.loading.contains(kind)
+            let loading = kind.provider == nil && AgentModelCatalog.loading.contains(kind.kind)
             let item = NSMenuItem(title: loading ? "Loading models…" : "No list from \(kind.displayName)", action: nil, keyEquivalent: "")
             item.isEnabled = false
             item.indentationLevel = 1
@@ -377,7 +398,7 @@ final class AgentModelMenu: NSObject {
             menu.addItem(.sectionHeader(title: "Context window"))
             add("Default", checked: options.context == nil) { $0.context = nil }
             // Claude Code's 1M is a suffix on a model.
-            let needsModel = kind == .claude && options.model == nil
+            let needsModel = kind.kind == .claude && options.model == nil
             for size in sizes {
                 add(
                     size.title, checked: options.context == size.value, enabled: !needsModel,
@@ -421,7 +442,7 @@ final class AgentModelMenu: NSObject {
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
         field.stringValue = options.model ?? ""
-        field.placeholderString = AgentModelCatalog.models(for: kind).first?.id ?? "model id"
+        field.placeholderString = kind.models.first?.id ?? "model id"
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }

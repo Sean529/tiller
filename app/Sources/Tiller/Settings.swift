@@ -263,13 +263,14 @@ enum Settings {
 
     static var agentTools: [AgentTool] { AgentTool.allCases.filter(agentToolEnabled) }
 
-    /// The model options new chats with `kind` start with. All the CLI's own by default.
-    static func agentModelOptions(for kind: AgentKind) -> AgentModelOptions {
+    /// The model options new chats with `kind` start with, each provider
+    /// keeping its own. All the CLI's own by default.
+    static func agentModelOptions(for kind: AgentChoice) -> AgentModelOptions {
         defaults.data(forKey: "agentModelOptions.\(kind.rawValue)")
             .flatMap { try? JSONDecoder().decode(AgentModelOptions.self, from: $0) } ?? AgentModelOptions()
     }
 
-    static func setAgentModelOptions(_ options: AgentModelOptions, for kind: AgentKind) {
+    static func setAgentModelOptions(_ options: AgentModelOptions, for kind: AgentChoice) {
         let key = "agentModelOptions.\(kind.rawValue)"
         if options.isDefault {
             defaults.removeObject(forKey: key)

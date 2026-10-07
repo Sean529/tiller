@@ -5,6 +5,8 @@ import Foundation
 struct AgentConversation: Codable, Equatable {
     let id: String
     var kind: AgentKind
+    /// The provider the chat runs on, if the user added one for its CLI.
+    var provider: String? = nil
     /// The first message's first line until the agent names the chat.
     var title: String
     var sessionID: String?
@@ -21,6 +23,8 @@ struct AgentConversation: Codable, Equatable {
     var scheduleID: String?
     var created: Date
     var updated: Date
+
+    var choice: AgentChoice { AgentChoice(kind, provider: provider) }
 
     /// The first line of the first message, shortened.
     static func title(from text: String) -> String {

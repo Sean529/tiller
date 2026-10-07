@@ -23,14 +23,15 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     var isBusy: Bool { session?.isBusy == true }
     /// A new chat uses the agent picked for new chats until its first
     /// message, unless it was made for another.
-    var kind: AgentKind { conversation?.kind ?? presetKind ?? .current }
+    var choice: AgentChoice { conversation?.choice ?? presetKind ?? .current }
+    var kind: AgentKind { choice.kind }
     var title: String { conversation?.title ?? "New Chat" }
     /// The built-in tools this chat allows. A new chat starts with Settings'.
     private(set) var tools: [AgentTool]
     /// The model, effort, context and fast mode this chat runs with. A new
     /// chat follows Settings' for its agent until one is picked for it.
     var modelOptions: AgentModelOptions {
-        (conversation?.modelOptions ?? pickedOptions ?? kind.defaultModelOptions).supported(by: kind)
+        (conversation?.modelOptions ?? pickedOptions ?? choice.defaultModelOptions).supported(by: choice)
     }
     /// Picked for a new chat before its first message.
     private var pickedOptions: AgentModelOptions?
@@ -57,7 +58,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// what Tiller finds on disk.
     private var loadedSkills: [AgentSkill]?
     /// The agent a new chat was made for, such as a scheduled run's.
-    private let presetKind: AgentKind?
+    private let presetKind: AgentChoice?
     /// Called once when a scheduled run's turn ends, with how it went.
     private var runCompletion: ((AgentRunOutcome) -> Void)?
 
@@ -119,7 +120,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// A new chat, or a saved one with its transcript. A new chat can be
     /// given its agent, tools and model options instead of those in Settings.
     init(
-        conversation: AgentConversation? = nil, kind: AgentKind? = nil, tools: [AgentTool]? = nil,
+        conversation: AgentConversation? = nil, kind: AgentChoice? = nil, tools: [AgentTool]? = nil,
         modelOptions: AgentModelOptions? = nil
     ) {
         id = conversation?.id ?? UUID().uuidString
@@ -374,6 +375,11 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         scrollView.reflectScrolledClipView(clip)
     }
 
+    /// A provider's name may have changed.
+    func providersChanged() {
+        if session == nil { showIdle() }
+    }
+
     /// Settings or the picker changed the agent for new chats.
     @objc private func currentAgentChanged(_ notification: Notification) {
         // Options picked for one agent don't carry over to another.
@@ -564,7 +570,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     ) {
         loadIfNeeded(now: true)
         var conversation = conversation ?? AgentConversation(
-            id: id, kind: kind, title: schedule?.name ?? AgentConversation.title(from: text), created: Date(), updated: Date()
+            id: id, kind: kind, provider: choice.provider, title: schedule?.name ?? AgentConversation.title(from: text), created: Date(), updated: Date()
         )
         if let schedule, conversation.scheduleID == nil { conversation.scheduleID = schedule.id }
         conversation.tools = tools
@@ -631,7 +637,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             directory = URL(fileURLWithPath: path)
         }
         let session = AgentSession(
-            kind: conversation.kind, tools: tools, options: modelOptions, chat: id, resuming: conversation.sessionID,
+            kind: conversation.kind, provider: conversation.provider, tools: tools, options: modelOptions, chat: id, resuming: conversation.sessionID,
             in: directory
         )
         session.onEvent = { [weak self] event in self?.handle(event) }
@@ -828,7 +834,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             showIdle()
             readTitle()
             finishRun(error.map { .failed($0) } ?? (stopped ? .stopped : .finished(lastAgentText)))
-            if error == nil { announce(stopped ? "Stopped" : Self.firstLine(of: lastAgentText) ?? "\(kind.displayName) finished") }
+            if error == nil { announce(stopped ? "Stopped" : Self.firstLine(of: lastAgentText) ?? "\(choice.displayName) finished") }
             turnEnded(finished: error == nil && !stopped)
         case .exited(let message):
             keepLiveText()
@@ -839,7 +845,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 // The saved session couldn't be continued, so start over.
                 conversation?.sessionID = nil
                 if let conversation { save(conversation) }
-                addError((message ?? "\(kind.displayName) couldn't continue this chat.")
+                addError((message ?? "\(choice.displayName) couldn't continue this chat.")
                     + "\nThe next message starts a new conversation, without what was said before.", action: tryAgain)
             } else if let message {
                 addError(message + "\nThe next message continues the conversation.", action: tryAgain)
@@ -847,7 +853,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             session = nil
             resuming = false
             showIdle()
-            finishRun(.failed(message ?? "\(kind.displayName) stopped."))
+            finishRun(.failed(message ?? "\(choice.displayName) stopped."))
             turnEnded(finished: false)
         }
         if follow { scrollToBottom() } else { updateScrollDownButtonAfterLayout() }
@@ -941,9 +947,9 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private func showIdle() {
         setBusy(false)
         setStatus(session == nil ? "" : "Ready", busy: false)
-        composer.placeholder = "Ask \(kind.displayName) about this page…"
-        composer.shortPlaceholder = "Ask \(kind.displayName)…"
-        emptyState.kind = kind
+        composer.placeholder = "Ask \(choice.displayName) about this page…"
+        composer.shortPlaceholder = "Ask \(choice.displayName)…"
+        emptyState.kind = choice
         let showEmpty = transcript.isEmpty && recordsLoaded
         if showEmpty { emptyState.alphaValue = 1 }
         emptyState.isHidden = !showEmpty
