@@ -49,7 +49,7 @@ Popups and `target=_blank` links open as new tabs too. Each is a separate browse
 | Cmd+R / Cmd+. | Reload / stop |
 | Cmd+P | Print the page, through the system print dialog |
 | Cmd+Option+I | Developer Tools, Chromium's, in a window of their own |
-| Cmd+Option+U | View the page's source in a new tab |
+| Cmd+Option+U, Cmd+Shift+U | View the page's source in a new tab |
 | Ctrl+Cmd+F | Enter or leave full screen |
 
 While the mouse is over a link, its address shows in a small plate at the bottom left of the page. A page that asks for the whole screen, as a video player does, takes the window to full screen with the sidebar and the agent panel out of the way, and gives them back when it is done; leaving full screen with the green button or Escape ends the page's fullscreen too.

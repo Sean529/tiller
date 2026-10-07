@@ -87,6 +87,8 @@ enum MainMenu {
         view.addItem(.separator())
         let source = view.addItem(withTitle: "View Page Source", action: #selector(BrowserWindowController.viewPageSource(_:)), keyEquivalent: "u")
         source.keyEquivalentModifierMask = [.command, .option]
+        // Cmd+Shift+U shows the source too.
+        hidden(view, "View Page Source", #selector(BrowserWindowController.viewPageSource(_:)), "u", [.command, .shift])
         let devTools = view.addItem(withTitle: "Developer Tools", action: #selector(BrowserWindowController.showDevTools(_:)), keyEquivalent: "i")
         devTools.keyEquivalentModifierMask = [.command, .option]
         view.addItem(.separator())
