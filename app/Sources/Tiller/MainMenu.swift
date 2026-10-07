@@ -13,6 +13,10 @@ enum MainMenu {
 
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Tiller", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        if Updater.isAvailable {
+            let update = appMenu.addItem(withTitle: "Check for Updates…", action: #selector(Updater.checkForUpdates(_:)), keyEquivalent: "")
+            update.target = Updater.shared
+        }
         appMenu.addItem(.separator())
         // Reaches the AppDelegate at the end of the responder chain.
         appMenu.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")

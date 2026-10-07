@@ -116,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Tiller: control socket unavailable, agent tools will not work")
         }
         AgentScheduler.shared.start(browser: controller)
+        Updater.shared.start()
         NSApp.activate()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak controller] in
             MainActor.assumeIsolated { DefaultBrowser.askOnce(on: controller?.window) }

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Builds the Rust crates and the Swift app, then assembles and ad-hoc signs
+# Builds the Rust crates and the Swift app, then assembles and signs
 # build/Tiller.app. Usage: scripts/bundle.sh [debug|release]   (default: release)
 # TILLER_OUT and TILLER_BUNDLE_ID build a second copy with settings of its own,
 # for trying changes while the everyday Tiller keeps running.
+# The app is ad-hoc signed unless TILLER_SIGN_IDENTITY names a Developer ID
+# certificate, which signs it for the hardened runtime and turns on updates.
 set -euo pipefail
 
 CONFIG="${1:-release}"
@@ -10,8 +12,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${TILLER_OUT:-$ROOT/build}"
 APP="$OUT/Tiller.app"
 BUNDLE_ID="${TILLER_BUNDLE_ID:-dev.sorrycc.tiller}"
-VERSION="0.1.0"
+# The version is the workspace's; the build number counts commits, so it
+# goes up with every release, betas included, as Sparkle needs.
+VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
+BUILD="${TILLER_BUILD:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
+IDENTITY="${TILLER_SIGN_IDENTITY:--}"
+FEED_URL="https://sorrycc.github.io/tiller/appcast.xml"
 FRAMEWORK="Chromium Embedded Framework.framework"
+SPARKLE="Sparkle.framework"
 HELPERS=("Helper" "Helper (GPU)" "Helper (Renderer)" "Helper (Plugin)" "Helper (Alerts)")
 
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
@@ -47,9 +55,19 @@ SWIFT_OUT="$(swift build --package-path "$ROOT/app" -c "$CONFIG" --show-bin-path
 # SwiftPM doesn't track the Rust static library, so a Rust-only change would
 # not relink. Removing the executable forces the link step.
 rm -f "$SWIFT_OUT/Tiller"
-swift build --package-path "$ROOT/app" -c "$CONFIG" -Xlinker -L"$RUST_OUT" -Xlinker -dead_strip
+swift build --package-path "$ROOT/app" -c "$CONFIG" -Xlinker -L"$RUST_OUT" -Xlinker -dead_strip \
+    -Xlinker -rpath -Xlinker @executable_path/../Frameworks
 
-echo "==> assembling $APP"
+SPARKLE_KEY=""
+if [ "$IDENTITY" != "-" ]; then
+    SPARKLE_KEY="$(tr -d '[:space:]' < "$ROOT/scripts/sparkle-public-key" 2>/dev/null || true)"
+    if [ -z "$SPARKLE_KEY" ]; then
+        echo "scripts/sparkle-public-key is missing. See README.md > Releasing." >&2
+        exit 1
+    fi
+fi
+
+echo "==> assembling $APP ($VERSION, build $BUILD)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 
@@ -60,6 +78,12 @@ write_plist() {
     local icon=""
     [ "$4" = "0" ] && icon="<key>CFBundleIconFile</key><string>Tiller</string>"
     # Web links and HTML files, so macOS offers Tiller as the default browser.
+    # Updates, only for a build signed to be released.
+    local updates=""
+    [ "$4" = "0" ] && [ "$IDENTITY" != "-" ] && updates="<key>SUFeedURL</key><string>$FEED_URL</string>
+    <key>SUPublicEDKey</key><string>$SPARKLE_KEY</string>
+    <key>SUEnableAutomaticChecks</key><true/>
+    <key>SUAutomaticallyUpdate</key><true/>"
     local browser=""
     [ "$4" = "0" ] && browser="<key>CFBundleURLTypes</key><array><dict>
         <key>CFBundleURLName</key><string>Web site URL</string>
@@ -84,7 +108,7 @@ write_plist() {
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
-    <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD</string>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSEnvironment</key><dict><key>MallocNanoZone</key><string>0</string></dict>
@@ -97,6 +121,7 @@ write_plist() {
     $ui_element
     $browser
     $icon
+    $updates
 </dict>
 </plist>
 PLIST
@@ -123,6 +148,10 @@ find "$APP/Contents/Frameworks/$FRAMEWORK/Resources" -maxdepth 1 -name '*.lproj'
     -exec rm -rf {} +
 rm -f "$APP/Contents/Frameworks/$FRAMEWORK/Libraries/"{libvk_swiftshader.dylib,libvulkan.dylib,vk_swiftshader_icd.json}
 
+# Sparkle's XPC services are for sandboxed apps only.
+ditto "$SWIFT_OUT/$SPARKLE" "$APP/Contents/Frameworks/$SPARKLE"
+rm -rf "$APP/Contents/Frameworks/$SPARKLE/XPCServices" "$APP/Contents/Frameworks/$SPARKLE/Versions/B/XPCServices"
+
 for suffix in "${HELPERS[@]}"; do
     name="Tiller $suffix"
     helper="$APP/Contents/Frameworks/$name.app"
@@ -132,14 +161,29 @@ for suffix in "${HELPERS[@]}"; do
     write_plist "$helper/Contents" "$name" "$BUNDLE_ID.$id_suffix" 1
 done
 
-echo "==> ad-hoc signing"
-codesign --force --sign - "$APP/Contents/Frameworks/$FRAMEWORK"
-for suffix in "${HELPERS[@]}"; do
-    codesign --force --sign - "$APP/Contents/Frameworks/Tiller $suffix.app"
+# Inside out: the code in each bundle before the bundle. A Developer ID
+# signature adds the hardened runtime and a timestamp, which notarization needs.
+sign_flags=(--force --sign "$IDENTITY")
+if [ "$IDENTITY" = "-" ]; then
+    echo "==> ad-hoc signing"
+else
+    echo "==> signing as $IDENTITY"
+    sign_flags+=(--options runtime --timestamp)
+fi
+sign() { codesign "${sign_flags[@]}" "$@"; }
+for dylib in "$APP/Contents/Frameworks/$FRAMEWORK/Libraries/"*.dylib; do
+    sign "$dylib"
 done
-codesign --force --sign - "$APP/Contents/MacOS/tiller_mcp"
-codesign --force --sign - "$APP/Contents/Helpers/tiller"
-codesign --force --sign - "$APP"
+sign "$APP/Contents/Frameworks/$FRAMEWORK"
+sign "$APP/Contents/Frameworks/$SPARKLE/Versions/B/Autoupdate"
+sign "$APP/Contents/Frameworks/$SPARKLE/Versions/B/Updater.app"
+sign "$APP/Contents/Frameworks/$SPARKLE"
+for suffix in "${HELPERS[@]}"; do
+    sign --entitlements "$ROOT/app/Helper.entitlements" "$APP/Contents/Frameworks/Tiller $suffix.app"
+done
+sign "$APP/Contents/MacOS/tiller_mcp"
+sign "$APP/Contents/Helpers/tiller"
+sign --entitlements "$ROOT/app/Tiller.entitlements" "$APP"
 
 echo "==> verifying signature"
 codesign --verify --deep --strict "$APP"

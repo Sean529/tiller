@@ -6,11 +6,18 @@ import PackageDescription
 let package = Package(
     name: "Tiller",
     platforms: [.macOS(.v26)],
+    dependencies: [
+        // Updates. bundle.sh copies Sparkle.framework into the app.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0"),
+    ],
     targets: [
         .systemLibrary(name: "CTillerCore", path: "Sources/CTillerCore"),
         .executableTarget(
             name: "Tiller",
-            dependencies: ["CTillerCore"],
+            dependencies: [
+                "CTillerCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             linkerSettings: [
                 .linkedLibrary("c++"),
             ]

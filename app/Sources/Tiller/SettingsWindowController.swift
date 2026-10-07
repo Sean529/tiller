@@ -466,6 +466,19 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         addRow("Custom search URL:", Self.fixWidth(templateField))
         addNote(templateNote)
         showTemplateState()
+
+        if Updater.isAvailable {
+            let automatic = NSButton(checkboxWithTitle: "Check automatically", target: self, action: #selector(automaticUpdatesChanged(_:)))
+            automatic.state = Updater.shared.automaticallyChecks ? .on : .off
+            let betas = NSButton(checkboxWithTitle: "Include beta versions", target: self, action: #selector(betaUpdatesChanged(_:)))
+            betas.state = Updater.includesBetas ? .on : .off
+            let updates = NSStackView(views: [automatic, betas])
+            updates.orientation = .vertical
+            updates.alignment = .leading
+            updates.spacing = 6
+            Self.linkLabel(of: addRow("Updates:", updates), to: automatic)
+            addNote(Self.note("For every profile."))
+        }
     }
 
     /// An import from Chrome may have changed these while the window was closed.
@@ -548,6 +561,14 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
             dot.stroke()
             return true
         }
+    }
+
+    @objc private func automaticUpdatesChanged(_ sender: NSButton) {
+        Updater.shared.automaticallyChecks = sender.state == .on
+    }
+
+    @objc private func betaUpdatesChanged(_ sender: NSButton) {
+        Updater.includesBetas = sender.state == .on
     }
 
     @objc private func searchEngineChanged(_ sender: NSPopUpButton) {
