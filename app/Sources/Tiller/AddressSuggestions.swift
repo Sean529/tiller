@@ -148,6 +148,10 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
 
     private func show(_ pages: [HistoryPage], for text: String) {
         shownPages = pages
+        // A page the text's own row already opens, give or take scheme and
+        // "www.", is left out.
+        let typedAddress = HistoryStore.bare(AddressInput.url(for: text)).lowercased()
+        let pages = pages.filter { HistoryStore.bare($0.url).lowercased() != typedAddress }
         rows = [.input(text)] + pages.map(Suggestion.page)
         guard let window = addressBar.window else { return hide() }
         for (index, row) in pool.enumerated() {

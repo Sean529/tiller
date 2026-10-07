@@ -160,7 +160,8 @@ final class HistoryStore: @unchecked Sendable {
 
     /// Pages whose URL or title contains `text`, best first: URLs that start
     /// with it, then titles with a word that starts with it, then the rest,
-    /// each by visit count, with their sites' favicons. `completion` runs on the store's queue. A search
+    /// each by visit count, with their sites' favicons. Of pages that differ
+    /// only in scheme or "www.", only the first is kept. `completion` runs on the store's queue. A search
     /// that a newer one replaces before it runs never completes, so typing
     /// fast doesn't queue up a scan per keystroke.
     func search(_ text: String, limit: Int, completion: @escaping @Sendable ([HistoryPage]) -> Void) {
@@ -186,7 +187,10 @@ final class HistoryStore: @unchecked Sendable {
             }
             // A stable sort keeps the query's visit-count order within each rank.
             let best = ranked.enumerated().sorted { ($0.element.1, -$0.offset) > ($1.element.1, -$1.offset) }
-            let top = best.prefix(limit).map(\.element.0)
+            // Pages that differ only in scheme or "www." look the same in the
+            // list, so only the best of them is kept.
+            var seen = Set<String>()
+            let top = best.map(\.element.0).filter { seen.insert(Self.bare($0.url).lowercased()).inserted }.prefix(limit)
             let icons = Self.icons(for: Array(Set(top.compactMap { Self.host(of: $0.url) })), in: db)
             completion(top.map { page in
                 var page = page
