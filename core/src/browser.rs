@@ -47,6 +47,9 @@ pub static EXTENSIONS: OnceLock<String> = OnceLock::new();
 
 thread_local! {
     static BROWSERS: RefCell<HashMap<i32, Entry>> = RefCell::new(HashMap::new());
+    /// Native script popups (OAuth windows). CEF owns their windows, but they
+    /// must close before CEF shuts down.
+    static POPUPS: RefCell<HashMap<i32, Browser>> = RefCell::new(HashMap::new());
     static DEVTOOLS_CALLS: RefCell<HashMap<i32, PendingCall>> = RefCell::new(HashMap::new());
     static NEXT_MESSAGE_ID: Cell<i32> = const { Cell::new(1) };
 }
@@ -61,6 +64,27 @@ fn callbacks_for(browser: Option<&mut Browser>) -> Option<Callbacks> {
 
 fn callbacks_for_id(id: i32) -> Option<Callbacks> {
     BROWSERS.with_borrow(|map| map.get(&id).and_then(|e| e.callbacks))
+}
+
+/// Callbacks of the tab that should handle `browser`'s requests: the tab
+/// itself, or for a native popup its opener tab, else any tab.
+fn tab_callbacks_for(browser: Option<&mut Browser>) -> Option<Callbacks> {
+    let browser = browser?;
+    if let Some(cb) = callbacks_for_id(browser.identifier()) {
+        return Some(cb);
+    }
+    let opener = browser.host().map(|h| h.opener_identifier()).unwrap_or(0);
+    callbacks_for_id(opener).or_else(|| BROWSERS.with_borrow(|map| map.values().find_map(|e| e.callbacks)))
+}
+
+fn close_popups() {
+    // Collect first: closing can call back into handlers that borrow the map.
+    let popups: Vec<Browser> = POPUPS.with_borrow(|map| map.values().cloned().collect());
+    for popup in popups {
+        if let Some(host) = popup.host() {
+            host.close_browser(0);
+        }
+    }
 }
 
 fn to_cstring(s: Option<&CefString>) -> CString {
@@ -108,15 +132,17 @@ pub fn close(id: i32) {
     }
 }
 
-/// Starts closing every browser. Each one runs its beforeunload handlers, then
-/// asks its window to close. Quits right away when no browser exists.
+/// Starts closing every browser, native popups included. Each one runs its
+/// beforeunload handlers, then asks its window to close. Quits right away when
+/// no browser exists.
 pub fn close_all() {
     // Collect first: closing can call back into handlers that borrow the map.
     let browsers: Vec<Browser> = BROWSERS.with_borrow(|map| map.values().map(|e| e.browser.clone()).collect());
-    if browsers.is_empty() {
+    if browsers.is_empty() && POPUPS.with_borrow(|map| map.is_empty()) {
         quit_message_loop();
         return;
     }
+    close_popups();
     for browser in browsers {
         if let Some(host) = browser.host() {
             host.close_browser(0);
@@ -411,12 +437,21 @@ wrap_life_span_handler! {
                 // Let CEF create the popup, preserving opener and request context.
                 return 0;
             }
-            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.open_tab {
+            // A new-tab link inside a native popup opens in its opener's window.
+            if let Some(cb) = tab_callbacks_for(browser) && let Some(f) = cb.open_tab {
                 let url = to_cstring(target_url);
                 let background = target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB;
                 unsafe { f(cb.ctx, url.as_ptr(), background) };
             }
             1
+        }
+
+        /// Tabs register in `create`; only script popups reach here unregistered.
+        fn on_after_created(&self, browser: Option<&mut Browser>) {
+            let Some(browser) = browser else { return };
+            if browser.is_popup() != 0 {
+                POPUPS.with_borrow_mut(|map| map.insert(browser.identifier(), browser.clone()));
+            }
         }
 
         /// A tab closing must not close the window, so instead of letting CEF
@@ -426,6 +461,12 @@ wrap_life_span_handler! {
             let Some(browser) = browser else { return 0 };
             let is_tab = BROWSERS.with_borrow(|map| map.contains_key(&browser.identifier()));
             if is_tab {
+                // A closed popup finishes tearing down only on the main window's
+                // next redraw, so close popups while the last tab's view is still
+                // up rather than after the window is gone.
+                if BROWSERS.with_borrow(|map| map.len()) == 1 {
+                    close_popups();
+                }
                 if let Some(cb) = callbacks_for(Some(browser)) && let Some(f) = cb.close_ready {
                     unsafe { f(cb.ctx) };
                 }
@@ -438,18 +479,45 @@ wrap_life_span_handler! {
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             let Some(browser) = browser else { return };
             let id = browser.identifier();
+            if POPUPS.with_borrow_mut(|map| map.remove(&id)).is_some() {
+                // The last popup closing after the last tab finishes the quit.
+                if BROWSERS.with_borrow(|map| map.is_empty()) && POPUPS.with_borrow(|map| map.is_empty()) {
+                    quit_message_loop();
+                }
+                return;
+            }
             if !BROWSERS.with_borrow(|map| map.contains_key(&id)) {
-                return; // A native popup must not affect the tab registry or app lifetime.
+                return;
             }
             fail_devtools_calls(id);
             let empty = BROWSERS.with_borrow_mut(|map| {
                 map.remove(&id);
                 map.is_empty()
             });
-            // One window for now, so the last tab closing quits the app.
+            // One window for now, so the last tab closing quits the app. Popups
+            // left open close first, so no bare popup window lingers and CEF
+            // never shuts down with a live browser.
             if empty {
-                quit_message_loop();
+                if POPUPS.with_borrow(|map| map.is_empty()) {
+                    quit_message_loop();
+                } else {
+                    // Popups that haven't finished closing get a moment, then CEF
+                    // shuts down anyway rather than leaving the app running.
+                    close_popups();
+                    let mut task = QuitTask::new();
+                    post_delayed_task(ThreadId::UI, Some(&mut task), 2000);
+                }
             }
+        }
+    }
+}
+
+wrap_task! {
+    struct QuitTask;
+
+    impl Task {
+        fn execute(&self) {
+            quit_message_loop();
         }
     }
 }
