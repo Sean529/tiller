@@ -68,7 +68,7 @@ The script builds the Rust crates and the Swift app, then assembles an ad-hoc si
 
 Releases are signed with a Developer ID, notarized, and published on GitHub as `Tiller-<version>.dmg` for installing and `Tiller-<version>.zip` for [Sparkle](https://sparkle-project.org), which updates installed copies from the appcast at `https://sorrycc.github.io/Tiller/appcast.xml`. A version with a pre-release part, such as `0.2.0-beta.1`, is a beta: a GitHub pre-release that only Tillers with Settings > General > Include beta versions turned on update to.
 
-To release, set `version` in `Cargo.toml`, commit, and either push the tag `v<version>` to have the Release workflow do it, or run `scripts/release.sh` on a Mac set up as below. `scripts/fetch-cef.sh` downloads CEF and the codecs build for the workflow, checking the codecs archive against a pinned hash.
+To release, run `scripts/bump.sh <version>`, such as `scripts/bump.sh 0.2.0-beta.1`, or give it `patch`, `minor`, `major` or `beta` to work the version out from the current one. It sets the version in `Cargo.toml` and `Cargo.lock`, commits that as `v<version>`, tags the commit, and after asking pushes `main` and the tag, which has the Release workflow build and publish it. To build on your own Mac instead, answer no, push `main`, and run `scripts/release.sh` on a Mac set up as below. `scripts/fetch-cef.sh` downloads CEF and the codecs build for the workflow, checking the codecs archive against a pinned hash.
 
 One-time setup:
 
