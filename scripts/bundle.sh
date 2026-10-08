@@ -62,7 +62,7 @@ SPARKLE_KEY=""
 if [ "$IDENTITY" != "-" ]; then
     SPARKLE_KEY="$(tr -d '[:space:]' < "$ROOT/scripts/sparkle-public-key" 2>/dev/null || true)"
     if [ -z "$SPARKLE_KEY" ]; then
-        echo "scripts/sparkle-public-key is missing. See README.md > Releasing." >&2
+        echo "scripts/sparkle-public-key is missing. See docs/releasing.md." >&2
         exit 1
     fi
 fi

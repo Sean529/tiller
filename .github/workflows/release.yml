@@ -1,6 +1,6 @@
 # Pushing a version tag, such as v0.2.0 or v0.2.0-beta.1, builds, signs and
 # notarizes Tiller, publishes the release and adds it to the appcast. The tag
-# must match Cargo.toml's version. README.md > Releasing lists the secrets.
+# must match Cargo.toml's version. docs/releasing.md lists the secrets.
 name: Release
 
 on:
