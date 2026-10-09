@@ -731,7 +731,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     @objc func stopLoading(_ sender: Any?) { selectedTab?.stop() }
     @objc func printPage(_ sender: Any?) { selectedTab?.print() }
     @objc func showDevTools(_ sender: Any?) { selectedTab?.showDevTools() }
-    @objc func viewPageSource(_ sender: Any?) { selectedTab?.viewSource() }
+    /// Opens the page's source in a tab after it, as Chrome does.
+    @objc func viewPageSource(_ sender: Any?) {
+        guard let tab = selectedTab else { return }
+        openTab(url: "view-source:" + tab.url, select: true, at: tabs.firstIndex { $0 === tab }.map { $0 + 1 })
+    }
 
     /// Moves the tabs between the toolbar and the sidebar.
     @objc func toggleTabSidebar(_ sender: Any?) {
@@ -984,8 +988,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case #selector(toggleAgentPanel(_:)), #selector(toggleTabSidebar(_:)): fullscreenTab == nil
         case #selector(toggleSidebarCollapsed(_:)): tabLayout == .vertical && fullscreenTab == nil
         case #selector(stopLoading(_:)): selectedTab?.isLoading ?? false
-        case #selector(printPage(_:)), #selector(showDevTools(_:)), #selector(viewPageSource(_:)):
+        case #selector(printPage(_:)), #selector(showDevTools(_:)):
             selectedTab.map { !$0.isBlank } ?? false
+        case #selector(viewPageSource(_:)): selectedTab.map { !$0.isBlank && !$0.url.hasPrefix("view-source:") } ?? false
         case #selector(goBack(_:)): selectedTab?.canGoBack ?? false
         case #selector(goForward(_:)): selectedTab?.canGoForward ?? false
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)): tabs.count > 1

@@ -291,14 +291,6 @@ pub extern "C" fn tiller_browser_show_dev_tools(id: c_int) {
     }
 }
 
-/// Opens the page's source. It arrives through `open_tab`, as a view-source: page.
-#[unsafe(no_mangle)]
-pub extern "C" fn tiller_browser_view_source(id: c_int) {
-    if let Some(frame) = browser::get(id).and_then(|b| b.main_frame()) {
-        frame.view_source();
-    }
-}
-
 /// Takes a page out of the fullscreen it asked for, as when the user leaves
 /// the window's full screen first.
 #[unsafe(no_mangle)]

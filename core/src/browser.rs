@@ -413,6 +413,7 @@ const MENU_COPY_LINK: i32 = MENU_OPEN_LINK + 2;
 const MENU_OPEN_IMAGE: i32 = MENU_OPEN_LINK + 3;
 const MENU_COPY_IMAGE_ADDRESS: i32 = MENU_OPEN_LINK + 4;
 const MENU_INSPECT: i32 = MENU_OPEN_LINK + 5;
+const VIEW_SOURCE: i32 = sys::cef_menu_id_t::MENU_ID_VIEW_SOURCE as i32;
 
 /// Opens Chromium's developer tools for the browser in a window of their own,
 /// or brings that window forward, inspecting the element at `inspect_at` in
@@ -485,6 +486,11 @@ wrap_context_menu_handler! {
                 // A foreground tab, as Safari and Chrome open it.
                 MENU_OPEN_IMAGE => open_in_tab(browser, Some(&CefString::from(&params.source_url())), false),
                 MENU_COPY_IMAGE_ADDRESS => copy_text(browser, &CefString::from(&params.source_url())),
+                // CEF's own View Source item, which does nothing on macOS.
+                VIEW_SOURCE => {
+                    let url = format!("view-source:{}", CefString::from(&params.page_url()));
+                    open_in_tab(browser, Some(&CefString::from(url.as_str())), false);
+                }
                 MENU_INSPECT => {
                     if let Some(host) = browser.and_then(|b| b.host()) {
                         show_dev_tools(&host, Some(&Point { x: params.xcoord(), y: params.ycoord() }));
@@ -525,8 +531,16 @@ wrap_display_handler! {
             if frame.is_none_or(|f| f.is_main() == 0) {
                 return;
             }
-            if let Some(cb) = callbacks_for(browser) && let Some(f) = cb.address_changed {
-                let url = to_cstring(url);
+            let Some(browser) = browser else { return };
+            // A source page reports the address it shows the source of, so
+            // take the entry's view-source: address instead.
+            let source = browser
+                .host()
+                .and_then(|h| h.visible_navigation_entry())
+                .map(|e| CefString::from(&e.display_url()))
+                .filter(|u| u.to_string().starts_with("view-source:"));
+            if let Some(cb) = callbacks_for(Some(browser)) && let Some(f) = cb.address_changed {
+                let url = to_cstring(source.as_ref().or(url));
                 unsafe { f(cb.ctx, url.as_ptr()) };
             }
         }

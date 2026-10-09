@@ -108,8 +108,6 @@ void tiller_browser_stop_finding(int id);
 void tiller_browser_print(int id);
 // Opens Chromium's developer tools for the tab in their own window.
 void tiller_browser_show_dev_tools(int id);
-// Opens the page's source, which arrives through open_tab as a view-source: page.
-void tiller_browser_view_source(int id);
 // Takes the page out of the fullscreen it asked for.
 void tiller_browser_exit_fullscreen(int id);
 

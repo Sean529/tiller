@@ -261,9 +261,6 @@ final class Tab {
     /// Opens Chromium's developer tools in a window of their own.
     func showDevTools() { tiller_browser_show_dev_tools(browserID) }
 
-    /// Opens the page's source in a new tab.
-    func viewSource() { tiller_browser_view_source(browserID) }
-
     /// Takes the page out of the fullscreen it asked for.
     func exitFullscreen() { tiller_browser_exit_fullscreen(browserID) }
 
