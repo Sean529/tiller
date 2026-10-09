@@ -1308,6 +1308,16 @@ enum AgentMarkdown {
 final class MarkdownMessageView: NSView, TranscriptRow {
     private let stack = NSStackView()
     private var width: CGFloat = 0
+    private lazy var stackBottom = stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+    /// Copy and the time, under a turn's last text once the turn has ended.
+    private var actions: ResponseActionsView?
+    /// Keeps the actions in view without the mouse, for the newest response.
+    var isPinned = false {
+        didSet { actions?.isPinned = isPinned }
+    }
+    private var isHovered = false {
+        didSet { actions?.isHovered = isHovered }
+    }
 
     var text = "" {
         didSet { if text != oldValue { rebuild() } }
@@ -1324,17 +1334,54 @@ final class MarkdownMessageView: NSView, TranscriptRow {
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stackBottom,
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Adds the row with Copy and `date` under the text, once. A response
+    /// saved before responses had times has none.
+    func showActions(date: Date?) {
+        guard actions == nil else { return }
+        let actions = ResponseActionsView(date: date) { [weak self] in self?.text ?? "" }
+        actions.translatesAutoresizingMaskIntoConstraints = false
+        actions.isPinned = isPinned
+        actions.isHovered = isHovered
+        addSubview(actions)
+        stackBottom.isActive = false
+        NSLayoutConstraint.activate([
+            actions.topAnchor.constraint(equalTo: stack.bottomAnchor, constant: 4),
+            // Lines the copy glyph up with the text rather than the button's edge.
+            actions.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -4),
+            actions.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            actions.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        self.actions = actions
+        updateTrackingAreas()
+    }
 
     func fit(width: CGFloat) {
         guard width != self.width else { return }
         self.width = width
         for view in stack.arrangedSubviews { fit(view) }
     }
+
+    /// Only a response with actions tracks the mouse, to show them.
+    private var hoverArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        hoverArea = nil
+        guard actions != nil else { return }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
 
     private func fit(_ view: NSView) {
         guard width > 0 else { return }
@@ -1400,6 +1447,67 @@ final class MarkdownMessageView: NSView, TranscriptRow {
         stack.insertArrangedSubview(view, at: index)
         view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         fit(view)
+    }
+}
+
+/// Under an agent's response: a button that copies its text, and when it came.
+private final class ResponseActionsView: NSView {
+    private let copyButton = CopyButton(name: "Copy Response")
+    private let timeLabel = NSTextField(labelWithString: "")
+    var isPinned = false { didSet { updateVisibility() } }
+    var isHovered = false { didSet { updateVisibility() } }
+    private var isCopyFocused = false { didSet { updateVisibility() } }
+
+    init(date: Date?, text: @escaping () -> String) {
+        super.init(frame: .zero)
+        copyButton.string = text
+        copyButton.onCopiedChange = { [weak self] in self?.updateVisibility() }
+        // Tabbing to the button shows the row, so it isn't focused unseen.
+        copyButton.onFocusChange = { [weak self] focused in self?.isCopyFocused = focused }
+        timeLabel.font = .systemFont(ofSize: Theme.FontSize.caption)
+        timeLabel.textColor = .secondaryLabelColor
+        if let date {
+            timeLabel.stringValue = Self.timeText(date)
+            timeLabel.toolTip = date.formatted(date: .complete, time: .shortened)
+        }
+        timeLabel.isHidden = date == nil
+        for view in [copyButton, timeLabel] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 20),
+            copyButton.leadingAnchor.constraint(equalTo: leadingAnchor),
+            copyButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            copyButton.widthAnchor.constraint(equalToConstant: 22),
+            copyButton.heightAnchor.constraint(equalToConstant: 20),
+            timeLabel.leadingAnchor.constraint(equalTo: copyButton.trailingAnchor, constant: 4),
+            timeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            timeLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+        ])
+        alphaValue = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// The time today, then the date and time, with the year if not this one.
+    static func timeText(_ date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return date.formatted(date: .omitted, time: .shortened) }
+        if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
+            return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+        }
+        return date.formatted(.dateTime.year().month(.abbreviated).day().hour().minute())
+    }
+
+    /// Shown for the newest response, under the mouse, with keyboard focus,
+    /// and while it says "Copied".
+    private func updateVisibility() {
+        let shown = isPinned || isHovered || isCopyFocused || copyButton.isShowingCopied
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.reduceMotion ? 0 : Theme.Duration.quick
+            animator().alphaValue = shown ? 1 : 0
+        }
     }
 }
 
@@ -1668,7 +1776,7 @@ final class MarkdownTableContentView: NSView {
 final class MarkdownCodeView: NSView, TranscriptRow {
     private let header = NSView()
     private let languageLabel = NSTextField(labelWithString: "")
-    private let copyButton = FocusReportingButton()
+    private let copyButton = CopyButton(name: "Copy Code")
     private let rule = NSView()
     private let scroll = TranscriptHorizontalScrollView()
     /// Holds the text with the padding around it, at the text's own width.
@@ -1680,7 +1788,6 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     private var textSize = NSSize.zero
     private var width: CGFloat = 0
     private lazy var height = heightAnchor.constraint(equalToConstant: 0)
-    private var copiedReset: DispatchWorkItem?
     private var isHovered = false { didSet { updateButtons() } }
     private var isCopyFocused = false { didSet { updateButtons() } }
 
@@ -1689,10 +1796,6 @@ final class MarkdownCodeView: NSView, TranscriptRow {
     /// A borderless text field's cell still insets its text 2pt on each side.
     private static let cellInset: CGFloat = 4
     private static let font = NSFont.monospacedSystemFont(ofSize: Theme.FontSize.secondary, weight: .regular)
-    private static let copyImage = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Copy Code")?
-        .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
-    private static let copiedImage = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Copied")?
-        .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
 
     init() {
         super.init(frame: .zero)
@@ -1707,15 +1810,8 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         languageLabel.font = .systemFont(ofSize: Theme.FontSize.caption, weight: .medium)
         languageLabel.textColor = .secondaryLabelColor
 
-        copyButton.image = Self.copyImage
-        copyButton.isBordered = false
-        copyButton.bezelStyle = .accessoryBarAction
-        copyButton.imagePosition = .imageOnly
-        copyButton.contentTintColor = .secondaryLabelColor
-        copyButton.toolTip = "Copy Code"
-        copyButton.setAccessibilityLabel("Copy Code")
-        copyButton.target = self
-        copyButton.action = #selector(copyCode(_:))
+        copyButton.string = { [weak self] in self?.code ?? "" }
+        copyButton.onCopiedChange = { [weak self] in self?.updateButtons() }
         copyButton.alphaValue = 0
         // Tabbing to the button shows it, so it isn't focused unseen.
         copyButton.onFocusChange = { [weak self] focused in self?.isCopyFocused = focused }
@@ -1837,36 +1933,10 @@ final class MarkdownCodeView: NSView, TranscriptRow {
         updateFade()
     }
 
-    @objc private func copyCode(_ sender: Any?) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(code, forType: .string)
-        copyButton.image = Self.copiedImage
-        copyButton.contentTintColor = .systemGreen
-        copyButton.toolTip = "Copied"
-        NSAccessibility.post(element: copyButton, notification: .announcementRequested, userInfo: [
-            .announcement: "Copied",
-            .priority: NSAccessibilityPriorityLevel.medium.rawValue,
-        ])
-        copiedReset?.cancel()
-        let reset = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.copyButton.image = Self.copyImage
-                self.copyButton.toolTip = "Copy Code"
-                self.copiedReset = nil
-                self.updateButtons()
-            }
-        }
-        copiedReset = reset
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: reset)
-        updateButtons()
-    }
-
     /// The copy button shows under the mouse, with keyboard focus, and
     /// while it says "Copied".
     private func updateButtons() {
-        let shown = isHovered || isCopyFocused || copiedReset != nil
-        if copiedReset == nil { copyButton.contentTintColor = .secondaryLabelColor }
+        let shown = isHovered || isCopyFocused || copyButton.isShowingCopied
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Theme.reduceMotion ? 0 : Theme.Duration.quick
             copyButton.animator().alphaValue = shown ? 1 : 0
@@ -1901,7 +1971,7 @@ final class MarkdownCodeView: NSView, TranscriptRow {
 
 /// A button that says when it gains or loses keyboard focus, for one that
 /// hides until it is wanted.
-private final class FocusReportingButton: NSButton {
+private class FocusReportingButton: NSButton {
     var onFocusChange: ((Bool) -> Void)?
 
     override func becomeFirstResponder() -> Bool {
@@ -1914,6 +1984,66 @@ private final class FocusReportingButton: NSButton {
         let resigned = super.resignFirstResponder()
         if resigned { onFocusChange?(false) }
         return resigned
+    }
+}
+
+/// A borderless button that copies `string`, then shows a green checkmark
+/// for a moment and tells VoiceOver it copied.
+private final class CopyButton: FocusReportingButton {
+    /// What to copy, read when clicked.
+    var string: () -> String = { "" }
+    /// Called when it starts and stops saying "Copied".
+    var onCopiedChange: (() -> Void)?
+    var isShowingCopied: Bool { copiedReset != nil }
+    private let name: String
+    private var copiedReset: DispatchWorkItem?
+
+    private static let copiedImage = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Copied")?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+
+    init(name: String) {
+        self.name = name
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .accessoryBarAction
+        imagePosition = .imageOnly
+        setAccessibilityLabel(name)
+        showCopy()
+        target = self
+        action = #selector(copyString(_:))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func showCopy() {
+        image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: name)?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        contentTintColor = .secondaryLabelColor
+        toolTip = name
+    }
+
+    @objc private func copyString(_ sender: Any?) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string(), forType: .string)
+        image = Self.copiedImage
+        contentTintColor = .systemGreen
+        toolTip = "Copied"
+        NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [
+            .announcement: "Copied",
+            .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+        ])
+        copiedReset?.cancel()
+        let reset = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.showCopy()
+                self.copiedReset = nil
+                self.onCopiedChange?()
+            }
+        }
+        copiedReset = reset
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: reset)
+        onCopiedChange?()
     }
 }
 

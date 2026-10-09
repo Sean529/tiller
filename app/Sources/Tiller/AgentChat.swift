@@ -69,6 +69,11 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// The text block Claude Code is streaming into, until the complete block arrives.
     private var liveText: MarkdownMessageView?
     private var liveTextBuffer = ""
+    /// The turn's last text so far and when it came: it gets Copy and the
+    /// time once the turn ends.
+    private var turnText: (view: MarkdownMessageView, date: Date)?
+    /// The newest response, whose Copy and time stay shown.
+    private var pinnedResponse: MarkdownMessageView?
     /// Streamed text is drawn at most this often, so a fast stream doesn't
     /// re-render the whole block for every few characters.
     private var liveTextRenderPending = false
@@ -192,7 +197,18 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private func finishLoading(_ records: [AgentRecord], thumbnails: Thumbnails) {
         loadState = .loaded
         self.records = records
-        for record in records { show(record, thumbnails: thumbnails) }
+        // Each turn's last text gets Copy and its time: a turn ends at the
+        // next message sent.
+        var response: (view: MarkdownMessageView, date: Date?)?
+        for record in records {
+            if case .user = record, let ended = response {
+                ended.view.showActions(date: ended.date)
+                response = nil
+            }
+            let row = show(record, thumbnails: thumbnails)
+            if case .text(_, let date) = record, let view = row as? MarkdownMessageView { response = (view, date) }
+        }
+        if let response { showResponseActions(response.view, date: response.date) }
         transcript.closeToolGroup()
         pendingScrollToBottom = !records.isEmpty
         showIdle()
@@ -584,6 +600,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         if let schedule { addNote("Scheduled run of “\(schedule.name)”") }
         records.append(.user(text: text, images: images.map(\.url.lastPathComponent)))
         saveRecords()
+        turnText = nil
         // Only the files are kept for Quick Look, not the images' bytes.
         let urls = images.map(\.url)
         transcript.add(UserMessageView(text: text, images: images.map(\.image)) { [weak self] index in
@@ -795,13 +812,18 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             scheduleLiveTextRender()
             return
         case .text(let text):
+            let view: MarkdownMessageView
             if let liveText {
+                view = liveText
                 liveText.text = text
                 self.liveText = nil
             } else {
-                transcript.add(AgentMarkdown.label(text))
+                view = AgentMarkdown.label(text)
+                transcript.add(view)
             }
-            records.append(.text(text))
+            let date = Date()
+            turnText = (view, date)
+            records.append(.text(text, date: date))
             saveRecords()
         case .toolUse(let id, let name, let input):
             let detail = ToolRowView.detail(input)
@@ -827,6 +849,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             addNote(message)
         case .turnFinished(let error, let stopped):
             keepLiveText()
+            finishTurnText()
             // A call the turn ended without answering won't be answered now.
             finishToolRows()
             transcript.hideThinking()
@@ -840,6 +863,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             turnEnded(finished: error == nil && !stopped)
         case .exited(let message):
             keepLiveText()
+            finishTurnText()
             finishToolRows()
             transcript.hideThinking()
             transcript.closeToolGroup()
@@ -895,7 +919,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         for record in records.reversed() {
             switch record {
             case .user: return nil
-            case .text(let text): return text
+            case .text(let text, _): return text
             default: continue
             }
         }
@@ -904,11 +928,31 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     /// Keeps the text a turn was streaming when it ended without the complete block.
     private func keepLiveText() {
-        if liveText != nil, !liveTextBuffer.isEmpty {
-            records.append(.text(liveTextBuffer))
+        if let liveText, !liveTextBuffer.isEmpty {
+            // A render may still be pending, which would leave the last few
+            // characters undrawn and uncopied.
+            liveText.text = liveTextBuffer
+            let date = Date()
+            turnText = (liveText, date)
+            records.append(.text(liveTextBuffer, date: date))
             saveRecords()
         }
         liveText = nil
+    }
+
+    /// Gives the turn's last text Copy and its time.
+    private func finishTurnText() {
+        guard let turnText else { return }
+        self.turnText = nil
+        showResponseActions(turnText.view, date: turnText.date)
+    }
+
+    /// Shows the newest response's Copy and time; older ones show them under the mouse.
+    private func showResponseActions(_ view: MarkdownMessageView, date: Date?) {
+        view.showActions(date: date)
+        pinnedResponse?.isPinned = false
+        view.isPinned = true
+        pinnedResponse = view
     }
 
     /// Calls still running when the agent ended get a mark of their own.
@@ -1034,26 +1078,30 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         return ("Open Settings…", { (NSApp.delegate as? AppDelegate)?.showAgentSettings(profile: profile) })
     }
 
-    /// Draws a saved row.
-    private func show(_ record: AgentRecord, thumbnails: Thumbnails) {
+    /// Draws a saved row, and returns it.
+    @discardableResult
+    private func show(_ record: AgentRecord, thumbnails: Thumbnails) -> NSView {
+        let row: NSView
         switch record {
         case .user(let text, let names):
             let loaded = names.compactMap { name in thumbnails.images[name].map { (folder.appendingPathComponent(name), $0) } }
             let urls = loaded.map(\.0)
-            transcript.add(UserMessageView(text: text, images: loaded.map(\.1)) { [weak self] index in
+            row = UserMessageView(text: text, images: loaded.map(\.1)) { [weak self] index in
                 self?.preview(urls, at: index)
-            })
-        case .text(let text):
-            transcript.add(AgentMarkdown.label(text))
+            }
+        case .text(let text, _):
+            row = AgentMarkdown.label(text)
         case .tool(let name, let detail, let isError, let summary):
-            let row = ToolRowView(name: name, detail: detail)
-            row.finish(isError: isError, summary: summary)
-            transcript.add(row)
+            let call = ToolRowView(name: name, detail: detail)
+            call.finish(isError: isError, summary: summary)
+            row = call
         case .note(let text):
-            transcript.add(NoteView(text: text))
+            row = NoteView(text: text)
         case .error(let text):
-            transcript.add(ErrorMessageView(text: text))
+            row = ErrorMessageView(text: text)
         }
+        transcript.add(row)
+        return row
     }
 
     /// Keeps the newest message in view. Agent events call this only when the

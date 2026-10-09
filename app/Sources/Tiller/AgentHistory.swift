@@ -39,7 +39,8 @@ struct AgentConversation: Codable, Equatable {
 enum AgentRecord: Codable, Equatable, Sendable {
     /// `images` are file names in the chat's folder.
     case user(text: String, images: [String])
-    case text(String)
+    /// `date` is when the text came, nil in transcripts saved before texts had one.
+    case text(String, date: Date? = nil)
     /// `isError` is nil for a call that never finished.
     case tool(name: String, detail: String, isError: Bool?, summary: String)
     case note(String)
