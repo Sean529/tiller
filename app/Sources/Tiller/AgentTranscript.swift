@@ -801,39 +801,181 @@ final class ToolGroupView: NSView, TranscriptRow {
 }
 
 /// What shows between sending a message and the agent's first words or
-/// step: a small spinner and "Thinking…", where the answer will start.
+/// step: a small bobbing boat and a sailing phrase, where the answer will
+/// start.
 final class ThinkingRowView: NSView {
+    private static let phrases = [
+        "Setting sail…", "Reading the wind…", "Charting a course…", "Trimming the sails…",
+        "Holding the tiller…", "Tacking…", "Scanning the horizon…", "Riding the swell…",
+    ]
+    private static let phraseInterval: TimeInterval = 3
+
+    private let label: NSTextField
+    private var phrase: Int
+    private var timer: Timer?
+
     init() {
+        phrase = Int.random(in: 0..<Self.phrases.count)
+        label = NSTextField(labelWithString: Self.phrases[phrase])
         super.init(frame: .zero)
-        let spinner = NSProgressIndicator()
-        spinner.style = .spinning
-        // Mini is the spinner's own 16-point size; squeezing a small one
-        // into less room blurs it.
-        spinner.controlSize = .mini
-        spinner.isDisplayedWhenStopped = false
-        spinner.startAnimation(nil)
-        let label = NSTextField(labelWithString: "Thinking…")
+        let boat = BoatView()
         label.font = .systemFont(ofSize: 12)
         label.textColor = .secondaryLabelColor
-        for view in [spinner, label] as [NSView] {
+        for view in [boat, label] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        // The spinner and text sit in a tool row's columns, so the spinner
-        // stays put when the next step's row takes this one's place.
+        // The boat and text sit in a tool row's columns, so the boat stays
+        // put when the next step's row takes this one's place.
         NSLayoutConstraint.activate([
-            spinner.centerXAnchor.constraint(equalTo: leadingAnchor, constant: ToolRowView.iconLeading + ToolRowView.iconWidth / 2),
-            spinner.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            spinner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
-            spinner.widthAnchor.constraint(equalToConstant: 16),
-            spinner.heightAnchor.constraint(equalToConstant: 16),
+            boat.centerXAnchor.constraint(equalTo: leadingAnchor, constant: ToolRowView.iconLeading + ToolRowView.iconWidth / 2),
+            boat.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            boat.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            boat.widthAnchor.constraint(equalToConstant: 16),
+            boat.heightAnchor.constraint(equalToConstant: 16),
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: ToolRowView.textLeading),
-            label.centerYAnchor.constraint(equalTo: spinner.centerYAnchor),
+            label.centerYAnchor.constraint(equalTo: boat.centerYAnchor),
         ])
-        setAccessibilityLabel("Thinking")
+        // The phrases are decoration; VoiceOver hears one plain word.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel("Working")
+        label.setAccessibilityElement(false)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The phrase changes only while the row is on screen.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        timer?.invalidate()
+        timer = nil
+        guard window != nil else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: Self.phraseInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.nextPhrase() }
+        }
+    }
+
+    private func nextPhrase() {
+        phrase = (phrase + 1 + Int.random(in: 0..<Self.phrases.count - 1)) % Self.phrases.count
+        let text = Self.phrases[phrase]
+        guard !Theme.reduceMotion else { label.stringValue = text; return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            label.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.label.stringValue = text
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.15
+                    self.label.animator().alphaValue = 1
+                }
+            }
+        }
+    }
+}
+
+/// Tiller's boat, drawn small and in one color: a hull and sail that bob and
+/// rock above a wave line while the agent works, and sit still when the
+/// system asks for less motion.
+private final class BoatView: NSView {
+    private let boat = CAShapeLayer()
+    private let wave = CAShapeLayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(wave)
+        layer?.addSublayer(boat)
+        wave.fillColor = nil
+        wave.lineWidth = 1.2
+        wave.lineCap = .round
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        boat.fillColor = NSColor.secondaryLabelColor.cgColor
+        wave.strokeColor = NSColor.tertiaryLabelColor.cgColor
+    }
+
+    override func layout() {
+        super.layout()
+        let size = bounds.size
+        guard size.width > 0, boat.frame.size != size else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        wave.frame = bounds
+        wave.path = Self.wavePath(width: size.width)
+        // The boat rocks about the middle of its hull.
+        boat.bounds = bounds
+        boat.anchorPoint = CGPoint(x: 0.5, y: 4.5 / size.height)
+        boat.position = CGPoint(x: size.width / 2, y: 4.5)
+        boat.path = Self.boatPath()
+        CATransaction.commit()
+        startAnimating()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        startAnimating()
+    }
+
+    private func startAnimating() {
+        boat.removeAllAnimations()
+        guard window != nil, !Theme.reduceMotion else { return }
+        let bob = CABasicAnimation(keyPath: "position.y")
+        bob.fromValue = boat.position.y - 0.75
+        bob.toValue = boat.position.y + 0.75
+        bob.duration = 0.8
+        let rock = CABasicAnimation(keyPath: "transform.rotation.z")
+        rock.fromValue = -6 * CGFloat.pi / 180
+        rock.toValue = 6 * CGFloat.pi / 180
+        // Rocking at a different pace than bobbing keeps it from looking
+        // mechanical.
+        rock.duration = 1.1
+        for (animation, key) in [(bob, "bob"), (rock, "rock")] {
+            animation.autoreverses = true
+            animation.repeatCount = .infinity
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            boat.add(animation, forKey: key)
+        }
+    }
+
+    /// A hull, mast and sail in a 16-point box, origin at the bottom left.
+    private static func boatPath() -> CGPath {
+        let path = CGMutablePath()
+        // Hull: a wide deck tapering to a narrower keel.
+        path.move(to: CGPoint(x: 2, y: 6.5))
+        path.addLine(to: CGPoint(x: 14, y: 6.5))
+        path.addLine(to: CGPoint(x: 11.5, y: 3))
+        path.addLine(to: CGPoint(x: 4.5, y: 3))
+        path.closeSubpath()
+        // Mast.
+        path.addRect(CGRect(x: 7.4, y: 6.5, width: 1.2, height: 8.5))
+        // Sail, leaning off the mast toward the bow.
+        path.move(to: CGPoint(x: 9, y: 14.5))
+        path.addLine(to: CGPoint(x: 13.5, y: 7.5))
+        path.addLine(to: CGPoint(x: 9, y: 7.5))
+        path.closeSubpath()
+        return path
+    }
+
+    /// One gentle wave along the bottom.
+    private static func wavePath(width: CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        let y: CGFloat = 1.5
+        path.move(to: CGPoint(x: 0.5, y: y))
+        let step = (width - 1) / 4
+        for i in 0..<4 {
+            let x = 0.5 + CGFloat(i) * step
+            path.addQuadCurve(to: CGPoint(x: x + step, y: y), control: CGPoint(x: x + step / 2, y: i.isMultiple(of: 2) ? y + 1.2 : y - 1.2))
+        }
+        return path
+    }
 }
 
 /// A quiet line in the middle, such as "Stopped".
