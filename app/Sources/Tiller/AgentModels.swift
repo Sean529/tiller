@@ -102,10 +102,6 @@ extension AgentKind {
     func modelName(_ id: String) -> String {
         AgentModelCatalog.models(for: self).first { $0.id == id }?.name ?? id
     }
-
-    /// The options a new chat with this agent starts with.
-    @MainActor
-    var defaultModelOptions: AgentModelOptions { Settings.agentModelOptions(for: AgentChoice(self)) }
 }
 
 /// The CLI's options, except that a provider has its own models and none of
@@ -121,16 +117,11 @@ extension AgentChoice {
 
     @MainActor
     func modelName(_ id: String) -> String { provider == nil ? kind.modelName(id) : id }
-
-    @MainActor
-    var models: [AgentModel] {
-        guard provider != nil else { return AgentModelCatalog.models(for: kind) }
-        return (providerConfig?.models ?? []).map { AgentModel(id: $0, name: $0, efforts: nil, fastTier: nil, isDefault: false) }
-    }
 }
 
 /// The models each CLI offers, asked of the CLI once per launch and kept in
-/// the defaults, so a menu opened before the CLI answers shows last time's.
+/// the app's defaults, so a menu opened before the CLI answers shows last
+/// time's. Every profile shares them.
 /// Claude Code can't list its models, so it gets its aliases.
 @MainActor
 enum AgentModelCatalog {
@@ -160,13 +151,14 @@ enum AgentModelCatalog {
         return model.map { id in models.first { $0.id == id } } ?? models.first(where: \.isDefault)
     }
 
-    /// Asks the CLI for its models in the background, once per launch.
-    /// Posts `agentModelsDidChange` when it answers, or fails to.
-    static func refresh(_ kind: AgentKind) {
+    /// Asks the CLI for its models in the background, once per launch, as
+    /// `profile` runs it. Posts `agentModelsDidChange` when it answers, or
+    /// fails to.
+    static func refresh(_ kind: AgentKind, profile: ProfileContext) {
         guard kind != .claude, !refreshed.contains(kind) else { return }
-        let path = Settings.agentPath(for: kind)
+        let path = profile.settings.agentPath(for: kind)
         // Codex needs Tiller's CODEX_HOME, which has the user's login.
-        guard let environment = try? AgentEnvironment.environment(for: kind, chat: "") else { return }
+        guard let environment = try? AgentEnvironment.environment(for: kind, chat: "", profile: profile) else { return }
         refreshed.insert(kind)
         loading.insert(kind)
         Task.detached(priority: .utility) {
@@ -187,8 +179,8 @@ enum AgentModelCatalog {
     }
 
     /// Asks every CLI, so the lists are there before a menu opens.
-    static func refreshAll() {
-        AgentKind.allCases.forEach(refresh)
+    static func refreshAll(profile: ProfileContext) {
+        for kind in AgentKind.allCases { refresh(kind, profile: profile) }
     }
 
     /// Runs the CLI's own listing and reads it. Nil when it fails.
@@ -311,8 +303,11 @@ final class AgentModelMenu: NSObject {
     private var locked = false
     private var note: String?
 
-    private init(kind: AgentChoice, options: AgentModelOptions, onChange: @escaping (AgentModelOptions) -> Void) {
+    private let profile: ProfileContext
+
+    private init(kind: AgentChoice, profile: ProfileContext, options: AgentModelOptions, onChange: @escaping (AgentModelOptions) -> Void) {
         self.kind = kind
+        self.profile = profile
         self.options = options
         self.onChange = onChange
     }
@@ -323,11 +318,11 @@ final class AgentModelMenu: NSObject {
     /// Pops the menu up just below `view`. `locked` greys every choice out,
     /// with `note` saying why; `note` otherwise goes at the bottom.
     static func popUp(
-        below view: NSView, kind: AgentChoice, options: AgentModelOptions, locked: Bool = false, note: String? = nil,
-        onChange: @escaping (AgentModelOptions) -> Void
+        below view: NSView, kind: AgentChoice, profile: ProfileContext, options: AgentModelOptions, locked: Bool = false,
+        note: String? = nil, onChange: @escaping (AgentModelOptions) -> Void
     ) {
-        if kind.provider == nil { AgentModelCatalog.refresh(kind.kind) }
-        let controller = AgentModelMenu(kind: kind, options: options, onChange: onChange)
+        if kind.provider == nil { AgentModelCatalog.refresh(kind.kind, profile: profile) }
+        let controller = AgentModelMenu(kind: kind, profile: profile, options: options, onChange: onChange)
         current = controller
         controller.locked = locked
         controller.note = note
@@ -362,13 +357,13 @@ final class AgentModelMenu: NSObject {
 
         menu.addItem(.sectionHeader(title: "Model"))
         add("Default", checked: options.model == nil) { $0.model = nil }
-        let models = kind.models
+        let models = profile.providers.models(for: kind)
         for model in models {
             add(model.isDefault ? model.name + " (default)" : model.name, checked: options.model == model.id) { $0.model = model.id }
         }
         if models.isEmpty {
             let loading = kind.provider == nil && AgentModelCatalog.loading.contains(kind.kind)
-            let item = NSMenuItem(title: loading ? "Loading models…" : "No list from \(kind.displayName)", action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: loading ? "Loading models…" : "No list from \(profile.providers.displayName(kind))", action: nil, keyEquivalent: "")
             item.isEnabled = false
             item.indentationLevel = 1
             menu.addItem(item)
@@ -436,13 +431,13 @@ final class AgentModelMenu: NSObject {
     /// Asks for a model id the list doesn't have.
     @objc private func customModel(_ sender: NSMenuItem) {
         let alert = NSAlert()
-        alert.messageText = "Model for \(kind.displayName)"
+        alert.messageText = "Model for \(profile.providers.displayName(kind))"
         alert.informativeText = "The model's id or alias, as the CLI's --model flag takes it."
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
         field.stringValue = options.model ?? ""
-        field.placeholderString = kind.models.first?.id ?? "model id"
+        field.placeholderString = profile.providers.models(for: kind).first?.id ?? "model id"
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }

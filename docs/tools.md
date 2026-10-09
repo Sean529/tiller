@@ -57,7 +57,7 @@ tiller type --selector '#q' hi     # CSS selector instead of a ref
 tiller screenshot -o page.jpg      # prints the path; a temp file without -o
 tiller eval 'document.title'
 tiller close 2
-tiller --profile work tabs         # another profile's Tiller
+tiller --profile work tabs         # another open profile's tabs
 ```
 
 | Command | Tool |
@@ -73,7 +73,7 @@ tiller --profile work tabs         # another profile's Tiller
 | `screenshot [-o file]` | `screenshot` |
 | `eval <expression>` | `eval_js` |
 
-`--profile <name>` controls that profile's Tiller instead of the one used last, and takes an id too. `--tab <id>` acts on another tab than the selected one, and `--json` prints the raw result instead of text. Options can come before or after the command. Refs are stored in the page, so a `read` in one call and a `click` in the next agree. Errors go to stderr with exit code 1, or 2 for bad arguments. Like `tiller_mcp`, it needs Tiller running and honors `TILLER_SOCKET` and `TILLER_PROFILE`.
+`--profile <name>` controls that profile instead of the one used last, and takes an id too. The profile has to be open. `--tab <id>` acts on another tab than the selected one, and `--json` prints the raw result instead of text. Options can come before or after the command. Refs are stored in the page, so a `read` in one call and a `click` in the next agree. Errors go to stderr with exit code 1, or 2 for bad arguments. Like `tiller_mcp`, it needs Tiller running, with the profile open, and honors `TILLER_SOCKET` and `TILLER_PROFILE`.
 
 The tool code is in `mcp/src/browser.rs`. `mcp/src/main.rs` wraps it as MCP and `mcp/src/bin/tiller.rs` as the CLI.
 

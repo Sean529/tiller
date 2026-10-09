@@ -28,11 +28,17 @@ extension TabDelegate {
     func tab(_ tab: Tab, fullscreenChanged fullscreen: Bool) {}
 }
 
-/// One CEF browser and the view that hosts it.
+/// One CEF browser and the view that hosts it, in its profile's request
+/// context.
 @MainActor
 final class Tab {
     weak var delegate: TabDelegate?
     let hostView = BrowserHostView()
+    let profile: ProfileContext
+
+    init(profile: ProfileContext) {
+        self.profile = profile
+    }
 
     private(set) var browserID: Int32 = -1
     /// Whether the browser exists. A tab restored from the last session waits
@@ -83,7 +89,7 @@ final class Tab {
     func prepare(url: String, title: String) {
         self.url = url
         self.title = title
-        HistoryStore.shared.icon(for: url) { [weak self] png in
+        profile.history.icon(for: url) { [weak self] png in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, !self.isStarted, self.favicon == nil, let png else { return }
@@ -170,7 +176,7 @@ final class Tab {
             }
         )
         let view = Unmanaged.passUnretained(hostView).toOpaque()
-        browserID = tiller_browser_create(view, Int32(size.width), Int32(size.height), url, callbacks)
+        browserID = tiller_browser_create(profile.context, view, Int32(size.width), Int32(size.height), url, callbacks)
         let dark = hostView.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         if dark && !isBlank {
             let cover = PaintCoverView(frame: hostView.bounds)

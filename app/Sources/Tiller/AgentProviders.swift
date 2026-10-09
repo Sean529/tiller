@@ -89,13 +89,15 @@ struct AgentProvider: Codable, Equatable {
 /// The profile's providers, in its defaults.
 @MainActor
 final class AgentProviderStore {
-    static let shared = AgentProviderStore()
-
     private static let defaultsKey = "agentProviders"
     private(set) var providers: [AgentProvider]
+    let settings: ProfileSettings
+    /// Greys out unavailable agents in this profile's agent pop-ups.
+    private(set) lazy var menuAvailability = AgentMenuAvailability(providers: self)
 
-    private init() {
-        providers = Settings.defaults.data(forKey: Self.defaultsKey)
+    init(settings: ProfileSettings) {
+        self.settings = settings
+        providers = settings.defaults.data(forKey: Self.defaultsKey)
             .flatMap { try? JSONDecoder().decode([AgentProvider].self, from: $0) } ?? []
     }
 
@@ -117,13 +119,65 @@ final class AgentProviderStore {
     func remove(_ id: String) {
         providers.removeAll { $0.id == id }
         AgentProviderKeychain.delete(id)
-        if AgentChoice.current.provider == id { AgentChoice.current = AgentChoice(.claude) }
+        if current.provider == id { current = AgentChoice(.claude) }
         write()
     }
 
     private func write() {
-        Settings.defaults.set(try? JSONEncoder().encode(providers), forKey: Self.defaultsKey)
-        NotificationCenter.default.post(name: .agentProvidersDidChange, object: nil)
+        settings.defaults.set(try? JSONEncoder().encode(providers), forKey: Self.defaultsKey)
+        NotificationCenter.default.post(name: .agentProvidersDidChange, object: self)
+    }
+
+    // MARK: Choices
+
+    /// The provider's settings. Nil without one, or once it was removed.
+    func providerConfig(_ choice: AgentChoice) -> AgentProvider? {
+        choice.provider.flatMap(provider)
+    }
+
+    /// Whether it can run: a removed provider can't.
+    func exists(_ choice: AgentChoice) -> Bool {
+        choice.provider == nil || providerConfig(choice) != nil
+    }
+
+    func displayName(_ choice: AgentChoice) -> String {
+        guard let provider = choice.provider else { return choice.kind.displayName }
+        return self.provider(provider)?.name ?? "Removed Provider"
+    }
+
+    /// Why it can't be picked: its CLI isn't there. Nil when it can, or
+    /// while the CLI is still being looked up.
+    func unavailableReason(_ choice: AgentChoice) -> String? {
+        let kind = choice.kind
+        guard AgentEnvironment.isAvailable(kind, settings: settings) == false else { return nil }
+        if let path = settings.agentPath(for: kind) {
+            return "\(path) is not an executable file. Fix the \(kind.displayName) path in Settings (Cmd+,)."
+        }
+        return "\(kind.rawValue) not found. Install it, or set its path in Settings (Cmd+,)."
+    }
+
+    /// Every CLI, then the providers.
+    var all: [AgentChoice] {
+        AgentKind.allCases.map { AgentChoice($0) } + providers.map { AgentChoice($0.kind, provider: $0.id) }
+    }
+
+    /// What new chats start with. A removed provider falls back to its CLI.
+    var current: AgentChoice {
+        get {
+            guard let choice = settings.defaults.string(forKey: "agent").flatMap(AgentChoice.init) else { return AgentChoice(.qodercli) }
+            return exists(choice) ? choice : AgentChoice(choice.kind)
+        }
+        set {
+            guard newValue != current else { return }
+            settings.defaults.set(newValue.rawValue, forKey: "agent")
+            NotificationCenter.default.post(name: .agentKindDidChange, object: self)
+        }
+    }
+
+    /// The models to offer for `choice`: the CLI's, or the provider's own.
+    func models(for choice: AgentChoice) -> [AgentModel] {
+        guard choice.provider != nil else { return AgentModelCatalog.models(for: choice.kind) }
+        return (providerConfig(choice)?.models ?? []).map { AgentModel(id: $0, name: $0, efforts: nil, fastTier: nil, isDefault: false) }
     }
 }
 
@@ -184,57 +238,8 @@ struct AgentChoice: Hashable, RawRepresentable {
 
     var rawValue: String { provider.map { "\(kind.rawValue):\($0)" } ?? kind.rawValue }
 
-    /// The provider's settings. Nil without one, or once it was removed.
-    @MainActor
-    var providerConfig: AgentProvider? { provider.flatMap(AgentProviderStore.shared.provider) }
-
-    /// Whether it can run: a removed provider can't.
-    @MainActor
-    var exists: Bool { provider == nil || providerConfig != nil }
-
-    /// Why it can't be picked: its CLI isn't there. Nil when it can, or
-    /// while the CLI is still being looked up.
-    @MainActor
-    var unavailableReason: String? {
-        guard AgentEnvironment.isAvailable(kind) == false else { return nil }
-        if let path = Settings.agentPath(for: kind) {
-            return "\(path) is not an executable file. Fix the \(kind.displayName) path in Settings (Cmd+,)."
-        }
-        return "\(kind.rawValue) not found. Install it, or set its path in Settings (Cmd+,)."
-    }
-
-    @MainActor
-    var displayName: String {
-        guard let provider else { return kind.displayName }
-        return AgentProviderStore.shared.provider(provider)?.name ?? "Removed Provider"
-    }
-
     @MainActor
     func logo(size: CGFloat) -> NSImage? { kind.logo(size: size) }
-
-    /// Every CLI, then the providers.
-    @MainActor
-    static var all: [AgentChoice] {
-        AgentKind.allCases.map { AgentChoice($0) } + AgentProviderStore.shared.providers.map { AgentChoice($0.kind, provider: $0.id) }
-    }
-
-    /// What new chats start with. A removed provider falls back to its CLI.
-    @MainActor
-    static var current: AgentChoice {
-        get {
-            guard let choice = Settings.defaults.string(forKey: "agent").flatMap(AgentChoice.init) else { return AgentChoice(.qodercli) }
-            return choice.exists ? choice : AgentChoice(choice.kind)
-        }
-        set {
-            guard newValue != current else { return }
-            Settings.defaults.set(newValue.rawValue, forKey: "agent")
-            NotificationCenter.default.post(name: .agentKindDidChange, object: nil)
-        }
-    }
-
-    /// The options a new chat with it starts with.
-    @MainActor
-    var defaultModelOptions: AgentModelOptions { Settings.agentModelOptions(for: self) }
 }
 
 extension Notification.Name {
@@ -247,21 +252,26 @@ extension Notification.Name {
 /// installed or given a path since then can be picked.
 @MainActor
 final class AgentMenuAvailability: NSObject, NSMenuDelegate {
-    private static let shared = AgentMenuAvailability()
+    private unowned let providers: AgentProviderStore
 
-    /// `popUp`'s items name agents by `AgentChoice.rawValue`.
-    static func watch(_ popUp: NSPopUpButton) {
+    init(providers: AgentProviderStore) {
+        self.providers = providers
+    }
+
+    /// `popUp`'s items name agents by `AgentChoice.rawValue`, which are
+    /// checked against the CLIs and paths of the profile `providers` has.
+    static func watch(_ popUp: NSPopUpButton, providers: AgentProviderStore) {
         popUp.autoenablesItems = false
-        popUp.menu?.delegate = shared
+        popUp.menu?.delegate = providers.menuAvailability
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         for item in menu.items {
             guard let choice = (item.representedObject as? String).flatMap(AgentChoice.init) else { continue }
-            let reason = choice.unavailableReason
+            let reason = providers.unavailableReason(choice)
             item.isEnabled = reason == nil
             item.toolTip = reason
         }
-        AgentEnvironment.refreshAvailability()
+        AgentEnvironment.refreshAvailability(settings: providers.settings)
     }
 }

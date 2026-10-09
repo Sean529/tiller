@@ -5,11 +5,11 @@ import AppKit
 /// that profile's user defaults. Runs after RenameMigration and before the
 /// core starts, because Chromium opens the profile's folder as soon as it loads.
 enum ProfileMigration {
-    /// Settings that belong to a profile. Window frames and debug launch
-    /// arguments stay with the app.
+    /// Settings that belong to a profile. Window frames, the agent shortcut
+    /// and debug launch arguments stay with the app.
     private static let keys: Set<String> = [
         "homepage", "launchTabs", "newTabPage", "searchEngine", "searchTemplate",
-        "agent", "agentFolder", "agentInstructions", "agentPanelVisible", "agentShortcut", "agentTabs",
+        "agent", "agentFolder", "agentInstructions", "agentPanelVisible", "agentTabs",
     ]
     private static let keyPrefixes = ["agentTool.", "agentPath."]
 

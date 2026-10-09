@@ -2004,7 +2004,9 @@ final class TranscriptLinkLabel: NSTextField {
         guard let url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let app = NSApp.delegate as? AppDelegate else { return false }
         let background = OpenDisposition.click(OpenDisposition.currentFlags) == .backgroundTab
-        app.openInNewTab(url.absoluteString, background: background)
+        // In the window the link is in, which has the chat's profile.
+        let profile = (window?.windowController as? BrowserWindowController)?.profile
+        app.openInNewTab(url.absoluteString, background: background, profile: profile)
         return true
     }
 }

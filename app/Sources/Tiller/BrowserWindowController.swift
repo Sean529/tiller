@@ -1,6 +1,6 @@
 import AppKit
 
-/// One window holding the tabs. With tabs along the top, the toolbar has
+/// One profile's window holding its tabs. With tabs along the top, the toolbar has
 /// back, forward, reload, the tabs, a new-tab button, extension buttons, the
 /// profile's name when there are several, and the agent panel toggle, and the
 /// address bar sits in a row under it. With tabs in a sidebar, the address
@@ -11,9 +11,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     NSMenuItemValidation, NSSplitViewDelegate, TabDelegate, TabStripDelegate, AgentPanelDelegate
 {
     var onClose: (() -> Void)?
+    let profile: ProfileContext
 
     private let splitView = ChromeSplitView()
-    private var tabLayout = Settings.tabLayout
+    private var tabLayout: TabLayout
     /// Holds the tabs while they are vertical. Hidden otherwise.
     private let sidebar = TabSidebarView()
     /// The sidebar's width while it isn't collapsed.
@@ -23,9 +24,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Holds every tab's view. The selected one is on top, and the others are
     /// hidden unless an agent woke them.
     private let contentView = PageCardView()
-    private let agentPanel = AgentPanelView(frame: NSRect(x: 0, y: 0, width: 360, height: 600))
+    private let agentPanel: AgentPanelView
     /// Where the panel is going. It stays unhidden while it slides out.
-    private var agentPanelShown = Settings.defaults.bool(forKey: BrowserWindowController.agentVisibleKey)
+    private var agentPanelShown: Bool
     /// Counts toggles, so a slide's completion knows a later toggle took over.
     private var agentToggleCount = 0
     private let agentButton = NSButton()
@@ -53,7 +54,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private var extensionPopover: ExtensionPopover?
     /// Nil while there is only one profile.
     private var profileName: String?
-    private lazy var suggestions = AddressSuggestions(addressBar: addressBar)
+    private lazy var suggestions = AddressSuggestions(addressBar: addressBar, profile: profile)
     private lazy var findBar: FindBar = {
         let bar = FindBar()
         bar.onChange = { [weak self] text in self?.find(text) }
@@ -65,7 +66,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private var findBarShown = false
     /// Shown over the selected tab while it is blank.
     private lazy var startPage: StartPageView = {
-        let view = StartPageView()
+        let view = StartPageView(profile: profile)
         view.onOpen = { [weak self] url, disposition in self?.open(url, disposition) }
         return view
     }()
@@ -113,7 +114,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Opens the `restored` tabs, then `url` in a selected tab after them. With
     /// no `url`, selects the restored tab at `selected`. One of the two must
     /// give at least one tab.
-    init(restoring restored: [SessionStore.SavedTab], selected: Int, opening url: String?) {
+    init(profile: ProfileContext, restoring restored: [SessionStore.SavedTab], selected: Int, opening url: String?) {
+        self.profile = profile
+        tabLayout = profile.settings.tabLayout
+        agentPanel = AgentPanelView(profile: profile, frame: NSRect(x: 0, y: 0, width: 360, height: 600))
+        agentPanelShown = profile.settings.defaults.bool(forKey: Self.agentVisibleKey)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -125,7 +130,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 520, height: 360)
         window.collectionBehavior.insert(.fullScreenPrimary)
-        window.setFrameAutosaveName("TillerBrowserWindow")
+        window.setFrameAutosaveName(Self.autosaveName("TillerBrowserWindow", profile: profile))
         super.init(window: window)
 
         window.delegate = self
@@ -144,8 +149,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         sidebarMinWidth.isActive = true
         sidebarMaxWidth.isActive = true
         sidebar.isHidden = tabLayout != .vertical
-        sidebar.isCollapsed = Settings.sidebarCollapsed
-        let savedWidth = Settings.defaults.double(forKey: Self.sidebarWidthKey)
+        sidebar.isCollapsed = profile.settings.sidebarCollapsed
+        let savedWidth = profile.settings.defaults.double(forKey: Self.sidebarWidthKey)
         if savedWidth > 0 { sidebarWidth = savedWidth }
         agentPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         contentView.widthAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
@@ -155,12 +160,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         // Not the name used while there were two panes, whose saved widths
         // don't fit three.
         // Read before the name is set, since setting it saves the frames.
-        let hasSavedSplit = UserDefaults.standard.object(forKey: "NSSplitView Subview Frames TillerSplit") != nil
-        splitView.autosaveName = "TillerSplit"
+        let splitName = Self.autosaveName("TillerSplit", profile: profile)
+        let hasSavedSplit = UserDefaults.standard.object(forKey: "NSSplitView Subview Frames " + splitName) != nil
+        splitView.autosaveName = splitName
         window.contentView = splitView
         window.toolbarStyle = .unified
 
-        if !window.setFrameUsingName("TillerBrowserWindow") { window.center() }
+        if !window.setFrameUsingName(Self.autosaveName("TillerBrowserWindow", profile: profile)) {
+            // A profile's first window steps down from another one's.
+            if let other = ProfileContext.all.compactMap({ $0.window?.window }).first(where: { $0 !== window && $0.isVisible }) {
+                window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: other.frame.minX, y: other.frame.maxY)))
+            } else {
+                window.center()
+            }
+        }
         // With no widths saved yet, the split view would give the panel every
         // point the page can spare, since the panel holds its width harder.
         // The panel starts at its own width instead.
@@ -188,8 +201,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         ])
         tabStrip.delegate = self
         applyTabLayout()
-        NotificationCenter.default.addObserver(self, selector: #selector(passwordsChanged(_:)), name: .passwordsDidChange, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(tabLayoutChanged(_:)), name: .tabLayoutDidChange, object: nil)
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(passwordsChanged(_:)), name: .passwordsDidChange, object: profile.passwords)
+        center.addObserver(self, selector: #selector(tabLayoutChanged(_:)), name: .tabLayoutDidChange, object: nil)
+        center.addObserver(self, selector: #selector(downloadsChanged(_:)), name: .downloadsDidChange, object: nil)
+        center.addObserver(self, selector: #selector(downloadStarted(_:)), name: .downloadDidStart, object: nil)
         // Restored tabs load when first selected.
         for saved in restored {
             openTab(url: saved.isBlank ? "about:blank" : saved.url, select: false, restoring: saved, lazily: true)
@@ -203,6 +219,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// The default profile keeps the names from before profiles shared a
+    /// process; the others get their own, so their windows keep their places.
+    private static func autosaveName(_ name: String, profile: ProfileContext) -> String {
+        profile.id == Profiles.defaultID ? name : name + "." + profile.id
+    }
+
+    /// Whether `other` belongs to this window: a sheet, popover or child.
+    func ownsChild(_ other: NSWindow) -> Bool {
+        var parent = other.parent ?? other.sheetParent
+        while let current = parent {
+            if current === window { return true }
+            parent = current.parent ?? current.sheetParent
+        }
+        return false
+    }
+
     // MARK: Tabs
 
     /// Opens `url` in a new tab at `index`, or at the end. A `restoring` tab
@@ -215,7 +247,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         lazily: Bool = false
     ) -> Tab {
         closingAll = false
-        let tab = Tab()
+        let tab = Tab(profile: profile)
         tab.delegate = self
         if let saved { tab.recordedVisit = (saved.url, saved.title) }
         let panelHadFocus = agentPanel.hasKeyboardFocus
@@ -337,7 +369,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             return
         }
         if !closingAll && !tab.isBlank {
-            SessionStore.shared.pushClosedTab(.init(url: tab.url, title: tab.title), at: index)
+            profile.session.pushClosedTab(.init(url: tab.url, title: tab.title), at: index)
         }
         if tab === selectedTab {
             selectedTab = nil
@@ -360,7 +392,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private func saveSession() {
         guard !closingAll else { return }
         let selected = selectedTab.flatMap { selected in tabs.firstIndex { $0 === selected } } ?? 0
-        SessionStore.shared.setOpenTabs(tabs.map { .init(url: $0.url, title: $0.title) }, selected: selected)
+        profile.session.setOpenTabs(tabs.map { .init(url: $0.url, title: $0.title) }, selected: selected)
     }
 
     /// Saves the session as it stands and stops saving while every tab closes,
@@ -368,7 +400,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     func freezeSession() {
         saveSession()
         closingAll = true
-        SessionStore.shared.flush()
+        profile.session.flush()
     }
 
     private func showState(of tab: Tab) {
@@ -401,14 +433,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private func recordHistory(_ tab: Tab) {
         guard tab.url.hasPrefix("http://") || tab.url.hasPrefix("https://") else { return }
         if let icon = tab.faviconPNG, icon != tab.recordedIcon {
-            HistoryStore.shared.setIcon(icon, for: tab.url)
+            profile.history.setIcon(icon, for: tab.url)
             tab.recordedIcon = icon
         }
         guard !tab.isLoading else { return }
         if tab.recordedVisit?.url != tab.url {
-            HistoryStore.shared.recordVisit(url: tab.url, title: tab.title)
+            profile.history.recordVisit(url: tab.url, title: tab.title)
         } else if tab.recordedVisit?.title != tab.title {
-            HistoryStore.shared.setTitle(tab.title, for: tab.url)
+            profile.history.setTitle(tab.title, for: tab.url)
         } else {
             return
         }
@@ -647,7 +679,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     // MARK: Actions (also reached from the menu through the responder chain)
 
     @objc func newTab(_ sender: Any?) {
-        openTab(url: Settings.newTabPage == .homepage ? Settings.homepageURL : "about:blank", select: true)
+        let settings = profile.settings
+        openTab(url: settings.newTabPage == .homepage ? settings.homepageURL : "about:blank", select: true)
     }
 
     /// Opens `url` in a new selected tab and brings the window forward. A
@@ -667,7 +700,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     /// Cmd+Shift+T: opens the last closed tab where it was.
     @objc func reopenClosedTab(_ sender: Any?) {
-        guard let closed = SessionStore.shared.popClosedTab() else { return }
+        guard let closed = profile.session.popClosedTab() else { return }
         openTab(url: closed.tab.url, select: true, at: closed.index, restoring: closed.tab)
     }
 
@@ -703,7 +736,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Moves the tabs between the toolbar and the sidebar.
     @objc func toggleTabSidebar(_ sender: Any?) {
         guard fullscreenTab == nil else { return }
-        Settings.tabLayout = tabLayout == .vertical ? .horizontal : .vertical
+        profile.settings.tabLayout = tabLayout == .vertical ? .horizontal : .vertical
     }
 
     // MARK: Zoom
@@ -793,7 +826,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         // The chrome stays out of the way while a page has the screen.
         guard fullscreenTab == nil else { return }
         agentPanelShown.toggle()
-        Settings.defaults.set(agentPanelShown, forKey: Self.agentVisibleKey)
+        profile.settings.defaults.set(agentPanelShown, forKey: Self.agentVisibleKey)
         agentButton.state = agentPanelShown ? .on : .off
         updateAgentBadge()
         agentToggleCount += 1
@@ -934,7 +967,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     @objc private func addressEntered(_ sender: NSTextField) {
         let input = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else { return }
-        open(AddressInput.url(for: input), .returnKey(OpenDisposition.currentFlags))
+        open(AddressInput.url(for: input, settings: profile.settings), .returnKey(OpenDisposition.currentFlags))
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -956,7 +989,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case #selector(goBack(_:)): selectedTab?.canGoBack ?? false
         case #selector(goForward(_:)): selectedTab?.canGoForward ?? false
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)): tabs.count > 1
-        case #selector(reopenClosedTab(_:)): SessionStore.shared.hasClosedTabs
+        case #selector(reopenClosedTab(_:)): profile.session.hasClosedTabs
         case #selector(fillPassword(_:)): selectedTab.map { !savedLogins(for: $0).isEmpty } ?? false
         case #selector(findNext(_:)), #selector(findPrevious(_:)): !findBar.text.isEmpty
         case #selector(actualSize(_:)): selectedTab.map { abs($0.zoomFactor - 1) > 0.001 } ?? false
@@ -1005,7 +1038,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     // MARK: Downloads
 
     /// Shows the button with the first download and keeps its ring current.
-    private func downloadsChanged() {
+    @objc private func downloadsChanged(_ notification: Notification) {
         downloadsButton.refresh()
         let hidden = DownloadStore.shared.downloads.isEmpty
         if downloadsItem?.isHidden != hidden {
@@ -1018,8 +1051,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// A load that became a download leaves the tab on its page, so the tab
     /// shouldn't keep the download's URL, or the session would fetch the file
     /// again at the next launch.
-    private func downloadStarted(_ download: Download) {
-        guard let tab = tabs.first(where: { $0.browserID == download.tabID }) else { return }
+    @objc private func downloadStarted(_ notification: Notification) {
+        guard let download = notification.userInfo?["download"] as? Download, let tab = tabs.first(where: { $0.browserID == download.tabID }) else { return }
         tab.dropPendingLoad(of: [download.url, download.originalURL])
     }
 
@@ -1042,8 +1075,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     // MARK: Tab layout
 
     @objc private func tabLayoutChanged(_ notification: Notification) {
-        guard Settings.tabLayout != tabLayout else { return }
-        tabLayout = Settings.tabLayout
+        guard profile.settings.tabLayout != tabLayout else { return }
+        tabLayout = profile.settings.tabLayout
         applyTabLayout()
         if fullscreenTab != nil { hideChromeForFullscreen() }
         if let selectedTab { tabStrip.update(tabs: tabs, selected: selectedTab) }
@@ -1117,7 +1150,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     @objc func toggleSidebarCollapsed(_ sender: Any?) {
         guard tabLayout == .vertical, fullscreenTab == nil else { return }
         sidebar.isCollapsed.toggle()
-        Settings.sidebarCollapsed = sidebar.isCollapsed
+        profile.settings.sidebarCollapsed = sidebar.isCollapsed
         fitSidebar()
     }
 
@@ -1126,7 +1159,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             TabSidebarView.widthRange.contains(sidebar.frame.width)
         else { return }
         sidebarWidth = sidebar.frame.width
-        Settings.defaults.set(Double(sidebarWidth), forKey: Self.sidebarWidthKey)
+        profile.settings.defaults.set(Double(sidebarWidth), forKey: Self.sidebarWidthKey)
     }
 
     private static let reloadImage = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Reload")
@@ -1167,10 +1200,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         )
     }
 
+    /// The profile in front is the one a plain launch, links from other apps
+    /// and the CLI pick.
+    func windowDidBecomeKey(_ notification: Notification) {
+        Profiles.markUsed(profile.id)
+    }
+
     func windowWillClose(_ notification: Notification) {
         extensionPopover?.close()
         agentPanel.shutDown()
-        SessionStore.shared.flush()
+        profile.session.flush()
         onClose?()
     }
 
@@ -1233,8 +1272,6 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             downloadsButton.widthAnchor.constraint(equalToConstant: round.width),
             downloadsButton.heightAnchor.constraint(equalToConstant: round.height),
         ])
-        DownloadStore.shared.onChange = { [weak self] in self?.downloadsChanged() }
-        DownloadStore.shared.onStart = { [weak self] download in self?.downloadStarted(download) }
 
         addressBar.field.target = self
         addressBar.field.action = #selector(addressEntered(_:))
@@ -1257,7 +1294,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             open.close()
             if open.manifest.id == manifest.id { return }
         }
-        let popover = ExtensionPopover(manifest: manifest)
+        let popover = ExtensionPopover(manifest: manifest, profile: profile)
         popover.onOpenTab = { [weak self, weak popover] url, background in
             guard let self else { return }
             self.openTab(url: url, select: !background)
@@ -1345,7 +1382,7 @@ extension BrowserWindowController {
             tabs.forEach(start)
             return ["tabs": tabs.map(info)]
         case "tabs.new":
-            let url = (params["url"] as? String).map(AddressInput.url(for:)) ?? "about:blank"
+            let url = (params["url"] as? String).map { AddressInput.url(for: $0, settings: profile.settings) } ?? "about:blank"
             return info(openTab(url: url, select: params["select"] as? Bool ?? true))
         case "tabs.select":
             let tab = try tab(for: params)
@@ -1365,7 +1402,7 @@ extension BrowserWindowController {
         case "tabs.navigate":
             let tab = try tab(for: params)
             guard let input = params["url"] as? String, !input.isEmpty else { throw ControlError("navigate needs a url") }
-            tab.load(AddressInput.url(for: input))
+            tab.load(AddressInput.url(for: input, settings: profile.settings))
             tabDidChange(tab)
             return info(tab)
         case "tabs.wait_load":
@@ -1511,12 +1548,12 @@ extension BrowserWindowController {
         case "agentText":
             agentPanel.setTextForTesting(text)
         case "runSchedule":
-            guard let schedule = AgentScheduleStore.shared.schedules.first(where: { $0.name == text }) else {
+            guard let schedule = profile.schedules.schedules.first(where: { $0.name == text }) else {
                 throw ControlError("no scheduled prompt named \(text)")
             }
-            AgentScheduler.shared.runNow(schedule.id)
+            profile.scheduler.runNow(schedule.id)
         case "scheduleEditor":
-            (NSApp.delegate as? AppDelegate)?.showSettings(pane: ScheduledSettingsPane.paneTitle)
+            (NSApp.delegate as? AppDelegate)?.showSettings(pane: ScheduledSettingsPane.paneTitle, profile: profile)
             ScheduledSettingsPane.shown?.addForTesting(prompt: text)
         case "find":
             showFindBar(nil)
@@ -1533,7 +1570,7 @@ extension BrowserWindowController {
         case "sidebar":
             toggleSidebarCollapsed(nil)
         case "settings":
-            (NSApp.delegate as? AppDelegate)?.showSettings(pane: text)
+            (NSApp.delegate as? AppDelegate)?.showSettings(pane: text, profile: profile)
         case "appearance":
             NSApp.appearance = switch text {
             case "dark": NSAppearance(named: .darkAqua)
@@ -1610,9 +1647,9 @@ extension BrowserWindowController {
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { response in
             guard response == .alertFirstButtonReturn else { return }
-            HistoryStore.shared.clear()
             MainActor.assumeIsolated {
-                SessionStore.shared.clearClosedTabs()
+                self.profile.history.clear()
+                self.profile.session.clearClosedTabs()
                 // So each open tab saves its favicon again.
                 self.tabs.forEach { $0.recordedIcon = nil }
             }
@@ -1621,7 +1658,7 @@ extension BrowserWindowController {
 
     @objc func importFromChrome(_ sender: Any?) {
         guard let window, chromeImport == nil else { return }
-        let controller = ChromeImportController()
+        let controller = ChromeImportController(profile: profile)
         chromeImport = controller
         controller.begin(on: window) { [weak self] in self?.chromeImport = nil }
     }
@@ -1645,13 +1682,13 @@ extension BrowserWindowController {
     }
 
     private func savedLogins(for tab: Tab) -> [PasswordStore.Entry] {
-        SavedLogin.origin(of: tab.url).map(PasswordStore.shared.logins(for:)) ?? []
+        SavedLogin.origin(of: tab.url).map { profile.passwords.logins(for: $0) } ?? []
     }
 
     private func fill(_ login: PasswordStore.Entry, in tab: Tab) {
         Task {
             do {
-                let password = try await PasswordStore.shared.password(for: login)
+                let password = try await profile.passwords.password(for: login)
                 guard tabs.contains(where: { $0 === tab }) else { return }
                 tab.executeJavaScript(LoginFill.script(origin: login.origin, username: login.username, password: password))
             } catch {

@@ -11,9 +11,11 @@ final class ProvidersSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     private var placeholder: NSTextField?
     /// The editor sheet while it is open.
     private var editorWindow: NSWindow?
-    private var providers: [AgentProvider] { AgentProviderStore.shared.providers }
+    private var providers: [AgentProvider] { store.providers }
+    private let store: AgentProviderStore
 
-    init() {
+    init(profile: ProfileContext) {
+        store = profile.providers
         super.init(nibName: nil, bundle: nil)
         title = "Providers"
     }
@@ -70,7 +72,7 @@ final class ProvidersSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         self.view = view
         view.layoutSubtreeIfNeeded()
         preferredContentSize = view.fittingSize
-        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .agentProvidersDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .agentProvidersDidChange, object: store)
         reload(nil)
         SettingsPane.show(
             "Run Claude Code against another Anthropic-compatible API, such as DeepSeek's. Each provider shows "
@@ -144,7 +146,7 @@ final class ProvidersSettingsPane: NSViewController, NSTableViewDataSource, NSTa
             self?.editorWindow = nil
             guard let (provider, key) = saved else { return }
             AgentProviderKeychain.write(key, for: provider.id)
-            AgentProviderStore.shared.save(provider)
+            self?.store.save(provider)
         }
         editorWindow = sheet
         window.beginSheet(sheet)
@@ -160,9 +162,9 @@ final class ProvidersSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         alert.addButton(withTitle: "Remove")
         alert.buttons[0].hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { response in
+        alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
-            MainActor.assumeIsolated { AgentProviderStore.shared.remove(provider.id) }
+            MainActor.assumeIsolated { self?.store.remove(provider.id) }
         }
     }
 }

@@ -139,11 +139,13 @@ final class ExtensionPopover: NSObject, NSPopoverDelegate, TabDelegate {
 
     let manifest: ExtensionManifest
     private let popover = NSPopover()
-    private let tab = Tab()
+    private let tab: Tab
     private var closing = false
 
-    init(manifest: ExtensionManifest) {
+    /// The popup runs in `profile`'s request context, like its tabs.
+    init(manifest: ExtensionManifest, profile: ProfileContext) {
         self.manifest = manifest
+        tab = Tab(profile: profile)
         super.init()
     }
 

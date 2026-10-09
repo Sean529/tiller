@@ -15,25 +15,34 @@ final class ControlDeferred {
 
 /// Answers tiller_mcp's tab requests (list, open, select, navigate, close) and
 /// skill requests (list, read, save) and schedule requests (list, save,
-/// delete, run) that arrive on the control socket. DevTools calls on the same socket never reach
-/// Swift; the core sends them to the tab directly.
+/// delete, run) for one profile, on its control socket. DevTools calls on the
+/// same socket never reach Swift; the core sends them to the profile's tab
+/// directly. `app.open` opens a profile, for a second launch of Tiller to
+/// pass on what it was asked.
 @MainActor
 final class ControlServer {
-    /// `control.sock` in the profile's folder. Both the app and tiller_mcp
-    /// honor TILLER_SOCKET, for folders whose path is too long for a socket.
-    /// Agents are given this path in TILLER_SOCKET.
-    static let socketPath = ProcessInfo.processInfo.environment["TILLER_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
-        ?? DataDirectory.file("control.sock")
+    private weak var profile: ProfileContext?
+    private let socketPath: String
 
-    weak var browser: BrowserWindowController?
+    init(profile: ProfileContext) {
+        self.profile = profile
+        socketPath = profile.socketPath
+    }
 
-    /// The server lives for the rest of the process once started.
+    /// The server object lives for the rest of the process once started,
+    /// since a request may still be on its way after `stop`.
     func start() -> Bool {
+        guard let profile else { return false }
         let ctx = Unmanaged.passRetained(self).toOpaque()
-        return tiller_ipc_start(Self.socketPath, ctx) { ctx, request, token in
+        return tiller_ipc_start(socketPath, profile.context, ctx) { ctx, request, token in
             guard let ctx, let request else { return }
             ControlServer.from(ctx).handle(String(cString: request), token: token)
         }
+    }
+
+    /// Stops the socket, for the profile closing.
+    func stop() {
+        tiller_ipc_stop(socketPath)
     }
 
     nonisolated private static func from(_ ctx: UnsafeMutableRawPointer) -> ControlServer {
@@ -48,13 +57,18 @@ final class ControlServer {
                     let method = request["method"] as? String
                 else { throw ControlError("request needs a method") }
                 let params = request["params"] as? [String: Any] ?? [:]
-                if method.hasPrefix("skills.") {
-                    result = try AgentSkillCatalog.control(method, params: params)
-                } else if method.hasPrefix("schedules.") {
-                    result = try AgentScheduleControl.control(method, params: params)
+                if method == "app.open" {
+                    result = try Self.openProfile(params)
                 } else {
-                    guard let browser else { throw ControlError("no browser window is open") }
-                    result = try browser.control(method, params: params)
+                    guard let profile else { throw ControlError("the profile was closed") }
+                    if method.hasPrefix("skills.") {
+                        result = try AgentSkillCatalog.control(method, params: params, profile: profile)
+                    } else if method.hasPrefix("schedules.") {
+                        result = try AgentScheduleControl.control(method, params: params, profile: profile)
+                    } else {
+                        guard let browser = profile.window else { throw ControlError("no browser window is open") }
+                        result = try browser.control(method, params: params)
+                    }
                 }
             } catch let error as ControlError {
                 return Self.send(["error": error.message], token: token)
@@ -73,6 +87,18 @@ final class ControlServer {
                 Self.send(["result": result], token: token)
             }
         }
+    }
+
+    /// Opens the profile `profile` names by id or name, or the one used
+    /// last, with `urls` in new tabs.
+    private static func openProfile(_ params: [String: Any]) throws -> Any {
+        var id = Profiles.lastUsed.id
+        if let wanted = params["profile"] as? String {
+            guard let profile = Profiles.find(wanted) else { throw ControlError("no profile named \(wanted)") }
+            id = profile.id
+        }
+        ProfileContext.open(id, urls: params["urls"] as? [String] ?? [])
+        return ["profile": id]
     }
 
     private static func send(_ reply: [String: Any], token: UInt64) {

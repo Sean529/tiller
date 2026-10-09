@@ -2,8 +2,9 @@ import AppKit
 import os
 
 /// A profile has its own cookies and site data, history, open tabs, saved
-/// passwords, settings and agent chats. Each open profile is a separate Tiller
-/// process working in `Profiles/<id>` under the root folder.
+/// passwords, settings and agent chats, in `Profiles/<id>` under the root
+/// folder, and Chromium's data in `Chromium/<id>`. One Tiller process runs
+/// every open profile, each in a window of its own (see `ProfileContext`).
 struct Profile: Codable, Equatable, Sendable {
     let id: String
     var name: String
@@ -13,22 +14,23 @@ struct Profile: Codable, Equatable, Sendable {
 enum ProfileError: LocalizedError {
     case emptyName
     case duplicateName(String)
-    case current
+    case open(String)
     case running(String)
 
     var errorDescription: String? {
         switch self {
         case .emptyName: "A profile needs a name."
         case .duplicateName(let name): "There is already a profile called \(name)."
-        case .current: "This window's profile can't be deleted. Open another profile and delete it from there."
-        case .running(let name): "\(name) is open. Quit it first, then delete it."
+        case .open(let name): "\(name) is open. Close its window first, then delete it."
+        case .running(let name): "\(name) is open in another copy of Tiller. Quit it first."
         }
     }
 }
 
 /// Every profile, listed in `profiles.json` in the root folder with the one
-/// used last, which a plain launch and the `tiller` CLI pick. All running
-/// Tillers share the file, so each change re-reads it under `profiles.lock`.
+/// used last, which a plain launch, links from other apps and the `tiller` CLI
+/// pick, and the ones open when Tiller last quit, which the next launch
+/// opens again. Each change re-reads the file under `profiles.lock`.
 enum Profiles {
     /// The profile that data from before profiles existed moved into.
     static let defaultID = "default"
@@ -36,62 +38,91 @@ enum Profiles {
     /// `~/Library/Application Support/Tiller`, or the folder in `TILLER_DATA_DIR`.
     /// tiller_mcp reads the same variable to find `profiles.json`.
     static let root: String = {
-        if let dir = ProcessInfo.processInfo.environment["TILLER_DATA_DIR"], !dir.isEmpty { return dir }
+        // Absolute, since Chromium needs its folders to be.
+        if let dir = ProcessInfo.processInfo.environment["TILLER_DATA_DIR"], !dir.isEmpty {
+            return URL(fileURLWithPath: dir).standardizedFileURL.path
+        }
         return NSHomeDirectory() + "/Library/Application Support/Tiller"
     }()
+
+    /// Chromium's own folder: `Local State`, `chrome_debug.log` and the
+    /// like, with every profile's Chromium data in a folder inside it, since
+    /// Chromium makes a profile only of a folder right inside its own.
+    static var chromiumRoot: String { root + "/Chromium" }
 
     static func folder(for id: String) -> String {
         root + "/Profiles/" + id
     }
 
-    /// The profile this process runs: the one the `-profile` launch argument
-    /// names by id or name, else the one used last. The first access creates
-    /// the default profile when there is none.
-    static let current: Profile = {
-        let list = update { list in
-            if list.profiles.isEmpty {
-                list.profiles = [Profile(id: defaultID, name: "Default", created: Date())]
-            }
-        }
-        return UserDefaults.standard.string(forKey: "profile").flatMap { find($0, in: list.profiles) }
-            ?? list.lastUsed.flatMap { id in list.profiles.first { $0.id == id } }
-            ?? list.profiles[0]
-    }()
+    /// Where Chromium keeps the profile's cookies, cache and site data.
+    static func cachePath(for id: String) -> String {
+        chromiumRoot + "/" + id
+    }
 
-    /// This profile's settings, in a user defaults suite of its own. Launch
-    /// arguments (`-homepage https://…`) still override them. UserDefaults is
-    /// thread-safe, though not marked Sendable.
-    nonisolated(unsafe) static let defaults = UserDefaults(suiteName: suiteName(for: current.id)) ?? .standard
+    /// The profile's settings, in a user defaults suite of its own. Launch
+    /// arguments (`-homepage https://…`) still override them.
+    static func defaults(for id: String) -> UserDefaults {
+        UserDefaults(suiteName: suiteName(for: id)) ?? .standard
+    }
 
     static func suiteName(for id: String) -> String {
         (Bundle.main.bundleIdentifier ?? "dev.sorrycc.tiller") + ".profile." + id
     }
 
-    /// In the order they were created.
-    static var all: [Profile] { read().profiles }
-
-    /// The current profile's name, which another Tiller may have changed.
-    static var currentName: String {
-        all.first { $0.id == current.id }?.name ?? current.name
+    /// In the order they were created. The first access creates the default
+    /// profile when there is none.
+    static var all: [Profile] {
+        let list = read()
+        return list.profiles.isEmpty ? ensureOne().profiles : list.profiles
     }
 
-    static func find(_ idOrName: String, in profiles: [Profile]) -> Profile? {
-        profiles.first { $0.id == idOrName }
+    static func profile(_ id: String) -> Profile? {
+        all.first { $0.id == id }
+    }
+
+    /// The profile's name, which may have changed since it opened.
+    static func name(of id: String) -> String {
+        profile(id)?.name ?? id
+    }
+
+    static func find(_ idOrName: String, in profiles: [Profile]? = nil) -> Profile? {
+        let profiles = profiles ?? all
+        return profiles.first { $0.id == idOrName }
             ?? profiles.first { $0.name.localizedCaseInsensitiveCompare(idOrName) == .orderedSame }
     }
 
-    /// Makes the current profile the one a plain launch and the CLI pick.
-    /// Called on every activation, so the lock is only taken when the list
-    /// says another profile.
-    static func markUsed() {
-        guard read().lastUsed != current.id else { return }
-        update { $0.lastUsed = current.id }
+    /// The profile a plain launch, links from other apps and the CLI pick.
+    static var lastUsed: Profile {
+        let list = read()
+        let profiles = list.profiles.isEmpty ? ensureOne().profiles : list.profiles
+        return list.lastUsed.flatMap { id in profiles.first { $0.id == id } } ?? profiles[0]
     }
 
-    /// The profile a plain launch and the CLI pick, which may be another Tiller's.
-    static var lastUsedID: String {
+    /// Makes `id` the profile a plain launch and the CLI pick. Called each
+    /// time a profile's window comes to the front, so the lock is only taken
+    /// when the list says another profile.
+    static func markUsed(_ id: String) {
+        guard read().lastUsed != id else { return }
+        update { $0.lastUsed = id }
+    }
+
+    /// The profiles open when Tiller last quit, which still exist.
+    static var lastOpen: [Profile] {
         let list = read()
-        return list.lastUsed.flatMap { id in list.profiles.first { $0.id == id }?.id } ?? current.id
+        return (list.open ?? []).compactMap { id in list.profiles.first { $0.id == id } }
+    }
+
+    /// Remembers which profiles are open, for the next launch.
+    static func setOpen(_ ids: [String]) {
+        update { $0.open = ids }
+    }
+
+    private static func ensureOne() -> List {
+        update { list in
+            if list.profiles.isEmpty {
+                list.profiles = [Profile(id: defaultID, name: "Default", created: Date())]
+            }
+        }
     }
 
     static func create(named name: String) throws -> Profile {
@@ -118,20 +149,19 @@ enum Profiles {
         NotificationCenter.default.post(name: .profilesDidChange, object: nil)
     }
 
-    /// Moves the profile's folder to the Trash and forgets its settings and
-    /// password key. The current profile and open ones can't be deleted.
+    /// Moves the profile's folders to the Trash and forgets its settings and
+    /// password key. An open profile can't be deleted.
+    @MainActor
     static func delete(_ id: String) throws {
-        guard id != current.id else { throw ProfileError.current }
-        if runningProcess(id) != nil {
-            throw ProfileError.running(all.first { $0.id == id }?.name ?? id)
-        }
+        if ProfileContext.opened(id) != nil { throw ProfileError.open(name(of: id)) }
+        if runningProcess(id) != nil { throw ProfileError.running(name(of: id)) }
         update { list in
             list.profiles.removeAll { $0.id == id }
-            if list.lastUsed == id { list.lastUsed = current.id }
+            if list.lastUsed == id { list.lastUsed = nil }
+            list.open?.removeAll { $0 == id }
         }
-        let folder = URL(fileURLWithPath: folder(for: id))
-        if FileManager.default.fileExists(atPath: folder.path) {
-            try FileManager.default.trashItem(at: folder, resultingItemURL: nil)
+        for path in [folder(for: id), cachePath(for: id)] where FileManager.default.fileExists(atPath: path) {
+            try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: nil)
         }
         UserDefaults.standard.removePersistentDomain(forName: suiteName(for: id))
         PasswordKey.delete(profileID: id)
@@ -148,76 +178,74 @@ enum Profiles {
         return name
     }
 
-    // MARK: Opening
+    // MARK: Control sockets
 
-    /// The control socket another profile's Tiller listens on, unless it was
-    /// started with TILLER_SOCKET.
+    /// The control socket an open profile listens on. TILLER_SOCKET, when
+    /// set, stands in for the socket of the profile that opens first.
     static func socketPath(for id: String) -> String {
         folder(for: id) + "/control.sock"
     }
 
-    /// Brings the profile's Tiller forward, or starts one for it. A new one
-    /// opens `urls` in tabs.
-    @MainActor
-    static func open(_ id: String, urls: [URL] = []) {
-        if let pid = runningProcess(id) {
-            NSRunningApplication(processIdentifier: pid)?.activate()
-            return
-        }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.createsNewApplicationInstance = true
-        configuration.arguments = ["-profile", id]
-        // As an argument: macOS may hand URLs opened this way to a Tiller
-        // that is running already rather than the new one.
-        if !urls.isEmpty {
-            configuration.arguments += ["-openURLs", urls.map(\.absoluteString).joined(separator: "\n")]
-        }
-        // The new process must find the same profiles. TILLER_SOCKET isn't
-        // passed on, since two processes can't share a socket.
-        if let dir = ProcessInfo.processInfo.environment["TILLER_DATA_DIR"], !dir.isEmpty {
-            configuration.environment = ["TILLER_DATA_DIR": dir]
-        }
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
-            guard let error else { return }
-            let message = error.localizedDescription
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let alert = NSAlert()
-                    alert.alertStyle = .warning
-                    alert.messageText = "Couldn't open the profile"
-                    alert.informativeText = message
-                    alert.runModal()
-                }
-            }
+    // MARK: Locks
+
+    /// Locks `instance.lock` in the root folder for the life of the process,
+    /// so only one Tiller runs. Returns the process that holds it already, or
+    /// nil once this one does.
+    static func claimApp() -> pid_t? {
+        try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        switch lock(root + "/instance.lock") {
+        case .held: return nil
+        case .busy(let pid): return pid
+        case .failed: return nil
         }
     }
 
-    // MARK: Instance lock
+    /// Locks the profile's `instance.lock` while it is open, so a Tiller from
+    /// before profiles shared one process can't open it too, and this one
+    /// can't open a profile such a Tiller has. Returns the descriptor to
+    /// close when the profile closes, or the process holding the lock.
+    static func claim(_ id: String) -> Result<Int32, ProfileError> {
+        try? FileManager.default.createDirectory(atPath: folder(for: id), withIntermediateDirectories: true)
+        switch lock(lockPath(for: id)) {
+        case .held(let fd): return .success(fd)
+        case .busy: return .failure(.running(name(of: id)))
+        case .failed: return .success(-1)
+        }
+    }
+
+    /// Unlocks a profile that closed.
+    static func release(_ fd: Int32) {
+        guard fd >= 0 else { return }
+        flock(fd, LOCK_UN)
+        close(fd)
+    }
+
+    private enum Lock {
+        case held(Int32)
+        case busy(pid_t)
+        case failed
+    }
+
+    /// Locks the file at `path` and writes this process's id in it.
+    private static func lock(_ path: String) -> Lock {
+        let fd = Darwin.open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return .failed }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            let pid = processID(in: fd)
+            close(fd)
+            return .busy(pid)
+        }
+        ftruncate(fd, 0)
+        let text = "\(getpid())"
+        _ = text.withCString { pwrite(fd, $0, strlen($0), 0) }
+        return .held(fd)
+    }
 
     private static func lockPath(for id: String) -> String {
         folder(for: id) + "/instance.lock"
     }
 
-    /// Locks the current profile's `instance.lock` for the life of the process,
-    /// so no other process opens the same profile. Returns the process that
-    /// holds it already, or nil once this one does.
-    static func claim() -> pid_t? {
-        try? FileManager.default.createDirectory(atPath: folder(for: current.id), withIntermediateDirectories: true)
-        let fd = Darwin.open(lockPath(for: current.id), O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { return nil }
-        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
-            let pid = processID(in: fd)
-            close(fd)
-            return pid
-        }
-        ftruncate(fd, 0)
-        let text = "\(getpid())"
-        _ = text.withCString { pwrite(fd, $0, strlen($0), 0) }
-        // The descriptor stays open, and the lock held, until the process exits.
-        return nil
-    }
-
-    /// The process running profile `id`, or nil when none is.
+    /// Another process running profile `id`, or nil when none is.
     static func runningProcess(_ id: String) -> pid_t? {
         let fd = Darwin.open(lockPath(for: id), O_RDONLY | O_CLOEXEC)
         guard fd >= 0 else { return nil }
@@ -226,7 +254,8 @@ enum Profiles {
             flock(fd, LOCK_UN)
             return nil
         }
-        return processID(in: fd)
+        let pid = processID(in: fd)
+        return pid == getpid() ? nil : pid
     }
 
     /// The pid written in a lock file. 0 when unreadable, which activates nothing.
@@ -241,15 +270,18 @@ enum Profiles {
 
     private struct List: Codable, Equatable, Sendable {
         var profiles: [Profile] = []
-        /// The id of the profile whose Tiller was active last.
+        /// The id of the profile whose window was in front last.
         var lastUsed: String?
+        /// The ids of the profiles open when Tiller last quit, in the order
+        /// they opened.
+        var open: [String]?
     }
 
     private static var listURL: URL { URL(fileURLWithPath: root + "/profiles.json") }
 
     /// The list as last decoded, with the file's modification date then.
-    /// Every activation and the Dock badge read the list, so the file is
-    /// only decoded again once another Tiller has written it.
+    /// Menus and window titles read the list often, so the file is only
+    /// decoded again once it has been written.
     private static let lastRead = OSAllocatedUnfairLock<(modified: Date?, list: List)?>(initialState: nil)
 
     private static func read() -> List {
@@ -331,7 +363,7 @@ enum ProfileNamePrompt {
 }
 
 extension Notification.Name {
-    /// Posted when this process changes the profiles, and when Tiller becomes
-    /// active, since another Tiller may have changed them.
+    /// Posted when the profiles are added, renamed or removed, and when one
+    /// opens or closes.
     static let profilesDidChange = Notification.Name("TillerProfilesDidChange")
 }

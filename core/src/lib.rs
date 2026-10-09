@@ -19,18 +19,24 @@ pub extern "C" fn tiller_core_version() -> *const c_char {
 }
 
 /// Loads CEF, installs the CEF-compatible NSApplication and initializes CEF
-/// with Chromium's data in `data_dir`, the profile's folder, and the extension
-/// folders in `extensions`, one per line. Must be the first thing `main` does,
-/// before anything touches `NSApp`. Returns 0 on success, or a nonzero exit
-/// code.
+/// with Chromium's own files in `data_dir`, the folder holding the profiles,
+/// the global request context's data in `cache_path` inside it, and the
+/// extension folders in `extensions`, one per line, which every profile
+/// loads. Must be the first thing `main` does, before anything touches
+/// `NSApp`. Returns 0 on success, or a nonzero exit code.
 ///
 /// # Safety
-/// `data_dir` and `extensions` must be NUL-terminated UTF-8 strings.
-/// `extensions` may be null.
+/// `data_dir`, `cache_path` and `extensions` must be NUL-terminated UTF-8
+/// strings. `extensions` may be null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tiller_core_start(data_dir: *const c_char, extensions: *const c_char) -> c_int {
+pub unsafe extern "C" fn tiller_core_start(
+    data_dir: *const c_char,
+    cache_path: *const c_char,
+    extensions: *const c_char,
+) -> c_int {
     let root = unsafe { cstr(data_dir) };
-    if root.is_empty() {
+    let cache_path = unsafe { cstr(cache_path) };
+    if root.is_empty() || cache_path.is_empty() {
         return 1;
     }
     // Chromium splits the switch on commas, so a folder with one in its path
@@ -64,7 +70,7 @@ pub unsafe extern "C" fn tiller_core_start(data_dir: *const c_char, extensions: 
 
     let settings = Settings {
         root_cache_path: CefString::from(root.as_str()),
-        cache_path: CefString::from(format!("{root}/Default").as_str()),
+        cache_path: CefString::from(cache_path.as_str()),
         persist_session_cookies: 1,
         // Chrome's user agent, with Tiller named after it, so sites treat
         // Tiller as the Chrome it is. Chrome only gives its major version.
@@ -101,6 +107,13 @@ pub extern "C" fn tiller_core_set_quit_handler(handler: Option<unsafe extern "C"
     app_mac::set_quit_handler(handler);
 }
 
+/// Closes every browser, after which the message loop quits, or quits it
+/// right away when there are none. For a quit with no window open.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_core_quit() {
+    browser::close_all();
+}
+
 /// Sets the function told about every download's progress, on the main
 /// thread. Null clears it. See `TillerDownloadCallback` in tiller_core.h.
 ///
@@ -117,13 +130,42 @@ pub extern "C" fn tiller_download_cancel(id: u32) {
     downloads::cancel(id);
 }
 
-/// Creates a browser filling `parent_view` (an `NSView *`). Returns the browser
-/// id, or -1 on failure. Callbacks run on the main thread.
+/// Creates the request context for a profile, keeping its Chromium data in
+/// `cache_path`, inside the data folder given to `tiller_core_start`.
+/// `ready` runs on the main thread once browsers can be created in it.
+/// Returns the context's id, or -1.
+///
+/// # Safety
+/// `cache_path` must be a NUL-terminated UTF-8 string. `ctx` must stay valid
+/// until `ready` runs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tiller_context_create(
+    cache_path: *const c_char,
+    ctx: *mut c_void,
+    ready: browser::ContextReady,
+) -> c_int {
+    let path = unsafe { cstr(cache_path) };
+    if path.is_empty() {
+        return -1;
+    }
+    browser::create_context(&path, ctx, ready)
+}
+
+/// Forgets a profile's request context, once its browsers have closed.
+#[unsafe(no_mangle)]
+pub extern "C" fn tiller_context_release(context: c_int) {
+    browser::release_context(context);
+}
+
+/// Creates a browser in request context `context`, filling `parent_view` (an
+/// `NSView *`). Returns the browser id, or -1 on failure. Callbacks run on
+/// the main thread.
 ///
 /// # Safety
 /// `parent_view` must be a live NSView and `url` a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tiller_browser_create(
+    context: c_int,
     parent_view: *mut c_void,
     width: c_int,
     height: c_int,
@@ -131,7 +173,7 @@ pub unsafe extern "C" fn tiller_browser_create(
     callbacks: browser::Callbacks,
 ) -> c_int {
     let url = unsafe { cstr(url) };
-    browser::create(parent_view, width, height, &url, callbacks)
+    browser::create(context, parent_view, width, height, &url, callbacks)
 }
 
 /// # Safety
@@ -278,17 +320,22 @@ pub unsafe extern "C" fn tiller_browser_execute_js(id: c_int, code: *const c_cha
     }
 }
 
-/// Sets the cookies in `cookies_json` (see tiller_core.h), replacing any with
-/// the same name, domain and path. `done` runs on the main thread once all
-/// are set and written to disk.
+/// Sets the cookies in `cookies_json` (see tiller_core.h) in request context
+/// `context`, replacing any with the same name, domain and path. `done` runs
+/// on the main thread once all are set and written to disk.
 ///
 /// # Safety
 /// `cookies_json` must be a NUL-terminated UTF-8 string. `ctx` must stay valid
 /// until `done` runs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tiller_cookies_import(cookies_json: *const c_char, ctx: *mut c_void, done: cookies::Done) {
+pub unsafe extern "C" fn tiller_cookies_import(
+    context: c_int,
+    cookies_json: *const c_char,
+    ctx: *mut c_void,
+    done: cookies::Done,
+) {
     let json = unsafe { cstr(cookies_json) };
-    cookies::import(&json, ctx, done);
+    cookies::import(context, &json, ctx, done);
 }
 
 /// Closes a tab. The page's beforeunload runs first and may cancel. When the
@@ -304,24 +351,40 @@ pub extern "C" fn tiller_browser_detach(id: c_int) {
     browser::detach(id);
 }
 
-/// Starts the control socket at `socket_path` that `tiller_mcp` connects to.
-/// `handler` gets every request except `cdp`, on the main thread, and must
-/// answer each one with `tiller_ipc_reply`. Returns false if the socket can't be
-/// created.
+/// Starts a profile's control socket at `socket_path`, which `tiller_mcp`
+/// connects to. `handler` gets every request except `cdp`, on the main
+/// thread, and must answer each one with `tiller_ipc_reply`. `cdp` reaches
+/// only tabs in request context `context`. Returns false if the socket can't
+/// be created.
 ///
 /// # Safety
 /// `socket_path` must be a NUL-terminated UTF-8 string. `ctx` must stay valid
 /// for the life of the process.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tiller_ipc_start(socket_path: *const c_char, ctx: *mut c_void, handler: ipc::Handler) -> bool {
+pub unsafe extern "C" fn tiller_ipc_start(
+    socket_path: *const c_char,
+    context: c_int,
+    ctx: *mut c_void,
+    handler: ipc::Handler,
+) -> bool {
     let path = unsafe { cstr(socket_path) };
-    match ipc::start(std::path::Path::new(&path), ctx, handler) {
+    match ipc::start(std::path::Path::new(&path), context, ctx, handler) {
         Ok(()) => true,
         Err(e) => {
             eprintln!("tiller: control socket {path}: {e}");
             false
         }
     }
+}
+
+/// Stops the control socket at `socket_path` and removes it.
+///
+/// # Safety
+/// `socket_path` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tiller_ipc_stop(socket_path: *const c_char) {
+    let path = unsafe { cstr(socket_path) };
+    ipc::stop_one(std::path::Path::new(&path));
 }
 
 /// Answers the request `token`. `reply_json` is `{"result": ...}` or

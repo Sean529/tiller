@@ -40,10 +40,19 @@ typedef struct TillerBrowserCallbacks {
 const char *tiller_core_version(void);
 
 // Loads CEF, installs the CEF-compatible NSApplication subclass and initializes
-// CEF, keeping Chromium's data in `data_dir` (the profile's folder) and loading
-// the unpacked extensions in `extensions`, one folder per line (may be NULL).
-// Call first in main, before touching NSApp. Returns 0 or an exit code.
-int tiller_core_start(const char *data_dir, const char *extensions);
+// CEF, keeping Chromium's own files in `data_dir` (the folder holding the
+// profiles), the global request context's data in `cache_path` inside it, and
+// loading the unpacked extensions in `extensions`, one folder per line (may be
+// NULL), into every profile. Call first in main, before touching NSApp.
+// Returns 0 or an exit code.
+int tiller_core_start(const char *data_dir, const char *cache_path, const char *extensions);
+
+// Creates a profile's request context, with its Chromium data in `cache_path`
+// inside `data_dir`. `ready` runs on the main thread once browsers can be
+// created in it. Returns the context's id or -1.
+int tiller_context_create(const char *cache_path, void *ctx, void (*ready)(void *ctx));
+// Forgets a request context once its browsers have closed.
+void tiller_context_release(int context);
 
 // Runs the message loop until the last browser closes, then shuts CEF down.
 void tiller_core_run(void);
@@ -51,6 +60,10 @@ void tiller_core_run(void);
 // Called on the main thread when the app is asked to quit (Cmd+Q, the Dock,
 // logging out), before any tab starts closing. NULL clears it.
 void tiller_core_set_quit_handler(void (*handler)(void));
+
+// Closes every browser, then quits the message loop; quits it right away
+// when there are none.
+void tiller_core_quit(void);
 
 // A download started, moved on or ended. Called on the main thread.
 // `browser_id` is the tab it came from (-1 if unknown), `path` is where the
@@ -65,8 +78,9 @@ void tiller_core_set_download_handler(void *ctx, TillerDownloadCallback handler)
 // Cancels a download still under way. The callback reports the change.
 void tiller_download_cancel(uint32_t id);
 
-// Creates a browser filling `parent_view` (an NSView *). Returns its id or -1.
-int tiller_browser_create(void *parent_view, int width, int height, const char *url,
+// Creates a browser in request context `context`, filling `parent_view` (an
+// NSView *). Returns its id or -1.
+int tiller_browser_create(int context, void *parent_view, int width, int height, const char *url,
                         TillerBrowserCallbacks callbacks);
 void tiller_browser_load_url(int id, const char *url);
 void tiller_browser_go_back(int id);
@@ -102,7 +116,8 @@ void tiller_browser_exit_fullscreen(int id);
 // Runs JavaScript in the tab's main frame. Nothing comes back.
 void tiller_browser_execute_js(int id, const char *code);
 
-// Sets cookies, replacing any with the same name, domain and path.
+// Sets cookies in request context `context`, replacing any with the same
+// name, domain and path.
 // `cookies_json` is an array of objects:
 //   url        where the cookie is set from, e.g. "https://example.com/"
 //   name, value, path
@@ -113,7 +128,7 @@ void tiller_browser_execute_js(int id, const char *code);
 //   priority   "low", "medium" or "high"
 // `done` runs on the main thread once every cookie is set and the store is
 // written to disk, with how many were set and how many were rejected.
-void tiller_cookies_import(const char *cookies_json, void *ctx,
+void tiller_cookies_import(int context, const char *cookies_json, void *ctx,
                          void (*done)(void *ctx, int imported, int failed));
 
 // Closes a tab. beforeunload runs first and may cancel. If it doesn't,
@@ -123,12 +138,15 @@ void tiller_browser_close(int id);
 // Stops callbacks for this browser. Call before freeing the callback context.
 void tiller_browser_detach(int id);
 
-// Starts the control socket tiller_mcp connects to. `handler` runs on the main
-// thread for every request except DevTools calls, which the core answers
-// itself. Each request must be answered with tiller_ipc_reply using its token.
-// Returns false if the socket can't be created.
-bool tiller_ipc_start(const char *socket_path, void *ctx,
+// Starts a profile's control socket, which tiller_mcp connects to. `handler`
+// runs on the main thread for every request except DevTools calls, which the
+// core sends to the tab itself, if it is in request context `context`. Each
+// request must be answered with tiller_ipc_reply using its token. Returns
+// false if the socket can't be created.
+bool tiller_ipc_start(const char *socket_path, int context, void *ctx,
                     void (*handler)(void *ctx, const char *request_json, uint64_t token));
+// Stops a profile's control socket and removes it.
+void tiller_ipc_stop(const char *socket_path);
 
 // Answers a request. `reply_json` is {"result": ...} or {"error": "..."}.
 void tiller_ipc_reply(uint64_t token, const char *reply_json);

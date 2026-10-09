@@ -41,9 +41,12 @@ enum ChromeImporter {
         var extensions: Result<(extensions: [ChromeExtension], skipped: Int), Error>?
     }
 
-    /// Reads from `dataDirectory` instead of Chrome's real folder when set —
-    /// the Finder-made copy used when security software blocks direct reads.
-    static func run(profile: ChromeProfile, kinds: Set<ImportKind>, dataDirectory: String? = nil) async -> [ImportResult] {
+    /// Brings the data into the Tiller profile `target`. Reads from
+    /// `dataDirectory` instead of Chrome's real folder when set — the
+    /// Finder-made copy used when security software blocks direct reads.
+    static func run(
+        profile: ChromeProfile, into target: ProfileContext, kinds: Set<ImportKind>, dataDirectory: String? = nil
+    ) async -> [ImportResult] {
         let loaded = await Task.detached {
             load(ChromeReader(profile: profile, dataDirectory: dataDirectory ?? ChromeReader.defaultDataDirectory), kinds)
         }.value
@@ -51,7 +54,7 @@ enum ChromeImporter {
 
         if let preferences = loaded.preferences {
             switch preferences {
-            case .success(let prefs): results += applySettings(prefs)
+            case .success(let prefs): results += applySettings(prefs, to: target.settings)
             case .failure(let error): results.append(ImportResult(title: "Search engine and homepage", detail: "", error: error))
             }
         }
@@ -61,7 +64,7 @@ enum ChromeImporter {
             switch history {
             case .success(let pages):
                 result = await withCheckedContinuation { continuation in
-                    HistoryStore.shared.importPages(pages) { continuation.resume(returning: $0) }
+                    target.history.importPages(pages) { continuation.resume(returning: $0) }
                 }
             case .failure(let error):
                 result = .failure(error)
@@ -73,7 +76,7 @@ enum ChromeImporter {
             var result: Result<String, Error>
             do {
                 let (logins, skipped) = try logins.get()
-                let saved = try await PasswordStore.shared.merge(logins)
+                let saved = try await target.passwords.merge(logins)
                 result = .success("\(saved.formatted()) imported" + skippedNote(skipped, "never-saved, non-web or unreadable"))
             } catch {
                 result = .failure(error)
@@ -99,7 +102,7 @@ enum ChromeImporter {
             var result: Result<String, Error>
             do {
                 let (cookies, skipped) = try cookies.get()
-                let (imported, failed) = await setCookies(cookies)
+                let (imported, failed) = await setCookies(cookies, context: target.context)
                 var detail = "\(imported.formatted()) imported" + skippedNote(skipped, "partitioned, expired or unreadable")
                 if failed > 0 { detail += ", \(failed.formatted()) rejected by Chromium" }
                 result = .success(detail)
@@ -124,12 +127,12 @@ enum ChromeImporter {
         return loaded
     }
 
-    private static func applySettings(_ prefs: ChromePreferences) -> [ImportResult] {
+    private static func applySettings(_ prefs: ChromePreferences, to settings: ProfileSettings) -> [ImportResult] {
         var results: [ImportResult] = []
         if let url = prefs.searchURL {
             if let (engine, template) = searchSetting(for: url) {
-                Settings.searchEngine = engine
-                if let template { Settings.searchTemplate = template }
+                settings.searchEngine = engine
+                if let template { settings.searchTemplate = template }
                 results.append(ImportResult(title: "Search engine", detail: "Set to \(template ?? engine.displayName)", error: nil))
             } else {
                 results.append(ImportResult(title: "Search engine", detail: "Chrome's engine (\(url)) can't be used; left unchanged", error: nil))
@@ -138,7 +141,7 @@ enum ChromeImporter {
             results.append(ImportResult(title: "Search engine", detail: "Chrome uses its default; left unchanged", error: nil))
         }
         if let homepage = prefs.homepage {
-            Settings.homepage = homepage
+            settings.homepage = homepage
             results.append(ImportResult(title: "Homepage", detail: "Set to \(homepage)", error: nil))
         } else {
             results.append(ImportResult(title: "Homepage", detail: "Chrome opens its New Tab page; left unchanged", error: nil))
@@ -173,12 +176,12 @@ enum ChromeImporter {
 
     /// Hands the cookies to the core, which sets them through Chromium's
     /// cookie manager and flushes them to disk.
-    private static func setCookies(_ cookies: [ImportedCookie]) async -> (imported: Int, failed: Int) {
+    private static func setCookies(_ cookies: [ImportedCookie], context: Int32) async -> (imported: Int, failed: Int) {
         guard let data = try? JSONEncoder().encode(cookies) else { return (0, cookies.count) }
         let json = String(decoding: data, as: UTF8.self)
         return await withCheckedContinuation { continuation in
             let ctx = Unmanaged.passRetained(CookieCompletion { continuation.resume(returning: ($0, $1)) }).toOpaque()
-            tiller_cookies_import(json, ctx) { ctx, imported, failed in
+            tiller_cookies_import(context, json, ctx) { ctx, imported, failed in
                 guard let ctx else { return }
                 Unmanaged<CookieCompletion>.fromOpaque(ctx).takeRetainedValue().done(Int(imported), Int(failed))
             }
@@ -194,6 +197,7 @@ enum ChromeImporter {
 /// Tiller > Import from Chrome…, shown as a sheet on the browser window.
 @MainActor
 final class ChromeImportController: NSWindowController {
+    private let target: ProfileContext
     private let profilePopUp = NSPopUpButton()
     private var checkboxes: [(ImportKind, NSButton)] = []
     private let status = NSTextField(wrappingLabelWithString: "")
@@ -209,7 +213,8 @@ final class ChromeImportController: NSWindowController {
     private var finished = false
     private var onEnd: (() -> Void)?
 
-    init() {
+    init(profile: ProfileContext) {
+        target = profile
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 300), styleMask: [.titled], backing: .buffered, defer: true)
         super.init(window: window)
         buildContent()
@@ -392,7 +397,7 @@ final class ChromeImportController: NSWindowController {
             }
             if results == nil {
                 status.stringValue = "Importing…"
-                results = await ChromeImporter.run(profile: profile, kinds: selectedKinds, dataDirectory: copyRoot?.path)
+                results = await ChromeImporter.run(profile: profile, into: target, kinds: selectedKinds, dataDirectory: copyRoot?.path)
             }
             let usedCopy = copyRoot != nil
             if let copyRoot {

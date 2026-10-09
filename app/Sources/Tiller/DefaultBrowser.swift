@@ -71,59 +71,26 @@ enum DefaultBrowser {
 }
 
 /// Web links and HTML files other apps hand to Tiller. They open in the profile
-/// used last, like a plain launch and the CLI, so with several profiles open,
-/// the one macOS happened to pick passes them on.
+/// used last, like a plain launch and the CLI, which opens if it is closed.
 @MainActor
 enum IncomingLinks {
-    /// The profile used last just before this Tiller last became active. A
-    /// clicked link activates the Tiller it's sent to, which then marks its own
-    /// profile as used, possibly before the link arrives.
-    private static var lastUsedBeforeActivation: (id: String, at: Date)?
-
-    static func willBecomeActive() {
-        lastUsedBeforeActivation = (Profiles.lastUsedID, Date())
-    }
-
-    /// The profile that should open links arriving now.
-    private static var target: String {
-        if let (id, at) = lastUsedBeforeActivation, Date().timeIntervalSince(at) < 2 { return id }
-        return Profiles.lastUsedID
-    }
-
-    /// Opens `urls` with `openHere`, or in the Tiller of the profile used last.
-    static func route(_ urls: [URL], openHere: @escaping @MainActor ([URL]) -> Void) {
+    static func route(_ urls: [URL]) {
         let urls = urls.filter { ["http", "https", "file"].contains($0.scheme?.lowercased()) }
         guard !urls.isEmpty else { return }
-        let id = target
-        guard id != Profiles.current.id else { return openHere(urls) }
-        guard let pid = Profiles.runningProcess(id) else {
-            // Its Tiller starts with the links.
-            Profiles.open(id, urls: urls)
-            return
-        }
-        let path = Profiles.socketPath(for: id)
-        let strings = urls.map(\.absoluteString)
-        Task {
-            let sent = await Task.detached { strings.allSatisfy { ControlClient.newTab($0, socket: path) } }.value
-            guard sent else {
-                // It may have been started with TILLER_SOCKET, or be quitting.
-                return openHere(urls)
-            }
-            if let app = NSRunningApplication(processIdentifier: pid) {
-                NSApp.yieldActivation(to: app)
-                app.activate()
-            }
-        }
+        ProfileContext.open(Profiles.lastUsed.id, urls: urls.map(\.absoluteString))
     }
 }
 
-/// A one-shot client for another Tiller's control socket, the same line-based
-/// JSON that tiller_mcp speaks.
+/// A one-shot client for a running Tiller's control socket, the same
+/// line-based JSON that tiller_mcp speaks.
 enum ControlClient {
-    /// Opens `url` in a new selected tab. False when the socket can't be
-    /// reached or the request fails.
-    nonisolated static func newTab(_ url: String, socket path: String) -> Bool {
-        let request: [String: Any] = ["id": 1, "method": "tabs.new", "params": ["url": url, "select": true]]
+    /// Asks the Tiller listening on `path` to open profile `profile`, or the
+    /// one used last when nil, with `urls` in new tabs. False when the socket
+    /// can't be reached or the request fails.
+    nonisolated static func open(profile: String?, urls: [String], socket path: String) -> Bool {
+        var params: [String: Any] = ["urls": urls]
+        if let profile { params["profile"] = profile }
+        let request: [String: Any] = ["id": 1, "method": "app.open", "params": params]
         guard let line = try? JSONSerialization.data(withJSONObject: request),
             let reply = send(line + Data("\n".utf8), to: path),
             let object = try? JSONSerialization.jsonObject(with: reply) as? [String: Any]

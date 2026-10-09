@@ -35,6 +35,8 @@ pub struct Callbacks {
 
 struct Entry {
     browser: Browser,
+    /// The profile's request context the browser runs in (see `create_context`).
+    context: i32,
     callbacks: Option<Callbacks>,
     /// Keeps the DevTools observer attached. Added on the first DevTools call.
     devtools: Option<Registration>,
@@ -57,8 +59,14 @@ struct PendingCall {
 /// CEF initializes.
 pub static EXTENSIONS: OnceLock<String> = OnceLock::new();
 
+/// Called once a profile's request context is ready for browsers.
+pub type ContextReady = unsafe extern "C" fn(ctx: *mut c_void);
+
 thread_local! {
     static BROWSERS: RefCell<HashMap<i32, Entry>> = RefCell::new(HashMap::new());
+    /// Each open profile's request context, by the id `create_context` gave it.
+    static CONTEXTS: RefCell<HashMap<i32, RequestContext>> = RefCell::new(HashMap::new());
+    static NEXT_CONTEXT: std::cell::Cell<i32> = const { std::cell::Cell::new(1) };
     /// Native script popups (OAuth windows). CEF owns their windows, but they
     /// must close before CEF shuts down.
     static POPUPS: RefCell<HashMap<i32, Browser>> = RefCell::new(HashMap::new());
@@ -123,7 +131,57 @@ fn to_cstring(s: Option<&CefString>) -> CString {
     })
 }
 
-pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, callbacks: Callbacks) -> i32 {
+/// Creates the request context for a profile whose Chromium data is in
+/// `cache_path`, which must be inside the root cache path. A path used
+/// before shares that context's storage. `ready` runs on the UI thread once
+/// browsers can be created in it. Returns the context's id, or -1.
+pub fn create_context(cache_path: &str, ctx: *mut c_void, ready: ContextReady) -> i32 {
+    let settings = RequestContextSettings {
+        cache_path: CefString::from(cache_path),
+        persist_session_cookies: 1,
+        ..Default::default()
+    };
+    let mut handler = TillerContextHandler::new(ctx as usize, ready);
+    let Some(context) = request_context_create_context(Some(&settings), Some(&mut handler)) else {
+        return -1;
+    };
+    let id = NEXT_CONTEXT.get();
+    NEXT_CONTEXT.set(id + 1);
+    CONTEXTS.with_borrow_mut(|map| map.insert(id, context));
+    id
+}
+
+/// Forgets a profile's request context once its last browser has closed.
+pub fn release_context(id: i32) {
+    CONTEXTS.with_borrow_mut(|map| map.remove(&id));
+}
+
+pub fn context(id: i32) -> Option<RequestContext> {
+    CONTEXTS.with_borrow(|map| map.get(&id).cloned())
+}
+
+/// Whether browser `id` runs in request context `context`.
+pub fn in_context(id: i32, context: i32) -> bool {
+    BROWSERS.with_borrow(|map| map.get(&id).is_some_and(|e| e.context == context))
+}
+
+wrap_request_context_handler! {
+    struct TillerContextHandler {
+        ctx: usize,
+        ready: ContextReady,
+    }
+
+    impl RequestContextHandler {
+        fn on_request_context_initialized(&self, _request_context: Option<&mut RequestContext>) {
+            unsafe { (self.ready)(self.ctx as *mut c_void) };
+        }
+    }
+}
+
+pub fn create(context_id: i32, parent_view: *mut c_void, width: i32, height: i32, url: &str, callbacks: Callbacks) -> i32 {
+    let Some(mut context) = context(context_id) else {
+        return -1;
+    };
     let window_info = WindowInfo {
         parent_view,
         bounds: Rect { x: 0, y: 0, width, height },
@@ -137,13 +195,20 @@ pub fn create(parent_view: *mut c_void, width: i32, height: i32, url: &str, call
         Some(&CefString::from(url)),
         Some(&BrowserSettings::default()),
         None,
-        None,
+        Some(&mut context),
     ) else {
         return -1;
     };
     let id = browser.identifier();
     BROWSERS.with_borrow_mut(|map| {
-        map.insert(id, Entry { browser, callbacks: Some(callbacks), devtools: None, icon_url: None, icon_origin: String::new() })
+        map.insert(id, Entry {
+            browser,
+            context: context_id,
+            callbacks: Some(callbacks),
+            devtools: None,
+            icon_url: None,
+            icon_origin: String::new(),
+        })
     });
     id
 }
@@ -184,10 +249,11 @@ pub fn close_all() {
 }
 
 /// Sends one DevTools protocol `message`, framed with `message_id` by the
-/// socket thread, to a tab. The reply answers the control socket request
-/// `token`, or an error does right away.
-pub fn devtools_send(id: i32, message_id: i32, message: &str, token: u64) {
-    let Some(host) = get(id).and_then(|b| b.host()) else {
+/// socket thread, to a tab of request context `context`. The reply answers
+/// the control socket request `token`, or an error does right away. A
+/// profile's socket reaches only its own tabs.
+pub fn devtools_send(context: i32, id: i32, message_id: i32, message: &str, token: u64) {
+    let Some(host) = get(id).filter(|_| in_context(id, context)).and_then(|b| b.host()) else {
         return ipc::reply_error(token, format!("no tab with id {id}"));
     };
     let attached = BROWSERS.with_borrow(|map| map.get(&id).is_some_and(|e| e.devtools.is_some()));
@@ -734,7 +800,7 @@ wrap_life_span_handler! {
             // Released outside the borrow: dropping the browser and its
             // DevTools registration can call back into the handlers.
             drop(entry);
-            // One window for now, so the last tab closing quits the app. Popups
+            // The last tab of the last window closing quits the app. Popups
             // left open close first, so no bare popup window lingers and CEF
             // never shuts down with a live browser.
             if empty {

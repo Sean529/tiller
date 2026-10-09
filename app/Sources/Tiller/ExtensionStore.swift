@@ -221,11 +221,12 @@ struct ExtensionManifest: Sendable {
     }
 }
 
-/// The profile's extensions, listed in `extensions.json` in its folder.
-/// Chromium loads the enabled ones as unpacked extensions at launch, so adding,
-/// removing or switching one takes effect at the next launch. Packages Tiller
-/// unpacks (CRX files and Chrome's copies) live in the profile's `Extensions`
-/// folder; folders added directly are loaded where they are.
+/// The extensions, listed in `extensions.json` in the root folder. Chromium
+/// loads the enabled ones as unpacked extensions at launch, into every
+/// profile, so adding, removing or switching one takes effect at the next
+/// launch and for every profile. Packages Tiller unpacks (CRX files and
+/// Chrome's copies) live in the root's `Extensions` folder; folders added
+/// directly are loaded where they are.
 @MainActor
 final class ExtensionStore {
     static let shared = ExtensionStore()
@@ -267,8 +268,9 @@ final class ExtensionStore {
     private let launchPaths: [String]
     private var manifests: [String: Result<ExtensionManifest, Error>] = [:]
 
-    private let path = DataDirectory.file("extensions.json")
-    static let folder = DataDirectory.path + "/Extensions"
+    private let path = ExtensionStore.listPath
+    static let listPath = Profiles.root + "/extensions.json"
+    static let folder = Profiles.root + "/Extensions"
 
     private init() {
         let data = try? Data(contentsOf: URL(fileURLWithPath: path))
@@ -327,7 +329,7 @@ final class ExtensionStore {
         return manifest
     }
 
-    /// Unpacks a CRX file into the profile and adds it, replacing an earlier
+    /// Unpacks a CRX file into Tiller's folder and adds it, replacing an earlier
     /// copy of the same extension.
     @discardableResult
     func addCRX(_ file: String) async throws -> ExtensionManifest {
@@ -344,7 +346,7 @@ final class ExtensionStore {
         return try install(manifest, at: folder, source: .crx, enabled: true)
     }
 
-    /// Copies extensions found in a Chrome profile into this one. An extension
+    /// Copies extensions found in a Chrome profile into Tiller. An extension
     /// already here is updated and keeps whether it's on. Returns how many
     /// were imported and how many were skipped.
     func importFromChrome(_ found: [ChromeExtension]) async -> (imported: Int, skipped: Int) {
@@ -414,7 +416,7 @@ final class ExtensionStore {
     /// Chromium's "Failed to load extension from: <folder>. <reason>" lines
     /// in `chrome_debug.log`, which it starts afresh at each launch.
     private static func readLoadErrors() -> [String: String] {
-        guard let log = try? String(contentsOfFile: DataDirectory.path + "/chrome_debug.log", encoding: .utf8) else {
+        guard let log = try? String(contentsOfFile: Profiles.chromiumRoot + "/chrome_debug.log", encoding: .utf8) else {
             return [:]
         }
         let marker = "Failed to load extension from: "

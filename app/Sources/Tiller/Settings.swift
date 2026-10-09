@@ -131,42 +131,13 @@ enum AccentTheme: String, CaseIterable {
     }
 }
 
-/// Every setting the Settings window shows, stored in the current profile's
-/// user defaults. Launch arguments (`-homepage https://…`) override them like
-/// any default.
+/// Settings that apply to the whole app, in its own user defaults: how
+/// windows look and the agent panel's shortcut, which every profile's window
+/// shares, since one process runs them all.
 enum Settings {
-    static var defaults: UserDefaults { Profiles.defaults }
+    static var defaults: UserDefaults { .standard }
 
     static let defaultHomepage = "https://www.google.com/"
-
-    /// As typed. Empty means the default.
-    static var homepage: String {
-        get { defaults.string(forKey: "homepage") ?? "" }
-        set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "homepage") }
-    }
-
-    /// The homepage as a URL to load.
-    static var homepageURL: String {
-        homepage.isEmpty ? defaultHomepage : AddressInput.url(for: homepage)
-    }
-
-    static var launchTabs: LaunchTabs {
-        get { defaults.string(forKey: "launchTabs").flatMap(LaunchTabs.init) ?? .restore }
-        set { defaults.set(newValue.rawValue, forKey: "launchTabs") }
-    }
-
-    static var newTabPage: NewTabPage {
-        get { defaults.string(forKey: "newTabPage").flatMap(NewTabPage.init) ?? .blank }
-        set { defaults.set(newValue.rawValue, forKey: "newTabPage") }
-    }
-
-    static var tabLayout: TabLayout {
-        get { defaults.string(forKey: "tabLayout").flatMap(TabLayout.init) ?? .horizontal }
-        set {
-            defaults.set(newValue.rawValue, forKey: "tabLayout")
-            NotificationCenter.default.post(name: .tabLayoutDidChange, object: nil)
-        }
-    }
 
     static var appearance: Appearance {
         get { defaults.string(forKey: "appearance").flatMap(Appearance.init) ?? .system }
@@ -196,23 +167,6 @@ enum Settings {
         }
     }
 
-    /// Whether the tab sidebar shows only icons.
-    static var sidebarCollapsed: Bool {
-        get { defaults.bool(forKey: "sidebarCollapsed") }
-        set { defaults.set(newValue, forKey: "sidebarCollapsed") }
-    }
-
-    static var searchEngine: SearchEngine {
-        get { defaults.string(forKey: "searchEngine").flatMap(SearchEngine.init) ?? .google }
-        set { defaults.set(newValue.rawValue, forKey: "searchEngine") }
-    }
-
-    /// The custom engine's URL, with `%s` for the query.
-    static var searchTemplate: String {
-        get { defaults.string(forKey: "searchTemplate") ?? "" }
-        set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "searchTemplate") }
-    }
-
     /// An http(s) URL with a host once `%s` is filled in.
     static func isValidSearchTemplate(_ template: String) -> Bool {
         guard template.contains("%s"),
@@ -223,88 +177,8 @@ enum Settings {
         return true
     }
 
-    /// The search URL for `query`. A custom template that isn't valid falls back to Google.
-    static func searchURL(for query: String) -> String {
-        var template = searchEngine.template ?? searchTemplate
-        if !isValidSearchTemplate(template) { template = SearchEngine.google.template! }
-        let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+=?#/"))
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
-        return template.replacingOccurrences(of: "%s", with: encoded)
-    }
-
-    /// The CLI to run for `kind`, with `~` expanded. Nil means look it up.
-    static func agentPath(for kind: AgentKind) -> String? {
-        defaults.string(forKey: kind.pathDefaultsKey).flatMap { $0.isEmpty ? nil : NSString(string: $0).expandingTildeInPath }
-    }
-
-    static func setAgentPath(_ path: String, for kind: AgentKind) {
-        let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        if path.isEmpty {
-            defaults.removeObject(forKey: kind.pathDefaultsKey)
-        } else {
-            defaults.set(path, forKey: kind.pathDefaultsKey)
-        }
-    }
-
-    /// Added after Tiller's own system prompt.
-    static var agentInstructions: String {
-        get { defaults.string(forKey: "agentInstructions") ?? "" }
-        set { defaults.set(newValue, forKey: "agentInstructions") }
-    }
-
-    /// Built-in tools the agent gets besides Tiller's. All off by default.
-    static func agentToolEnabled(_ tool: AgentTool) -> Bool {
-        defaults.bool(forKey: tool.defaultsKey)
-    }
-
-    static func setAgentTool(_ tool: AgentTool, enabled: Bool) {
-        defaults.set(enabled, forKey: tool.defaultsKey)
-    }
-
-    static var agentTools: [AgentTool] { AgentTool.allCases.filter(agentToolEnabled) }
-
-    /// The model options new chats with `kind` start with, each provider
-    /// keeping its own. All the CLI's own by default.
-    static func agentModelOptions(for kind: AgentChoice) -> AgentModelOptions {
-        defaults.data(forKey: "agentModelOptions.\(kind.rawValue)")
-            .flatMap { try? JSONDecoder().decode(AgentModelOptions.self, from: $0) } ?? AgentModelOptions()
-    }
-
-    static func setAgentModelOptions(_ options: AgentModelOptions, for kind: AgentChoice) {
-        let key = "agentModelOptions.\(kind.rawValue)"
-        if options.isDefault {
-            defaults.removeObject(forKey: key)
-        } else {
-            defaults.set(try? JSONEncoder().encode(options), forKey: key)
-        }
-        NotificationCenter.default.post(name: .agentModelOptionsDidChange, object: nil)
-    }
-
-    /// As typed. Empty means Tiller's own empty folder.
-    static var agentFolder: String {
-        get { defaults.string(forKey: "agentFolder") ?? "" }
-        set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "agentFolder") }
-    }
-
-    /// The folder the agent works in, with `~` expanded. Nil means Tiller's own.
-    static var agentFolderPath: String? {
-        agentFolder.isEmpty ? nil : NSString(string: agentFolder).expandingTildeInPath
-    }
-
     static let defaultAgentTabs = 3
     static let agentTabsRange = 1...9
-
-    /// How many chats the agent panel keeps open in tabs at once.
-    static var agentTabs: Int {
-        get {
-            let value = defaults.integer(forKey: "agentTabs")
-            return value == 0 ? defaultAgentTabs : min(max(value, agentTabsRange.lowerBound), agentTabsRange.upperBound)
-        }
-        set {
-            defaults.set(newValue, forKey: "agentTabs")
-            NotificationCenter.default.post(name: .agentTabsDidChange, object: nil)
-        }
-    }
 
     static let defaultAgentShortcut = Shortcut(key: "s", modifiers: [.command, .shift])
 
@@ -320,6 +194,145 @@ enum Settings {
 
     static func resetAgentShortcut() {
         defaults.removeObject(forKey: "agentShortcut")
+    }
+}
+
+/// The settings a profile keeps for itself, in its own user defaults (see
+/// `Profiles.defaults(for:)`). Launch arguments (`-homepage https://…`)
+/// override them like any default. UserDefaults is thread-safe, though not
+/// marked Sendable.
+struct ProfileSettings: @unchecked Sendable {
+    let defaults: UserDefaults
+
+    init(profileID: String) {
+        defaults = Profiles.defaults(for: profileID)
+    }
+
+    /// As typed. Empty means the default.
+    var homepage: String {
+        get { defaults.string(forKey: "homepage") ?? "" }
+        nonmutating set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "homepage") }
+    }
+
+    /// The homepage as a URL to load.
+    var homepageURL: String {
+        homepage.isEmpty ? Settings.defaultHomepage : AddressInput.url(for: homepage, settings: self)
+    }
+
+    var launchTabs: LaunchTabs {
+        get { defaults.string(forKey: "launchTabs").flatMap(LaunchTabs.init) ?? .restore }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: "launchTabs") }
+    }
+
+    var newTabPage: NewTabPage {
+        get { defaults.string(forKey: "newTabPage").flatMap(NewTabPage.init) ?? .blank }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: "newTabPage") }
+    }
+
+    var tabLayout: TabLayout {
+        get { defaults.string(forKey: "tabLayout").flatMap(TabLayout.init) ?? .horizontal }
+        nonmutating set {
+            defaults.set(newValue.rawValue, forKey: "tabLayout")
+            NotificationCenter.default.post(name: .tabLayoutDidChange, object: nil)
+        }
+    }
+
+    /// Whether the tab sidebar shows only icons.
+    var sidebarCollapsed: Bool {
+        get { defaults.bool(forKey: "sidebarCollapsed") }
+        nonmutating set { defaults.set(newValue, forKey: "sidebarCollapsed") }
+    }
+
+    var searchEngine: SearchEngine {
+        get { defaults.string(forKey: "searchEngine").flatMap(SearchEngine.init) ?? .google }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: "searchEngine") }
+    }
+
+    /// The custom engine's URL, with `%s` for the query.
+    var searchTemplate: String {
+        get { defaults.string(forKey: "searchTemplate") ?? "" }
+        nonmutating set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "searchTemplate") }
+    }
+
+    /// The search URL for `query`. A custom template that isn't valid falls back to Google.
+    func searchURL(for query: String) -> String {
+        var template = searchEngine.template ?? searchTemplate
+        if !Settings.isValidSearchTemplate(template) { template = SearchEngine.google.template! }
+        let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+=?#/"))
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
+        return template.replacingOccurrences(of: "%s", with: encoded)
+    }
+
+    /// The CLI to run for `kind`, with `~` expanded. Nil means look it up.
+    func agentPath(for kind: AgentKind) -> String? {
+        defaults.string(forKey: kind.pathDefaultsKey).flatMap { $0.isEmpty ? nil : NSString(string: $0).expandingTildeInPath }
+    }
+
+    func setAgentPath(_ path: String, for kind: AgentKind) {
+        let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.isEmpty {
+            defaults.removeObject(forKey: kind.pathDefaultsKey)
+        } else {
+            defaults.set(path, forKey: kind.pathDefaultsKey)
+        }
+    }
+
+    /// Added after Tiller's own system prompt.
+    var agentInstructions: String {
+        get { defaults.string(forKey: "agentInstructions") ?? "" }
+        nonmutating set { defaults.set(newValue, forKey: "agentInstructions") }
+    }
+
+    /// Built-in tools the agent gets besides Tiller's. All off by default.
+    func agentToolEnabled(_ tool: AgentTool) -> Bool {
+        defaults.bool(forKey: tool.defaultsKey)
+    }
+
+    func setAgentTool(_ tool: AgentTool, enabled: Bool) {
+        defaults.set(enabled, forKey: tool.defaultsKey)
+    }
+
+    var agentTools: [AgentTool] { AgentTool.allCases.filter(agentToolEnabled) }
+
+    /// The model options new chats with `kind` start with, each provider
+    /// keeping its own. All the CLI's own by default.
+    func agentModelOptions(for kind: AgentChoice) -> AgentModelOptions {
+        defaults.data(forKey: "agentModelOptions.\(kind.rawValue)")
+            .flatMap { try? JSONDecoder().decode(AgentModelOptions.self, from: $0) } ?? AgentModelOptions()
+    }
+
+    func setAgentModelOptions(_ options: AgentModelOptions, for kind: AgentChoice) {
+        let key = "agentModelOptions.\(kind.rawValue)"
+        if options.isDefault {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(try? JSONEncoder().encode(options), forKey: key)
+        }
+        NotificationCenter.default.post(name: .agentModelOptionsDidChange, object: nil)
+    }
+
+    /// As typed. Empty means Tiller's own empty folder.
+    var agentFolder: String {
+        get { defaults.string(forKey: "agentFolder") ?? "" }
+        nonmutating set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "agentFolder") }
+    }
+
+    /// The folder the agent works in, with `~` expanded. Nil means Tiller's own.
+    var agentFolderPath: String? {
+        agentFolder.isEmpty ? nil : NSString(string: agentFolder).expandingTildeInPath
+    }
+
+    /// How many chats the agent panel keeps open in tabs at once.
+    var agentTabs: Int {
+        get {
+            let value = defaults.integer(forKey: "agentTabs")
+            let range = Settings.agentTabsRange
+            return value == 0 ? Settings.defaultAgentTabs : min(max(value, range.lowerBound), range.upperBound)
+        }
+        nonmutating set {
+            defaults.set(newValue, forKey: "agentTabs")
+            NotificationCenter.default.post(name: .agentTabsDidChange, object: nil)
+        }
     }
 }
 
@@ -363,9 +376,9 @@ extension Notification.Name {
     static let agentKindDidChange = Notification.Name("TillerAgentKindDidChange")
     /// Posted when Settings' model options for new chats change.
     static let agentModelOptionsDidChange = Notification.Name("TillerAgentModelOptionsDidChange")
-    /// Posted when `Settings.agentTabs` changes.
+    /// Posted when a profile's `agentTabs` changes.
     static let agentTabsDidChange = Notification.Name("TillerAgentTabsDidChange")
-    /// Posted when `Settings.tabLayout` changes.
+    /// Posted when a profile's `tabLayout` changes.
     static let tabLayoutDidChange = Notification.Name("TillerTabLayoutDidChange")
     /// Posted when `Settings.appearance` or `Settings.accentTheme` changes.
     static let themeDidChange = Notification.Name("TillerThemeDidChange")

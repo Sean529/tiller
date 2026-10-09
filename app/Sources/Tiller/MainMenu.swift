@@ -197,8 +197,8 @@ enum MainMenu {
     }
 }
 
-/// Fills the History menu with recently visited pages each time it opens,
-/// between Back/Forward and Clear History.
+/// Fills the History menu with the front window's profile's recently visited
+/// pages each time it opens, between Back/Forward and Clear History.
 @MainActor
 private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
     private static let recentTag = 1001
@@ -211,6 +211,8 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
     /// rather than each time the menu opens.
     private var icons: [String: NSImage] = [:]
     private var pagesVersion = -1
+    /// The history `pages` came from.
+    private weak var pagesStore: HistoryStore?
     /// The menu, for filling once fresh pages arrive.
     private weak var menu: NSMenu?
 
@@ -223,13 +225,20 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
             return
         }
         self.menu = menu
-        let store = HistoryStore.shared
+        guard let store = ProfileContext.active?.history else { return }
+        if store !== pagesStore {
+            // Another profile's pages mustn't show while this one's load.
+            pages = []
+            icons = [:]
+            pagesVersion = -1
+            pagesStore = store
+        }
         if store.version != pagesVersion {
             let version = store.version
-            store.recentWithIcons(limit: Self.limit) { pages in
+            store.recentWithIcons(limit: Self.limit) { [weak store] pages in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        guard let self = MainMenu.historyDelegate else { return }
+                        guard let self = MainMenu.historyDelegate, let store, store === self.pagesStore else { return }
                         self.pages = pages
                         self.icons = [:]
                         for page in pages {
@@ -274,8 +283,9 @@ private final class HistoryMenuDelegate: NSObject, NSMenuDelegate {
     }
 }
 
-/// Fills the Profiles menu each time it opens: every profile, the current one
-/// checked, then New Profile and Manage Profiles.
+/// Fills the Profiles menu each time it opens: every profile, the front
+/// window's checked and the other open ones marked, then New Profile and
+/// Manage Profiles.
 @MainActor
 private final class ProfilesMenuDelegate: NSObject, NSMenuDelegate {
     /// No item has a shortcut, which spares reading the profiles from disk
@@ -289,10 +299,11 @@ private final class ProfilesMenuDelegate: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        let active = ProfileContext.active?.id
         for profile in Profiles.all {
             let item = NSMenuItem(title: profile.name, action: #selector(AppDelegate.openProfile(_:)), keyEquivalent: "")
             item.representedObject = profile.id
-            item.state = profile.id == Profiles.current.id ? .on : .off
+            item.state = profile.id == active ? .on : ProfileContext.opened(profile.id) != nil ? .mixed : .off
             menu.addItem(item)
         }
         menu.addItem(.separator())

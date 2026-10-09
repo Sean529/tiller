@@ -46,13 +46,11 @@ enum AgentRecord: Codable, Equatable, Sendable {
     case error(String)
 }
 
-/// Agent chats, kept in `agent-chats` in the data folder: `index.json` lists
+/// A profile's agent chats, kept in `agent-chats` in its folder: `index.json` lists
 /// them and the panel's open tabs, and each chat has a folder with its
 /// transcript and attached images.
 @MainActor
 final class AgentHistoryStore {
-    static let shared = AgentHistoryStore()
-
     private struct Index: Codable {
         var conversations: [AgentConversation] = []
         /// A conversation id per open tab, or "" for a new, empty chat.
@@ -60,7 +58,8 @@ final class AgentHistoryStore {
         var selectedTab = 0
     }
 
-    private let directory = URL(fileURLWithPath: DataDirectory.path + "/agent-chats")
+    private let profileFolder: String
+    private let directory: URL
     private var indexURL: URL { directory.appendingPathComponent("index.json") }
     private var index: Index
     private var indexChanged = false
@@ -73,7 +72,9 @@ final class AgentHistoryStore {
     private var recordsVersion = 0
     private var writeScheduled = false
 
-    private init() {
+    init(folder: String) {
+        profileFolder = folder
+        directory = URL(fileURLWithPath: folder + "/agent-chats")
         let data = try? Data(contentsOf: directory.appendingPathComponent("index.json"))
         index = data.flatMap { try? JSONDecoder().decode(Index.self, from: $0) } ?? Index()
         removeUnsavedFolders()
@@ -189,9 +190,9 @@ final class AgentHistoryStore {
                 NSLog("Tiller: could not save agent chats: %@", error.localizedDescription)
             }
             // On disk now: the copies in memory can go, unless set again since.
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
-                    let store = AgentHistoryStore.shared
+                    guard let store = self else { return }
                     for (id, version) in versions where store.knownRecords[id]?.version == version {
                         store.knownRecords[id] = nil
                     }
@@ -217,10 +218,10 @@ final class AgentHistoryStore {
     private func scheduleWrite() {
         guard !writeScheduled else { return }
         writeScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             MainActor.assumeIsolated {
-                guard AgentHistoryStore.shared.writeScheduled else { return }
-                AgentHistoryStore.shared.flush()
+                guard let self, self.writeScheduled else { return }
+                self.flush()
             }
         }
     }
@@ -230,10 +231,10 @@ final class AgentHistoryStore {
     private func removeUnsavedFolders() {
         // Deleting runs on the writer queue, after any write already on it
         // and off the main thread, which is building the window meanwhile.
-        let directory = directory, saved = Set(index.conversations.map(\.id))
+        let directory = directory, saved = Set(index.conversations.map(\.id)), profileFolder = profileFolder
         Self.writer.async {
             let manager = FileManager.default
-            try? manager.removeItem(atPath: DataDirectory.path + "/agent-attachments")
+            try? manager.removeItem(atPath: profileFolder + "/agent-attachments")
             for name in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? [] where name != "index.json" && !saved.contains(name) {
                 try? manager.removeItem(at: directory.appendingPathComponent(name))
             }

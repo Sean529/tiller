@@ -37,17 +37,14 @@ struct Download: Equatable {
     }
 }
 
-/// The downloads of this run, newest first. The core reports each change
-/// and the toolbar button and its list show them.
+/// The downloads of this run, newest first, from every profile. The core
+/// reports each change and every window's toolbar button and its list show
+/// them.
 @MainActor
 final class DownloadStore {
     static let shared = DownloadStore()
 
     private(set) var downloads: [Download] = []
-    /// Called after any download changes.
-    var onChange: (() -> Void)?
-    /// Called once per download, when it first appears.
-    var onStart: ((Download) -> Void)?
 
     private static let limit = 50
 
@@ -93,12 +90,12 @@ final class DownloadStore {
         } else {
             downloads.insert(download, at: 0)
             if downloads.count > Self.limit { downloads.removeLast(downloads.count - Self.limit) }
-            onStart?(download)
+            NotificationCenter.default.post(name: .downloadDidStart, object: self, userInfo: ["download": download])
         }
         changeTimer?.invalidate()
         changeTimer = nil
         lastChange = Date()
-        onChange?()
+        changed()
     }
 
     private var changeTimer: Timer?
@@ -113,7 +110,7 @@ final class DownloadStore {
                 guard let self else { return }
                 self.changeTimer = nil
                 self.lastChange = Date()
-                self.onChange?()
+                self.changed()
             }
         }
     }
@@ -125,7 +122,11 @@ final class DownloadStore {
     /// Forgets the downloads that have ended.
     func clearFinished() {
         downloads.removeAll { $0.state != .inProgress }
-        onChange?()
+        changed()
+    }
+
+    private func changed() {
+        NotificationCenter.default.post(name: .downloadsDidChange, object: self)
     }
 }
 
@@ -566,4 +567,11 @@ private final class DownloadRowView: NSView {
         NSWorkspace.shared.open(URL(fileURLWithPath: download.path))
         return true
     }
+}
+
+extension Notification.Name {
+    /// Posted after any download changes.
+    static let downloadsDidChange = Notification.Name("TillerDownloadsDidChange")
+    /// Posted once per download, when it first appears, with it as `download`.
+    static let downloadDidStart = Notification.Name("TillerDownloadDidStart")
 }

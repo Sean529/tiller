@@ -37,8 +37,12 @@ final class StartPageView: NSView {
     /// them out rather than cutting the page off at top and bottom.
     private var closedFits = true
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
+    private let profile: ProfileContext
+
+    /// Shows `profile`'s most visited sites and recently closed tabs.
+    init(profile: ProfileContext) {
+        self.profile = profile
+        super.init(frame: .zero)
         wantsLayer = true
         // A faint wash of the accent color down from the top, so the page
         // reads as a place of its own rather than an empty document.
@@ -94,7 +98,7 @@ final class StartPageView: NSView {
         content.isHidden = true
         emptyHint.isHidden = true
         NotificationCenter.default.addObserver(
-            self, selector: #selector(closedTabsChanged(_:)), name: .closedTabsDidChange, object: nil
+            self, selector: #selector(closedTabsChanged(_:)), name: .closedTabsDidChange, object: profile.session
         )
     }
 
@@ -180,14 +184,14 @@ final class StartPageView: NSView {
     /// Refreshes the tiles from history and the list from the closed tabs.
     /// The tiles are only rebuilt when the history changed since last time.
     func reload() {
-        let closed = Array(SessionStore.shared.recentlyClosed.prefix(Self.closedLimit))
-        let version = HistoryStore.shared.version
+        let closed = Array(profile.session.recentlyClosed.prefix(Self.closedLimit))
+        let version = profile.history.version
         if version == shownHistoryVersion {
             return show(shownSites, closed: closed)
         }
         generation += 1
         let generation = generation
-        HistoryStore.shared.frequentSites(limit: Self.limit) { [weak self] sites in
+        profile.history.frequentSites(limit: Self.limit) { [weak self] sites in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.generation == generation else { return }
@@ -211,7 +215,7 @@ final class StartPageView: NSView {
             shownClosed = closed
             closedList.arrangedSubviews.forEach { $0.removeFromSuperview() }
             for tab in closed {
-                let row = ClosedTabRow(tab: tab) { [weak self] disposition in self?.onOpen?(tab.url, disposition) }
+                let row = ClosedTabRow(tab: tab, history: profile.history) { [weak self] disposition in self?.onOpen?(tab.url, disposition) }
                 closedList.addArrangedSubview(row)
             }
             closedHeight = closed.isEmpty ? 0 : sectionHeight(closedHeading, closedList)
@@ -427,13 +431,13 @@ private final class SiteTile: ClickableView {
 /// One closed tab: its site's icon, then its title and address on one
 /// line, which highlights as a row under the mouse.
 private final class ClosedTabRow: ClickableView {
-    init(tab: SessionStore.SavedTab, action: @escaping (OpenDisposition) -> Void) {
+    init(tab: SessionStore.SavedTab, history: HistoryStore, action: @escaping (OpenDisposition) -> Void) {
         super.init(action: action)
         let icon = FaviconView()
         // A site without a favicon shows the globe, as it does in the tab strip.
         icon.image = Theme.symbol("globe", size: Theme.Symbol.row, weight: .regular)
         icon.contentTintColor = .secondaryLabelColor
-        HistoryStore.shared.icon(for: tab.url) { [weak icon] png in
+        history.icon(for: tab.url) { [weak icon] png in
             guard let png, let image = NSImage(data: png) else { return }
             image.size = NSSize(width: 16, height: 16)
             DispatchQueue.main.async { MainActor.assumeIsolated { icon?.image = image } }

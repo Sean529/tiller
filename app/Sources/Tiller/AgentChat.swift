@@ -23,7 +23,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     var isBusy: Bool { session?.isBusy == true }
     /// A new chat uses the agent picked for new chats until its first
     /// message, unless it was made for another.
-    var choice: AgentChoice { conversation?.choice ?? presetKind ?? .current }
+    var choice: AgentChoice { conversation?.choice ?? presetKind ?? profile.providers.current }
     var kind: AgentKind { choice.kind }
     var title: String { conversation?.title ?? "New Chat" }
     /// The built-in tools this chat allows. A new chat starts with Settings'.
@@ -31,7 +31,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// The model, effort, context and fast mode this chat runs with. A new
     /// chat follows Settings' for its agent until one is picked for it.
     var modelOptions: AgentModelOptions {
-        (conversation?.modelOptions ?? pickedOptions ?? choice.defaultModelOptions).supported(by: choice)
+        (conversation?.modelOptions ?? pickedOptions ?? profile.settings.agentModelOptions(for: choice)).supported(by: choice)
     }
     /// Picked for a new chat before its first message.
     private var pickedOptions: AgentModelOptions?
@@ -96,7 +96,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// interrupted has ended.
     private var pendingDirect: Message?
 
-    private var folder: URL { AgentHistoryStore.shared.folder(for: id) }
+    private var folder: URL { profile.agentHistory.folder(for: id) }
+    private let profile: ProfileContext
     /// A saved chat opens at its newest message once it has a size.
     private var pendingScrollToBottom = false
 
@@ -120,20 +121,21 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     /// A new chat, or a saved one with its transcript. A new chat can be
     /// given its agent, tools and model options instead of those in Settings.
     init(
-        conversation: AgentConversation? = nil, kind: AgentChoice? = nil, tools: [AgentTool]? = nil,
-        modelOptions: AgentModelOptions? = nil
+        profile: ProfileContext, conversation: AgentConversation? = nil, kind: AgentChoice? = nil,
+        tools: [AgentTool]? = nil, modelOptions: AgentModelOptions? = nil
     ) {
+        self.profile = profile
         id = conversation?.id ?? UUID().uuidString
         self.conversation = conversation
         presetKind = conversation == nil ? kind : nil
-        self.tools = conversation?.tools ?? tools ?? Settings.agentTools
+        self.tools = conversation?.tools ?? tools ?? profile.settings.agentTools
         pickedOptions = conversation == nil ? modelOptions : nil
         loadState = conversation == nil ? .loaded : .unloaded
         super.init(frame: .zero)
         build()
         showIdle()
         NotificationCenter.default.addObserver(
-            self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
+            self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: profile.providers
         )
     }
 
@@ -149,7 +151,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         }
         let folder = folder
         // The newest records may still be on their way to disk.
-        let unwritten = AgentHistoryStore.shared.unwrittenRecords(for: id)
+        let unwritten = profile.agentHistory.unwrittenRecords(for: id)
         if now {
             let records = unwritten ?? AgentHistoryStore.readRecords(in: folder)
             finishLoading(records, thumbnails: Self.thumbnails(for: records, in: folder))
@@ -220,7 +222,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
         queued = []
         queuePaused = false
         pendingDirect = nil
-        AgentHistoryStore.shared.discardUnsaved(id)
+        profile.agentHistory.discardUnsaved(id)
     }
 
     private func endSession() {
@@ -476,7 +478,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     /// What `/` can call in this chat.
     private var availableSkills: [AgentSkill] {
-        loadedSkills ?? AgentSkillCatalog.skills(for: kind)
+        loadedSkills ?? AgentSkillCatalog.skills(for: kind, library: profile.skills)
     }
 
     /// The composer keeps its own undo, which a sent message clears.
@@ -619,14 +621,14 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private func save(_ conversation: AgentConversation) {
         let changed = self.conversation != conversation
         self.conversation = conversation
-        AgentHistoryStore.shared.save(conversation)
+        profile.agentHistory.save(conversation)
         if changed { onChange?() }
     }
 
     private func saveRecords() {
         // An unloaded chat has nothing new; writing would empty its file.
         guard conversation != nil, recordsLoaded else { return }
-        AgentHistoryStore.shared.setRecords(records, for: id)
+        profile.agentHistory.setRecords(records, for: id)
     }
 
     /// Continues the saved session if there is one, in the folder it ran in.
@@ -637,7 +639,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             directory = URL(fileURLWithPath: path)
         }
         let session = AgentSession(
-            kind: conversation.kind, provider: conversation.provider, tools: tools, options: modelOptions, chat: id, resuming: conversation.sessionID,
+            profile: profile, kind: conversation.kind, provider: conversation.provider, tools: tools, options: modelOptions, chat: id, resuming: conversation.sessionID,
             in: directory
         )
         session.onEvent = { [weak self] event in self?.handle(event) }
@@ -834,7 +836,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             showIdle()
             readTitle()
             finishRun(error.map { .failed($0) } ?? (stopped ? .stopped : .finished(lastAgentText)))
-            if error == nil { announce(stopped ? "Stopped" : Self.firstLine(of: lastAgentText) ?? "\(choice.displayName) finished") }
+            if error == nil { announce(stopped ? "Stopped" : Self.firstLine(of: lastAgentText) ?? "\(profile.providers.displayName(choice)) finished") }
             turnEnded(finished: error == nil && !stopped)
         case .exited(let message):
             keepLiveText()
@@ -845,7 +847,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
                 // The saved session couldn't be continued, so start over.
                 conversation?.sessionID = nil
                 if let conversation { save(conversation) }
-                addError((message ?? "\(choice.displayName) couldn't continue this chat.")
+                addError((message ?? "\(profile.providers.displayName(choice)) couldn't continue this chat.")
                     + "\nThe next message starts a new conversation, without what was said before.", action: tryAgain)
             } else if let message {
                 addError(message + "\nThe next message continues the conversation.", action: tryAgain)
@@ -853,7 +855,7 @@ final class AgentChatView: NSView, NSTextViewDelegate {
             session = nil
             resuming = false
             showIdle()
-            finishRun(.failed(message ?? "\(choice.displayName) stopped."))
+            finishRun(.failed(message ?? "\(profile.providers.displayName(choice)) stopped."))
             turnEnded(finished: false)
         }
         if follow { scrollToBottom() } else { updateScrollDownButtonAfterLayout() }
@@ -947,9 +949,9 @@ final class AgentChatView: NSView, NSTextViewDelegate {
     private func showIdle() {
         setBusy(false)
         setStatus(session == nil ? "" : "Ready", busy: false)
-        composer.placeholder = "Ask \(choice.displayName) about this page…"
-        composer.shortPlaceholder = "Ask \(choice.displayName)…"
-        emptyState.kind = choice
+        composer.placeholder = "Ask \(profile.providers.displayName(choice)) about this page…"
+        composer.shortPlaceholder = "Ask \(profile.providers.displayName(choice))…"
+        emptyState.show(choice, name: profile.providers.displayName(choice))
         let showEmpty = transcript.isEmpty && recordsLoaded
         if showEmpty { emptyState.alphaValue = 1 }
         emptyState.isHidden = !showEmpty
@@ -1028,7 +1030,8 @@ final class AgentChatView: NSView, NSTextViewDelegate {
 
     /// Opens the Agent pane, where a missing CLI's path is set.
     private var openSettings: (title: String, run: () -> Void) {
-        ("Open Settings…", { (NSApp.delegate as? AppDelegate)?.showAgentSettings() })
+        let profile = profile
+        return ("Open Settings…", { (NSApp.delegate as? AppDelegate)?.showAgentSettings(profile: profile) })
     }
 
     /// Draws a saved row.

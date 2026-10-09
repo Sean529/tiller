@@ -104,8 +104,6 @@ struct AgentSkill: Equatable, Sendable {
 /// paths of its config.toml.
 @MainActor
 final class AgentSkillStore {
-    static let shared = AgentSkillStore()
-
     enum Source: String, Codable {
         case folder
         case archive
@@ -134,21 +132,29 @@ final class AgentSkillStore {
     private(set) var entries: [Entry]
     private var skills: [String: AgentSkill] = [:]
 
-    nonisolated static let root = DataDirectory.path + "/agent-skills"
-    nonisolated private static let libraryFolder = root + "/library"
+    nonisolated let root: String
+    private let libraryFolder: String
     /// Passed to Claude Code, Qoder CLI and Antigravity CLI with `--add-dir`.
-    nonisolated static let exposedFolder = root + "/exposed"
+    nonisolated let exposedFolder: String
     /// Codex's extra skills root.
-    nonisolated static let exposedSkills = exposedFolder + "/skills"
-    private let indexPath = AgentSkillStore.root + "/skills.json"
+    nonisolated let exposedSkills: String
+    private let indexPath: String
+    private let settings: ProfileSettings
 
-    private init() {
-        let data = try? Data(contentsOf: URL(fileURLWithPath: Self.root + "/skills.json"))
+    /// Creates the folders that --add-dir and Codex's skills root name.
+    init(folder: String, settings: ProfileSettings) {
+        self.settings = settings
+        root = folder + "/agent-skills"
+        libraryFolder = root + "/library"
+        exposedFolder = root + "/exposed"
+        exposedSkills = exposedFolder + "/skills"
+        indexPath = root + "/skills.json"
+        let data = try? Data(contentsOf: URL(fileURLWithPath: indexPath))
         entries = data.flatMap { try? JSONDecoder().decode([Entry].self, from: $0) } ?? []
         syncExposed()
     }
 
-    func folder(for name: String) -> String { Self.libraryFolder + "/" + name }
+    func folder(for name: String) -> String { libraryFolder + "/" + name }
 
     /// The skill as its SKILL.md says now. Nil if the file is gone or unreadable.
     func skill(for entry: Entry) -> AgentSkill? {
@@ -203,7 +209,7 @@ final class AgentSkillStore {
     /// Copies each skill found in `path` into the library, replacing one of
     /// the same name, which stays on or off as it was.
     private func install(from path: String, source: Source, origin: String) async throws -> [String] {
-        let library = Self.libraryFolder
+        let library = libraryFolder
         let found = try await Task.detached { () -> [(String, String)] in
             let folders = Self.skillFolders(in: path)
             guard !folders.isEmpty else { throw SkillError.noSkill(path) }
@@ -254,7 +260,7 @@ final class AgentSkillStore {
     func save(name: String, description: String?, content: String, files: [String: String], deleteFiles: [String]) throws -> AgentSkill {
         guard AgentSkill.isValidName(name) else { throw SkillError.badName(name) }
         let existing = entries.firstIndex { $0.name == name }
-        if existing == nil, let user = AgentSkillCatalog.userSkills(for: nil, workFolder: Settings.agentFolderPath).first(where: { $0.name == name }) {
+        if existing == nil, let user = AgentSkillCatalog.userSkills(for: nil, workFolder: settings.agentFolderPath).first(where: { $0.name == name }) {
             throw SkillError.notInLibrary(name: name, path: user.path ?? "")
         }
         var text = content
@@ -324,7 +330,7 @@ final class AgentSkillStore {
 
     private func save() {
         do {
-            try FileManager.default.createDirectory(atPath: Self.root, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(entries).write(to: URL(fileURLWithPath: indexPath), options: .atomic)
@@ -333,7 +339,7 @@ final class AgentSkillStore {
             NSLog("Tiller: could not save skills: %@", error.localizedDescription)
         }
         syncExposed()
-        NotificationCenter.default.post(name: .agentSkillsDidChange, object: nil)
+        NotificationCenter.default.post(name: .agentSkillsDidChange, object: self)
     }
 
     /// Links each enabled skill into `exposed/skills`, and points
@@ -341,10 +347,10 @@ final class AgentSkillStore {
     /// `exposed/.agents/skills` at it.
     private func syncExposed() {
         let manager = FileManager.default
-        let skillsFolder = Self.exposedSkills
+        let skillsFolder = exposedSkills
         try? manager.createDirectory(atPath: skillsFolder, withIntermediateDirectories: true)
         for cli in [".claude", ".qoder", ".agents"] {
-            let folder = Self.exposedFolder + "/" + cli
+            let folder = exposedFolder + "/" + cli
             let link = folder + "/skills"
             try? manager.createDirectory(atPath: folder, withIntermediateDirectories: true)
             if (try? manager.destinationOfSymbolicLink(atPath: link)) != "../skills" {
@@ -454,16 +460,16 @@ final class AgentSkillStore {
 enum AgentSkillCatalog {
     /// What `/` offers before the CLI has said what it loaded: the library's
     /// enabled skills, then the user's own for that CLI, one per name.
-    static func skills(for kind: AgentKind) -> [AgentSkill] {
-        unique(AgentSkillStore.shared.enabledSkills + userSkills(for: kind))
+    static func skills(for kind: AgentKind, library: AgentSkillStore) -> [AgentSkill] {
+        unique(library.enabledSkills + userSkills(for: kind))
     }
 
     /// The skills the CLI said it loaded, described from their files where
     /// Tiller finds them: the library's enabled skills first, then `scanned`,
     /// what `scanSkills` read for the CLI.
-    static func skills(named names: [String], scanned: [AgentSkill], kind: AgentKind) -> [AgentSkill] {
+    static func skills(named names: [String], scanned: [AgentSkill], kind: AgentKind, library: AgentSkillStore) -> [AgentSkill] {
         var known: [String: AgentSkill] = [:]
-        for skill in AgentSkillStore.shared.enabledSkills + scanned where known[skill.name] == nil { known[skill.name] = skill }
+        for skill in library.enabledSkills + scanned where known[skill.name] == nil { known[skill.name] = skill }
         return names.map { known[$0] ?? AgentSkill(name: $0, description: "", argumentHint: nil, path: nil, origin: .user) }
     }
 
@@ -518,16 +524,17 @@ enum AgentSkillCatalog {
     // MARK: Control socket
 
     /// list_skills, read_skill and save_skill from tiller_mcp.
-    static func control(_ method: String, params: [String: Any]) throws -> Any {
+    static func control(_ method: String, params: [String: Any], profile: ProfileContext) throws -> Any {
+        let store = profile.skills
         switch method {
         case "skills.list":
-            let library = AgentSkillStore.shared.entries.compactMap { entry -> [String: Any]? in
-                guard let skill = AgentSkillStore.shared.skill(for: entry) else { return nil }
+            let library = store.entries.compactMap { entry -> [String: Any]? in
+                guard let skill = store.skill(for: entry) else { return nil }
                 return ["name": skill.name, "description": skill.description, "path": skill.path ?? "",
                         "editable": true, "enabled": entry.enabled]
             }
-            let names = Set(AgentSkillStore.shared.entries.map(\.name))
-            let workFolder = Settings.agentFolderPath
+            let names = Set(store.entries.map(\.name))
+            let workFolder = profile.settings.agentFolderPath
             // The CLIs' folders are read off the main thread.
             return deferred {
                 userSkills(for: nil, workFolder: workFolder).filter { !names.contains($0.name) }
@@ -538,11 +545,11 @@ enum AgentSkillCatalog {
             }
         case "skills.read":
             guard let name = params["name"] as? String, !name.isEmpty else { throw ControlError("read_skill needs a name") }
-            let editable = AgentSkillStore.shared.entries.contains { $0.name == name }
+            let editable = store.entries.contains { $0.name == name }
             // The library's skill is known here; the CLIs' folders, the file
             // and the folder's listing are read off the main thread.
-            let library = AgentSkillStore.shared.entries.first { $0.name == name }.flatMap(AgentSkillStore.shared.skill(for:))
-            let workFolder = Settings.agentFolderPath
+            let library = store.entries.first { $0.name == name }.flatMap(store.skill(for:))
+            let workFolder = profile.settings.agentFolderPath
             return deferred { () throws -> (name: String, path: String, content: String, files: [String]) in
                 guard let skill = library ?? userSkills(for: nil, workFolder: workFolder).first(where: { $0.name == name }),
                     let path = skill.path, let folder = skill.folder
@@ -567,16 +574,16 @@ enum AgentSkillCatalog {
         case "skills.save":
             guard let name = params["name"] as? String, !name.isEmpty else { throw ControlError("save_skill needs a name") }
             guard let content = params["content"] as? String, !content.isEmpty else { throw ControlError("save_skill needs content") }
-            let isNew = !AgentSkillStore.shared.entries.contains { $0.name == name }
+            let isNew = !store.entries.contains { $0.name == name }
             do {
-                let skill = try AgentSkillStore.shared.save(
+                let skill = try store.save(
                     name: name,
                     description: params["description"] as? String,
                     content: content,
                     files: params["files"] as? [String: String] ?? [:],
                     deleteFiles: params["delete_files"] as? [String] ?? []
                 )
-                let enabled = AgentSkillStore.shared.entries.first { $0.name == name }?.enabled ?? true
+                let enabled = store.entries.first { $0.name == name }?.enabled ?? true
                 return [
                     "saved": skill.name, "path": skill.path ?? "", "created": isNew,
                     "note": enabled

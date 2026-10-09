@@ -16,8 +16,9 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     private var placeholder: NSTextField?
     /// The editor sheet while it is open.
     private var editorWindow: NSWindow?
-    private var store: AgentScheduleStore { .shared }
+    private var store: AgentScheduleStore { profile.schedules }
     private var schedules: [ScheduledPrompt] { store.schedules }
+    private let profile: ProfileContext
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -27,7 +28,8 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         return formatter
     }()
 
-    init() {
+    init(profile: ProfileContext) {
+        self.profile = profile
         super.init(nibName: nil, bundle: nil)
         title = Self.paneTitle
     }
@@ -189,7 +191,7 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
 
     private func presentEditor(for schedule: ScheduledPrompt?) {
         guard let window = view.window, editorWindow == nil else { return }
-        let editor = ScheduleEditorController(schedule: schedule)
+        let editor = ScheduleEditorController(schedule: schedule, profile: profile)
         let sheet = NSWindow(contentViewController: editor)
         sheet.styleMask = [.titled]
         sheet.isReleasedWhenClosed = false
@@ -197,8 +199,8 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
             if let sheet { window?.endSheet(sheet) }
             self?.editorWindow = nil
             guard let saved else { return }
-            AgentScheduleStore.shared.save(saved)
-            AgentScheduler.shared.askForNotifications()
+            self?.store.save(saved)
+            ScheduleNotifications.shared.askForPermission()
         }
         editorWindow = sheet
         window.beginSheet(sheet)
@@ -217,7 +219,7 @@ final class ScheduledSettingsPane: NSViewController, NSTableViewDataSource, NSTa
 
     @objc private func runNow(_ sender: Any?) {
         guard table.selectedRowIndexes.count == 1, schedules.indices.contains(table.selectedRow) else { return }
-        AgentScheduler.shared.runNow(schedules[table.selectedRow].id)
+        profile.scheduler.runNow(schedules[table.selectedRow].id)
     }
 
     /// Asks first. Chats from earlier runs stay in history.
@@ -297,10 +299,13 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
     private static let fieldWidth: CGFloat = 420
 
     private var kind: AgentChoice {
-        (kindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentChoice.init) ?? .current
+        (kindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentChoice.init) ?? profile.providers.current
     }
 
-    init(schedule: ScheduledPrompt?) {
+    private let profile: ProfileContext
+
+    init(schedule: ScheduledPrompt?, profile: ProfileContext) {
+        self.profile = profile
         original = schedule
         super.init(nibName: nil, bundle: nil)
         title = schedule == nil ? "New Scheduled Prompt" : "Edit Scheduled Prompt"
@@ -320,14 +325,15 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         nameField.widthAnchor.constraint(equalToConstant: 260).isActive = true
         addRow("Name:", nameField)
 
+        let providers = profile.providers
         let popUp = SettingsPane.popUp(
-            AgentChoice.all, title: \.displayName, image: { $0.logo(size: 16) },
+            providers.all, title: providers.displayName, image: { $0.logo(size: 16) },
             // A removed provider's schedule offers its CLI instead.
-            selected: schedule.map { $0.choice.exists ? $0.choice : AgentChoice($0.kind) } ?? .current,
+            selected: schedule.map { providers.exists($0.choice) ? $0.choice : AgentChoice($0.kind) } ?? providers.current,
             target: self, action: #selector(kindChanged(_:))
         )
         kindPopUp = popUp
-        AgentMenuAvailability.watch(popUp)
+        AgentMenuAvailability.watch(popUp, providers: providers)
         addRow("Agent:", popUp)
 
         modelOptions = schedule?.modelOptions
@@ -337,7 +343,7 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         addRow("Model:", modelButton)
         showModelOptions()
 
-        let tools = schedule?.tools ?? Settings.agentTools
+        let tools = schedule?.tools ?? profile.settings.agentTools
         toolBoxes = AgentTool.allCases.map { tool in
             let checkbox = NSButton(checkboxWithTitle: tool.displayName, target: nil, action: nil)
             checkbox.state = tools.contains(tool) ? .on : .off
@@ -433,8 +439,10 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         textView.delegate = self
         textView.setAccessibilityLabel("Prompt")
         promptView = textView
+        let library = profile.skills
         completion = SkillCompletion(textView: textView) { [weak self] in
-            AgentSkillCatalog.skills(for: self?.kind.kind ?? .current)
+            guard let self else { return [] }
+            return AgentSkillCatalog.skills(for: self.kind.kind, library: library)
         }
         let promptRow = addRow("Prompt:", box)
         promptRow.rowAlignment = .none
@@ -586,14 +594,17 @@ final class ScheduleEditorController: NSViewController, NSTextViewDelegate, NSTe
         if let modelOptions {
             modelButton.title = modelOptions.summary(for: kind)
         } else {
-            let options = kind.defaultModelOptions
-            modelButton.title = "As in Settings (" + (options.isDefault ? "\(kind.displayName)'s own" : options.summary(for: kind)) + ")"
+            let options = profile.settings.agentModelOptions(for: kind)
+            let name = profile.providers.displayName(kind)
+            modelButton.title = "As in Settings (" + (options.isDefault ? "\(name)'s own" : options.summary(for: kind)) + ")"
         }
     }
 
     @objc private func chooseModel(_ sender: NSButton) {
         let kind = kind
-        AgentModelMenu.popUp(below: sender, kind: kind, options: modelOptions ?? kind.defaultModelOptions) { [weak self] options in
+        AgentModelMenu.popUp(
+            below: sender, kind: kind, profile: profile, options: modelOptions ?? profile.settings.agentModelOptions(for: kind)
+        ) { [weak self] options in
             self?.modelOptions = options
             self?.showModelOptions()
         }

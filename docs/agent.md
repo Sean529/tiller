@@ -66,7 +66,7 @@ Ask the agent to do something every morning, every hour or at a later time, and 
 
 Tiller tells which chat a call comes from by the chat's id, which `tiller_mcp` gets in `TILLER_CHAT`. Calls without one count as a chat with no built-in tools.
 
-Prompts run only while the profile's Tiller is open. One that came due while Tiller was closed or the Mac slept runs once, a few seconds after launch or on wake, and then follows its rule again. They are kept in `agent-schedules.json` in the [profile's folder](settings-and-data.md#data-folder).
+Prompts run only while the profile is open in Tiller. One that came due while Tiller was closed or the Mac slept runs once, a few seconds after launch or on wake, and then follows its rule again. They are kept in `agent-schedules.json` in the [profile's folder](settings-and-data.md#data-folder).
 
 ## How agents run
 

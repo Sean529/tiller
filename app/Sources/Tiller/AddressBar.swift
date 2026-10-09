@@ -352,9 +352,9 @@ final class AddressField: NSTextField {
 }
 
 /// Turns address bar input into a URL: a URL if it looks like one, else a
-/// search with the engine chosen in Settings.
+/// search with the engine the profile's `settings` chose.
 enum AddressInput {
-    static func url(for input: String) -> String {
+    static func url(for input: String, settings: ProfileSettings) -> String {
         if input.contains("://") || input.hasPrefix("about:") || input.hasPrefix("data:") {
             return input
         }
@@ -374,7 +374,7 @@ enum AddressInput {
             let scheme = isLocal(name) ? "http" : "https"
             return "\(scheme)://\(input)"
         }
-        return Settings.searchURL(for: input)
+        return settings.searchURL(for: input)
     }
 
     /// Localhost and private IPv4 addresses, which seldom serve https.

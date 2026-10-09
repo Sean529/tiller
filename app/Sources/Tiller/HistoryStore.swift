@@ -26,12 +26,10 @@ struct FrequentSite: Sendable, Equatable {
     let icon: Data?
 }
 
-/// Tiller's browsing history: one row per URL, in `history.sqlite` in the data
+/// A profile's browsing history: one row per URL, in `history.sqlite` in its
 /// folder. Chromium keeps its own History file, but CEF has no API for it and
 /// holds it locked. Database work runs on a serial queue.
 final class HistoryStore: @unchecked Sendable {
-    static let shared = HistoryStore(path: DataDirectory.file("history.sqlite"))
-
     private let queue = DispatchQueue(label: "dev.sorrycc.tiller.history")
     /// Numbers each search, so one that a newer search has replaced before it
     /// got to run can be skipped.

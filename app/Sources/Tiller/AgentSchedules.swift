@@ -250,12 +250,13 @@ struct ScheduledPrompt: Codable, Equatable {
 /// The profile's scheduled prompts, in `agent-schedules.json` in its folder.
 @MainActor
 final class AgentScheduleStore {
-    static let shared = AgentScheduleStore()
-
     private(set) var schedules: [ScheduledPrompt]
-    private let path = DataDirectory.path + "/agent-schedules.json"
+    private let folder: String
+    private let path: String
 
-    private init() {
+    init(folder: String) {
+        self.folder = folder
+        path = folder + "/agent-schedules.json"
         let data = try? Data(contentsOf: URL(fileURLWithPath: path))
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -331,7 +332,7 @@ final class AgentScheduleStore {
 
     private func write() {
         do {
-            try FileManager.default.createDirectory(atPath: DataDirectory.path, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
@@ -340,7 +341,7 @@ final class AgentScheduleStore {
         } catch {
             NSLog("Tiller: could not save scheduled prompts: %@", error.localizedDescription)
         }
-        NotificationCenter.default.post(name: .agentSchedulesDidChange, object: nil)
+        NotificationCenter.default.post(name: .agentSchedulesDidChange, object: self)
     }
 }
 
@@ -352,39 +353,50 @@ enum AgentRunOutcome {
     case stopped
 }
 
-/// Sends scheduled prompts when they are due. One timer is armed for the
-/// soonest; it is re-armed when schedules change, the Mac wakes or the clock
+/// Sends a profile's scheduled prompts when they are due, in its window.
+/// One timer is armed for the soonest; it is re-armed when schedules change, the Mac wakes or the clock
 /// changes, and never further than ten minutes out, so a timer that slept
 /// with the Mac can't run late by much. A run missed while Tiller was closed
 /// or the Mac slept happens once, then the rule takes over again.
 @MainActor
-final class AgentScheduler: NSObject, UNUserNotificationCenterDelegate {
-    static let shared = AgentScheduler()
-
-    private weak var browser: BrowserWindowController?
+final class AgentScheduler: NSObject {
+    private weak var profile: ProfileContext?
+    private var browser: BrowserWindowController? { profile?.window }
     private var timer: Timer?
     /// Runs wait until this, so a launch finishes before missed runs start.
     private var notBefore = Date.distantPast
     /// The chat each schedule's latest run is in.
     private var running: [String: String] = [:]
     private var started = false
-    private var askedForNotifications = false
-    private var store: AgentScheduleStore { .shared }
+    private let store: AgentScheduleStore
 
-    func start(browser: BrowserWindowController) {
-        self.browser = browser
+    init(profile: ProfileContext) {
+        self.profile = profile
+        store = profile.schedules
+    }
+
+    func start() {
         guard !started else { return arm() }
         started = true
         notBefore = Date().addingTimeInterval(5)
         let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(changed(_:)), name: .agentSchedulesDidChange, object: nil)
+        center.addObserver(self, selector: #selector(changed(_:)), name: .agentSchedulesDidChange, object: store)
         center.addObserver(self, selector: #selector(changed(_:)), name: .NSSystemClockDidChange, object: nil)
         center.addObserver(self, selector: #selector(timeZoneChanged(_:)), name: .NSSystemTimeZoneDidChange, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(changed(_:)), name: NSWorkspace.didWakeNotification, object: nil
         )
-        UNUserNotificationCenter.current().delegate = self
+        ScheduleNotifications.shared.install()
         arm()
+    }
+
+    /// The profile closed: no more runs.
+    func stop() {
+        started = false
+        timer?.invalidate()
+        timer = nil
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     @objc private func changed(_ notification: Notification) { arm() }
@@ -396,8 +408,8 @@ final class AgentScheduler: NSObject, UNUserNotificationCenterDelegate {
         timer = nil
         guard started, let next = store.schedules.filter(\.enabled).compactMap(\.nextRun).min() else { return }
         let fire = min(max(next, notBefore), Date().addingTimeInterval(600))
-        let timer = Timer(fire: fire, interval: 0, repeats: false) { _ in
-            MainActor.assumeIsolated { AgentScheduler.shared.runDue() }
+        let timer = Timer(fire: fire, interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.runDue() }
         }
         timer.tolerance = 1
         RunLoop.main.add(timer, forMode: .common)
@@ -456,23 +468,39 @@ final class AgentScheduler: NSObject, UNUserNotificationCenterDelegate {
         }
         // A later run of the same schedule owns the result now.
         if store.schedule(id)?.lastChat == chat { store.record(result, for: id) }
-        notify(title: name, body: body, chat: chat)
+        guard let profile else { return }
+        ScheduleNotifications.shared.notify(title: name, body: body, chat: chat, profile: profile.id)
     }
 
-    // MARK: Notifications
+    func askForNotifications() {
+        ScheduleNotifications.shared.askForPermission()
+    }
+}
+
+/// The notifications scheduled runs post, for every profile. Clicking one
+/// shows its chat in its profile's window.
+@MainActor
+final class ScheduleNotifications: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = ScheduleNotifications()
+
+    private var asked = false
+
+    func install() {
+        UNUserNotificationCenter.current().delegate = self
+    }
 
     /// Asked once per launch at most; macOS shows the prompt only the first time.
-    func askForNotifications() {
-        guard !askedForNotifications else { return }
-        askedForNotifications = true
+    func askForPermission() {
+        guard !asked else { return }
+        asked = true
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    private func notify(title: String, body: String, chat: String) {
+    func notify(title: String, body: String, chat: String, profile: String) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.userInfo = ["chat": chat]
+        content.userInfo = ["chat": chat, "profile": profile]
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             if let error { NSLog("Tiller: could not post a notification: %@", error.localizedDescription) }
@@ -484,10 +512,14 @@ final class AgentScheduler: NSObject, UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let chat = response.notification.request.content.userInfo["chat"] as? String
+        let info = response.notification.request.content.userInfo
+        let chat = info["chat"] as? String
+        let profile = info["profile"] as? String ?? Profiles.defaultID
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
-                if let chat { AgentScheduler.shared.browser?.showAgentChat(chat) }
+                guard let chat, let context = ProfileContext.opened(profile) else { return }
+                context.show()
+                context.window?.showAgentChat(chat)
             }
         }
         completionHandler()
@@ -524,28 +556,27 @@ enum AgentScheduleControl {
         schedule.kind == .agy ? Set(AgentTool.allCases) : Set(schedule.tools)
     }
 
-    private static var store: AgentScheduleStore { .shared }
-
-    static func control(_ method: String, params: [String: Any]) throws -> Any {
-        let caller = caller(params["chat"] as? String)
+    static func control(_ method: String, params: [String: Any], profile: ProfileContext) throws -> Any {
+        let store = profile.schedules
+        let caller = caller(params["chat"] as? String, profile: profile)
         if method != "schedules.list", caller.isScheduledRun {
             throw ControlError("A scheduled run can list schedules but not change or run them. Ask the user to do it from a chat they started, or in Settings > Scheduled.")
         }
         switch method {
         case "schedules.list":
             return [
-                "schedules": store.schedules.map(describe),
-                "agents": AgentChoice.all.map { ["agent": $0.rawValue, "name": $0.displayName] },
+                "schedules": store.schedules.map { describe($0, profile: profile) },
+                "agents": profile.providers.all.map { ["agent": $0.rawValue, "name": profile.providers.displayName($0)] },
             ]
         case "schedules.save":
-            return try save(params, caller: caller)
+            return try save(params, caller: caller, profile: profile)
         case "schedules.delete":
-            let schedule = try find(params)
+            let schedule = try find(params, in: store)
             store.remove([schedule.id])
             return ["deleted": schedule.name, "id": schedule.id]
         case "schedules.run":
-            let schedule = try find(params)
-            AgentScheduler.shared.runNow(schedule.id)
+            let schedule = try find(params, in: store)
+            profile.scheduler.runNow(schedule.id)
             let after = store.schedule(schedule.id)
             return ["ran": schedule.name, "id": schedule.id, "result": after?.lastResult?.displayText ?? "", "chat": after?.lastChat ?? ""]
         default:
@@ -553,29 +584,30 @@ enum AgentScheduleControl {
         }
     }
 
-    private static func caller(_ chat: String?) -> Caller {
-        guard let chat, let conversation = AgentHistoryStore.shared.conversation(chat) else { return Caller() }
+    private static func caller(_ chat: String?, profile: ProfileContext) -> Caller {
+        guard let chat, let conversation = profile.agentHistory.conversation(chat) else { return Caller() }
         return Caller(
             kind: conversation.choice,
-            tools: conversation.kind == .agy ? Set(AgentTool.allCases) : Set(conversation.tools ?? Settings.agentTools),
+            tools: conversation.kind == .agy ? Set(AgentTool.allCases) : Set(conversation.tools ?? profile.settings.agentTools),
             isScheduledRun: conversation.scheduleID != nil
         )
     }
 
-    private static func find(_ params: [String: Any]) throws -> ScheduledPrompt {
+    private static func find(_ params: [String: Any], in store: AgentScheduleStore) throws -> ScheduledPrompt {
         guard let id = params["id"] as? String, !id.isEmpty else { throw ControlError("id is required. Get it from list_schedules.") }
         guard let schedule = store.schedule(id) else { throw ControlError("No scheduled prompt has the id \(id). Get it from list_schedules.") }
         return schedule
     }
 
-    private static func save(_ params: [String: Any], caller: Caller) throws -> Any {
-        let original = (params["id"] as? String).map(\.isEmpty) == false ? try find(params) : nil
+    private static func save(_ params: [String: Any], caller: Caller, profile: ProfileContext) throws -> Any {
+        let store = profile.schedules, providers = profile.providers
+        let original = (params["id"] as? String).map(\.isEmpty) == false ? try find(params, in: store) : nil
 
         let prompt = (params["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let rule = try params["rule"].map(parseRule)
         let kind = try (params["agent"] as? String).map { name in
-            guard let kind = AgentChoice(rawValue: name), kind.exists else {
-                throw ControlError("agent is one of \(AgentChoice.all.map(\.rawValue).joined(separator: ", ")).")
+            guard let kind = AgentChoice(rawValue: name), providers.exists(kind) else {
+                throw ControlError("agent is one of \(providers.all.map(\.rawValue).joined(separator: ", ")).")
             }
             return kind
         }
@@ -601,7 +633,7 @@ enum AgentScheduleControl {
             guard let prompt, !prompt.isEmpty else { throw ControlError("prompt is required for a new schedule.") }
             guard let rule else { throw ControlError("rule is required for a new schedule.") }
             schedule = ScheduledPrompt(
-                name: AgentConversation.title(from: prompt), prompt: prompt, choice: caller.kind ?? .current, tools: [], rule: rule
+                name: AgentConversation.title(from: prompt), prompt: prompt, choice: caller.kind ?? providers.current, tools: [], rule: rule
             )
         }
         if let tools {
@@ -619,9 +651,9 @@ enum AgentScheduleControl {
             schedule.modelOptions = nil
         }
         if let modelChange {
-            var options = schedule.modelOptions ?? schedule.choice.defaultModelOptions
+            var options = schedule.modelOptions ?? profile.settings.agentModelOptions(for: schedule.choice)
             modelChange(&options)
-            try checkModelOptions(options, for: schedule.choice)
+            try checkModelOptions(options, for: schedule.choice, providers: providers)
             schedule.modelOptions = options
         }
         if let name = (params["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
@@ -637,8 +669,8 @@ enum AgentScheduleControl {
             throw ControlError(error.localizedDescription)
         }
         store.save(schedule)
-        AgentScheduler.shared.askForNotifications()
-        var result = describe(store.schedule(schedule.id) ?? schedule)
+        ScheduleNotifications.shared.askForPermission()
+        var result = describe(store.schedule(schedule.id) ?? schedule, profile: profile)
         result["created"] = original == nil
         return result
     }
@@ -664,8 +696,8 @@ enum AgentScheduleControl {
     }
 
     /// Refuses options the agent doesn't have, saying which it does.
-    private static func checkModelOptions(_ options: AgentModelOptions, for kind: AgentChoice) throws {
-        let name = kind.displayName
+    private static func checkModelOptions(_ options: AgentModelOptions, for kind: AgentChoice, providers: AgentProviderStore) throws {
+        let name = providers.displayName(kind)
         if let effort = options.effort, !kind.effortLevels(model: options.model).contains(effort) {
             let levels = kind.effortLevels(model: options.model)
             throw ControlError("effort for \(name) is one of \(levels.joined(separator: ", ")), or empty for its own.")
@@ -713,7 +745,7 @@ enum AgentScheduleControl {
         }
     }
 
-    private static func describe(_ schedule: ScheduledPrompt) -> [String: Any] {
+    private static func describe(_ schedule: ScheduledPrompt, profile: ProfileContext) -> [String: Any] {
         let dates = ISO8601DateFormatter()
         var rule: [String: Any]
         switch schedule.rule {
@@ -727,7 +759,7 @@ enum AgentScheduleControl {
             "id": schedule.id, "name": schedule.name, "prompt": schedule.prompt, "agent": schedule.choice.rawValue,
             "tools": schedule.tools.map(\.rawValue), "rule": rule, "enabled": schedule.enabled,
         ]
-        let options = schedule.modelOptions ?? schedule.choice.defaultModelOptions
+        let options = schedule.modelOptions ?? profile.settings.agentModelOptions(for: schedule.choice)
         if let model = options.model { result["model"] = model }
         if let effort = options.effort { result["effort"] = effort }
         if let context = options.context { result["context"] = context }

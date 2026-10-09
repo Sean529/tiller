@@ -29,7 +29,7 @@ Commands:
   eval <expression>         Run JavaScript in the page and print the value
 
 Options:
-  --profile <name>          Control this profile's Tiller instead of the one used last
+  --profile <name>          Control this open profile instead of the one used last
   --tab <id>                Act on this tab instead of the selected one
   --background              new: leave the selected tab in front
   --selector <css>          Target an element by CSS selector instead of a ref

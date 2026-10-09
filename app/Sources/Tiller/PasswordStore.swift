@@ -40,13 +40,13 @@ enum PasswordStoreError: LocalizedError {
     }
 }
 
-/// Saved passwords, in `passwords.json` in the data folder. Sites and
+/// A profile's saved passwords, in `passwords.json` in its folder. Sites and
 /// usernames are stored in the clear, as Chrome stores them, so Tiller can tell
 /// which pages have a login without asking for the keychain. Each password is
 /// sealed with AES-GCM under a key kept in the login keychain.
 @MainActor
 final class PasswordStore {
-    static let shared = PasswordStore()
+    let profileID: String
 
     struct Entry: Codable, Sendable {
         let origin: String
@@ -64,9 +64,11 @@ final class PasswordStore {
     }
     /// `entries` by origin. The address bar asks on every page change.
     private var byOrigin: [String: [Entry]] = [:]
-    private let path = DataDirectory.file("passwords.json")
+    private let path: String
 
-    private init() {
+    init(profileID: String, folder: String) {
+        self.profileID = profileID
+        path = folder + "/passwords.json"
         if let data = FileManager.default.contents(atPath: path) {
             entries = (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
             byOrigin = Dictionary(grouping: entries, by: \.origin)
@@ -79,7 +81,8 @@ final class PasswordStore {
 
     /// The password of `entry`. macOS may ask before handing Tiller its key.
     func password(for entry: Entry) async throws -> String {
-        let key = try await Task.detached { try PasswordKey.load(create: false) }.value
+        let profileID = profileID
+        let key = try await Task.detached { try PasswordKey.load(profileID: profileID, create: false) }.value
         guard let box = try? AES.GCM.SealedBox(combined: entry.sealed),
             let plain = try? AES.GCM.open(box, using: key),
             let password = String(data: plain, encoding: .utf8)
@@ -92,7 +95,8 @@ final class PasswordStore {
     func merge(_ logins: [SavedLogin]) async throws -> Int {
         guard !logins.isEmpty else { return 0 }
         let hasEntries = !entries.isEmpty
-        let key = try await Task.detached { try PasswordKey.load(create: !hasEntries) }.value
+        let profileID = profileID
+        let key = try await Task.detached { try PasswordKey.load(profileID: profileID, create: !hasEntries) }.value
         var byID = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
         for login in logins {
             guard let sealed = try AES.GCM.seal(Data(login.password.utf8), using: key).combined else { continue }
@@ -109,7 +113,7 @@ final class PasswordStore {
     /// Also deletes the key, so the next import starts fresh.
     func removeAll() throws {
         try save([])
-        PasswordKey.delete()
+        PasswordKey.delete(profileID: profileID)
     }
 
     private func save(_ entries: [Entry]) throws {
@@ -118,7 +122,7 @@ final class PasswordStore {
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
         self.entries = sorted
-        NotificationCenter.default.post(name: .passwordsDidChange, object: nil)
+        NotificationCenter.default.post(name: .passwordsDidChange, object: self)
     }
 }
 
@@ -135,7 +139,7 @@ enum PasswordKey {
         profileID == Profiles.defaultID ? "key" : "key." + profileID
     }
 
-    private static func baseQuery(service: String = service, profileID: String = Profiles.current.id) -> [String: Any] {
+    private static func baseQuery(service: String = service, profileID: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -143,24 +147,24 @@ enum PasswordKey {
         ]
     }
 
-    /// Reads the current profile's key, creating it if missing and `create` is
-    /// set. For the default profile, a key saved by Mini is copied under the
-    /// new name, and the old item is left as is.
-    static func load(create: Bool) throws -> SymmetricKey {
-        if let key = try read(service: service) { return key }
-        if Profiles.current.id == Profiles.defaultID, let key = try read(service: oldService) {
-            try add(key)
+    /// Reads the profile's key, creating it if missing and `create` is set.
+    /// For the default profile, a key saved by Mini is copied under the new
+    /// name, and the old item is left as is.
+    static func load(profileID: String, create: Bool) throws -> SymmetricKey {
+        if let key = try read(service: service, profileID: profileID) { return key }
+        if profileID == Profiles.defaultID, let key = try read(service: oldService, profileID: profileID) {
+            try add(key, profileID: profileID)
             return key
         }
         guard create else { throw PasswordStoreError.keyMissing }
         let key = SymmetricKey(size: .bits256)
-        try add(key)
+        try add(key, profileID: profileID)
         return key
     }
 
     /// Nil if there is no item for `service`.
-    private static func read(service: String) throws -> SymmetricKey? {
-        var query = baseQuery(service: service)
+    private static func read(service: String, profileID: String) throws -> SymmetricKey? {
+        var query = baseQuery(service: service, profileID: profileID)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -178,15 +182,15 @@ enum PasswordKey {
         }
     }
 
-    private static func add(_ key: SymmetricKey) throws {
-        var add = baseQuery()
+    private static func add(_ key: SymmetricKey, profileID: String) throws {
+        var add = baseQuery(profileID: profileID)
         add[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
         add[kSecAttrLabel as String] = service
         let added = SecItemAdd(add as CFDictionary, nil)
         guard added == errSecSuccess else { throw PasswordStoreError.keychain(added) }
     }
 
-    static func delete(profileID: String = Profiles.current.id) {
+    static func delete(profileID: String) {
         SecItemDelete(baseQuery(profileID: profileID) as CFDictionary)
     }
 }

@@ -1,4 +1,4 @@
-//! Cookie import. Cookies go through the global cookie manager, so Chromium
+//! Cookie import. Cookies go through the profile's cookie manager, so Chromium
 //! stores them the same way it stores cookies the pages set. Everything here
 //! runs on the CEF UI thread, which on macOS is the main thread.
 
@@ -14,6 +14,8 @@ use std::{
 pub type Done = unsafe extern "C" fn(ctx: *mut c_void, imported: i32, failed: i32);
 
 struct Import {
+    /// The cookie manager of the profile they go to.
+    manager: CookieManager,
     ctx: *mut c_void,
     done: Done,
     /// Indexes of cookies still waiting for their callback. A cookie is counted
@@ -29,21 +31,24 @@ thread_local! {
 }
 
 /// Sets every cookie in `json`, a JSON array of objects as described in
-/// tiller_core.h. A cookie with the same name, domain and path is replaced.
-/// `done` runs after the last cookie is set and the store is flushed.
-pub fn import(json: &str, ctx: *mut c_void, done: Done) {
+/// tiller_core.h, in request context `context`. A cookie with the same name,
+/// domain and path is replaced. `done` runs after the last cookie is set and
+/// the store is flushed.
+pub fn import(context: i32, json: &str, ctx: *mut c_void, done: Done) {
     let cookies = match serde_json::from_str::<Value>(json) {
         Ok(Value::Array(cookies)) => cookies,
         _ => return unsafe { done(ctx, 0, 0) },
     };
-    let Some(manager) = cookie_manager_get_global_manager(None) else {
+    let Some(manager) = crate::browser::context(context).and_then(|c| c.cookie_manager(None)) else {
         return unsafe { done(ctx, 0, cookies.len() as i32) };
     };
 
     let id = NEXT_ID.get();
     NEXT_ID.set(id + 1);
     let pending = (0..cookies.len()).collect();
-    IMPORTS.with_borrow_mut(|imports| imports.insert(id, Import { ctx, done, pending, imported: 0, failed: 0 }));
+    IMPORTS.with_borrow_mut(|imports| {
+        imports.insert(id, Import { manager: manager.clone(), ctx, done, pending, imported: 0, failed: 0 })
+    });
     if cookies.is_empty() {
         return flush(id);
     }
@@ -112,8 +117,8 @@ fn finish_one(id: u64, index: usize, success: bool) {
 
 /// Writes the new cookies to disk, then reports.
 fn flush(id: u64) {
-    let flushing = cookie_manager_get_global_manager(None)
-        .is_some_and(|manager| manager.flush_store(Some(&mut TillerFlushCallback::new(id))) != 0);
+    let manager = IMPORTS.with_borrow(|imports| imports.get(&id).map(|i| i.manager.clone()));
+    let flushing = manager.is_some_and(|manager| manager.flush_store(Some(&mut TillerFlushCallback::new(id))) != 0);
     if !flushing {
         report(id);
     }

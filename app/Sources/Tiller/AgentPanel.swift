@@ -36,18 +36,22 @@ final class AgentPanelView: NSView {
     private var active: AgentChatView { chats[activeIndex] }
     private var historyPopover: NSPopover?
 
-    override init(frame: NSRect) {
+    private let profile: ProfileContext
+
+    /// The panel of `profile`'s window, with its chats and agents.
+    init(profile: ProfileContext, frame: NSRect) {
+        self.profile = profile
         super.init(frame: frame)
         build()
         restoreTabs()
         NotificationCenter.default.addObserver(
-            self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: nil
+            self, selector: #selector(currentAgentChanged(_:)), name: .agentKindDidChange, object: profile.providers
         )
         NotificationCenter.default.addObserver(
             self, selector: #selector(tabLimitChanged(_:)), name: .agentTabsDidChange, object: nil
         )
         NotificationCenter.default.addObserver(
-            self, selector: #selector(providersChanged(_:)), name: .agentProvidersDidChange, object: nil
+            self, selector: #selector(providersChanged(_:)), name: .agentProvidersDidChange, object: profile.providers
         )
         // A new chat follows Settings' options, and the button names the models.
         for name in [Notification.Name.agentModelOptionsDidChange, .agentModelsDidChange] {
@@ -62,23 +66,23 @@ final class AgentPanelView: NSView {
     /// which are missing.
     override func viewDidUnhide() {
         super.viewDidUnhide()
-        AgentEnvironment.refreshAvailability()
-        AgentModelCatalog.refreshAll()
+        AgentEnvironment.refreshAvailability(settings: profile.settings)
+        AgentModelCatalog.refreshAll(profile: profile)
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil, !isHiddenOrHasHiddenAncestor else { return }
-        AgentEnvironment.refreshAvailability()
-        AgentModelCatalog.refreshAll()
+        AgentEnvironment.refreshAvailability(settings: profile.settings)
+        AgentModelCatalog.refreshAll(profile: profile)
     }
 
     /// Ends every tab's agent and saves the chats. Called when the window closes.
     func shutDown() {
         saveTabs()
         (chats + scheduledChats).forEach { $0.shutDown() }
-        AgentHistoryStore.shared.flush()
-        AgentHistoryStore.shared.waitForWrites()
+        profile.agentHistory.flush()
+        profile.agentHistory.waitForWrites()
     }
 
     var hasKeyboardFocus: Bool {
@@ -98,7 +102,7 @@ final class AgentPanelView: NSView {
         agentPicker.toolTip = "Agent for this chat"
         agentPicker.target = self
         agentPicker.action = #selector(agentChanged(_:))
-        AgentMenuAvailability.watch(agentPicker)
+        AgentMenuAvailability.watch(agentPicker, providers: profile.providers)
 
         tabBar.onSelect = { [weak self] index in self?.select(index, focus: true) }
         tabBar.onClose = { [weak self] index in self?.closeTab(index) }
@@ -131,11 +135,11 @@ final class AgentPanelView: NSView {
 
     /// Last time's tabs, up to the limit. A chat since deleted opens empty.
     private func restoreTabs() {
-        let store = AgentHistoryStore.shared
-        for id in store.openTabs.prefix(Settings.agentTabs) {
-            add(AgentChatView(conversation: id.isEmpty ? nil : store.conversation(id)))
+        let store = profile.agentHistory
+        for id in store.openTabs.prefix(profile.settings.agentTabs) {
+            add(AgentChatView(profile: profile, conversation: id.isEmpty ? nil : store.conversation(id)))
         }
-        if chats.isEmpty { add(AgentChatView()) }
+        if chats.isEmpty { add(AgentChatView(profile: profile)) }
         select(min(max(store.selectedTab, 0), chats.count - 1), focus: false)
     }
 
@@ -192,8 +196,8 @@ final class AgentPanelView: NSView {
     }
 
     private func newTab() {
-        guard chats.count < Settings.agentTabs else { return NSSound.beep() }
-        add(AgentChatView())
+        guard chats.count < profile.settings.agentTabs else { return NSSound.beep() }
+        add(AgentChatView(profile: profile))
         select(chats.count - 1, focus: true)
     }
 
@@ -202,7 +206,7 @@ final class AgentPanelView: NSView {
         if active.isEmpty {
             window?.makeFirstResponder(input)
         } else {
-            replace(activeIndex, with: AgentChatView())
+            replace(activeIndex, with: AgentChatView(profile: profile))
         }
     }
 
@@ -226,7 +230,7 @@ final class AgentPanelView: NSView {
     }
 
     private func saveTabs() {
-        AgentHistoryStore.shared.setOpenTabs(chats.map { $0.isEmpty ? "" : $0.id }, selected: activeIndex)
+        profile.agentHistory.setOpenTabs(chats.map { $0.isEmpty ? "" : $0.id }, selected: activeIndex)
     }
 
     /// The header and tab bar show the selected chat.
@@ -240,7 +244,7 @@ final class AgentPanelView: NSView {
             agentPicker.selectItem(at: index)
         } else {
             // A removed provider's chat names it, without offering it.
-            agentPicker.addItem(withTitle: chat.choice.displayName)
+            agentPicker.addItem(withTitle: profile.providers.displayName(chat.choice))
             agentPicker.lastItem?.image = chat.choice.logo(size: 16)
             agentPicker.lastItem?.isHidden = true
             agentPicker.select(agentPicker.lastItem)
@@ -249,7 +253,7 @@ final class AgentPanelView: NSView {
         tabBar.update(
             tabs: chats.map { (title: $0.title, busy: $0.isBusy) },
             selected: activeIndex,
-            canAddTab: chats.count < Settings.agentTabs,
+            canAddTab: chats.count < profile.settings.agentTabs,
             tools: chat.tools,
             model: (chat.modelOptions.summary(for: chat.choice), chat.modelOptions.isDefault)
         )
@@ -262,7 +266,7 @@ final class AgentPanelView: NSView {
     private func showModelOptions(from button: NSView) {
         let chat = active
         AgentModelMenu.popUp(
-            below: button, kind: chat.choice, options: chat.modelOptions, locked: chat.isBusy,
+            below: button, kind: chat.choice, profile: profile, options: chat.modelOptions, locked: chat.isBusy,
             note: chat.isBusy ? "Stop the agent to change the model." : "Settings sets them for new chats."
         ) { [weak chat] options in
             chat?.setModelOptions(options)
@@ -335,8 +339,11 @@ final class AgentPanelView: NSView {
     }
 
     private func historyItems() -> [AgentHistoryController.Item] {
-        AgentHistoryStore.shared.conversations.map { conversation in
-            .init(conversation: conversation, tab: chats.firstIndex { $0.id == conversation.id })
+        profile.agentHistory.conversations.map { conversation in
+            .init(
+                conversation: conversation, tab: chats.firstIndex { $0.id == conversation.id },
+                agentName: profile.providers.displayName(conversation.choice)
+            )
         }
     }
 
@@ -361,10 +368,10 @@ final class AgentPanelView: NSView {
             chat = scheduledChats.remove(at: index)
             chat.removeFromSuperview()
         } else {
-            guard let conversation = AgentHistoryStore.shared.conversation(id) else { return }
-            chat = AgentChatView(conversation: conversation)
+            guard let conversation = profile.agentHistory.conversation(id) else { return }
+            chat = AgentChatView(profile: profile, conversation: conversation)
         }
-        if newTabIfRoom, chats.count < Settings.agentTabs {
+        if newTabIfRoom, chats.count < profile.settings.agentTabs {
             add(chat)
             select(chats.count - 1, focus: true)
         } else {
@@ -385,10 +392,10 @@ final class AgentPanelView: NSView {
             let old = chats.remove(at: index)
             old.shutDown()
             old.removeFromSuperview()
-            add(AgentChatView(), at: index)
+            add(AgentChatView(profile: profile), at: index)
             select(activeIndex, focus: false)
         }
-        AgentHistoryStore.shared.delete(id)
+        profile.agentHistory.delete(id)
     }
 
     // MARK: Agent
@@ -397,19 +404,19 @@ final class AgentPanelView: NSView {
     /// tab has no messages yet.
     @objc private func agentChanged(_ sender: NSPopUpButton) {
         guard let raw = sender.selectedItem?.representedObject as? String, let kind = AgentChoice(rawValue: raw),
-            kind != active.choice || kind != AgentChoice.current
+            kind != active.choice || kind != profile.providers.current
         else { return }
         let startOver = !active.isEmpty && kind != active.choice
-        AgentChoice.current = kind
+        profile.providers.current = kind
         if startOver { newChat() } else { refresh() }
     }
 
     /// The CLIs, then the providers added in Settings.
     private func fillAgentPicker() {
         agentPicker.removeAllItems()
-        for (index, choice) in AgentChoice.all.enumerated() {
+        for (index, choice) in profile.providers.all.enumerated() {
             if index == AgentKind.allCases.count { agentPicker.menu?.addItem(.separator()) }
-            agentPicker.addItem(withTitle: choice.displayName)
+            agentPicker.addItem(withTitle: profile.providers.displayName(choice))
             agentPicker.lastItem?.representedObject = choice.rawValue
             agentPicker.lastItem?.image = choice.logo(size: 16)
         }
@@ -475,7 +482,7 @@ final class AgentPanelView: NSView {
     /// then; it stays in history. `completion` gets the chat's id and how
     /// its turn ended.
     func runScheduled(_ schedule: ScheduledPrompt, completion: @escaping (String, AgentRunOutcome) -> Void) -> String {
-        let chat = AgentChatView(kind: schedule.choice, tools: schedule.tools, modelOptions: schedule.modelOptions)
+        let chat = AgentChatView(profile: profile, kind: schedule.choice, tools: schedule.tools, modelOptions: schedule.modelOptions)
         attach(chat)
         scheduledChats.append(chat)
         let id = chat.id
@@ -566,12 +573,15 @@ private final class StatusPill: NSView {
 /// What a new chat shows: what the agent can do, and a few things to ask.
 final class AgentEmptyState: NSView {
     var onSuggestion: ((String) -> Void)?
-    var kind: AgentChoice? {
-        didSet {
-            guard let kind, kind != oldValue || title.stringValue != "Ask \(kind.displayName)" else { return }
-            title.stringValue = "Ask \(kind.displayName)"
-            badge.logo = kind.logo(size: 28)
-        }
+    private var kind: AgentChoice?
+
+    /// Names the agent, `name` being its name or its provider's.
+    func show(_ kind: AgentChoice, name: String) {
+        guard kind != self.kind || title.stringValue != "Ask \(name)" else { return }
+        let changed = kind != self.kind
+        self.kind = kind
+        title.stringValue = "Ask \(name)"
+        if changed { badge.logo = kind.logo(size: 28) }
     }
 
     private let badge = SymbolBadge(symbol: "sparkles")

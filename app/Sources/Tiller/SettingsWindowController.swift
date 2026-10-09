@@ -1,25 +1,29 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// The Settings window (Cmd+,), with General, Passwords, Extensions, Agent,
-/// Providers, Skills, Scheduled and Profiles panes. Every change is saved as it is made, in the current profile.
+/// A profile's Settings window (Cmd+,), with General, Passwords, Extensions,
+/// Agent, Providers, Skills, Scheduled and Profiles panes. Every change is
+/// saved as it is made, in the profile, except the appearance, accent color,
+/// agent shortcut and extensions, which every profile shares.
 @MainActor
 final class SettingsWindowController: NSWindowController {
     private let tabs = SettingsTabViewController()
+    let profileID: String
 
-    init() {
+    init(profile: ProfileContext) {
+        profileID = profile.id
         // Read before the first tab is added, which selects it and saves it.
         let lastPane = UserDefaults.standard.string(forKey: SettingsTabViewController.lastPaneKey)
         tabs.tabStyle = .toolbar
         let panes: [(NSViewController, String)] = [
-            (GeneralSettingsPane(), "gearshape"),
-            (PasswordsSettingsPane(), "key"),
-            (ExtensionsSettingsPane(), "puzzlepiece.extension"),
-            (AgentSettingsPane(), "sparkles"),
-            (ProvidersSettingsPane(), "server.rack"),
-            (SkillsSettingsPane(), "wand.and.stars"),
-            (ScheduledSettingsPane(), "calendar.badge.clock"),
-            (ProfilesSettingsPane(), "person.2"),
+            (GeneralSettingsPane(profile: profile), "gearshape"),
+            (PasswordsSettingsPane(profile: profile), "key"),
+            (ExtensionsSettingsPane(profile: profile), "puzzlepiece.extension"),
+            (AgentSettingsPane(profile: profile), "sparkles"),
+            (ProvidersSettingsPane(profile: profile), "server.rack"),
+            (SkillsSettingsPane(profile: profile), "wand.and.stars"),
+            (ScheduledSettingsPane(profile: profile), "calendar.badge.clock"),
+            (ProfilesSettingsPane(profile: profile), "person.2"),
         ]
         for (pane, symbol) in panes {
             let item = NSTabViewItem(viewController: ScrollingPaneController(pane))
@@ -31,14 +35,22 @@ final class SettingsWindowController: NSWindowController {
         window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
         window.center()
-        // Reopens where it was left, on the pane last shown.
-        window.setFrameAutosaveName("Settings")
+        // Reopens where it was left, on the pane last shown. Each profile's
+        // window keeps its own place.
+        window.setFrameAutosaveName(profile.id == Profiles.defaultID ? "Settings" : "Settings." + profile.id)
         super.init(window: window)
         if let lastPane { showPane(titled: lastPane) }
         tabs.fitWindow(animate: false)
+        showProfile(name: Profiles.all.count > 1 ? profile.name : nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// With several profiles, the title says whose settings these are.
+    func showProfile(name: String?) {
+        tabs.profileName = name
+        tabs.updateTitle()
+    }
 
     func showPane(titled title: String) {
         if let index = tabs.tabViewItems.firstIndex(where: { $0.viewController?.title == title }) {
@@ -58,13 +70,24 @@ final class SettingsWindowController: NSWindowController {
 @MainActor
 final class SettingsTabViewController: NSTabViewController {
     static let lastPaneKey = "SettingsLastPane"
+    /// The profile's name, shown after the pane's while there are several.
+    var profileName: String?
 
     override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
         super.tabView(tabView, didSelect: item)
         if let title = item?.viewController?.title {
             UserDefaults.standard.set(title, forKey: Self.lastPaneKey)
         }
+        updateTitle()
         fitWindow(animate: true)
+    }
+
+    /// The pane's title, then the profile's name when there are several.
+    /// The window follows this controller's title, which AppKit sets to the
+    /// pane's on each switch.
+    func updateTitle() {
+        guard let pane = tabView.selectedTabViewItem?.label else { return }
+        title = profileName.map { "\(pane) – \($0)" } ?? pane
     }
 
     /// The window's content takes the selected pane's size. Animates only
@@ -204,7 +227,11 @@ class SettingsPane: NSViewController {
     /// sit centered in it.
     static let paneWidth: CGFloat = tableWidth + 2 * Theme.Padding.sheet
 
-    init(title: String) {
+    let profile: ProfileContext
+    var settings: ProfileSettings { profile.settings }
+
+    init(title: String, profile: ProfileContext) {
+        self.profile = profile
         super.init(nibName: nil, bundle: nil)
         self.title = title
     }
@@ -387,7 +414,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     private let defaultBrowserButton = NSButton(title: "Make Default", target: nil, action: nil)
     private let defaultBrowserStatus = NSTextField(labelWithString: "")
 
-    init() { super.init(title: "General") }
+    init(profile: ProfileContext) { super.init(title: "General", profile: profile) }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -405,28 +432,28 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
             )
         }
 
-        homepageField.stringValue = Settings.homepage
+        homepageField.stringValue = settings.homepage
         homepageField.placeholderString = Settings.defaultHomepage
         homepageField.delegate = self
         addRow("Homepage:", Self.fixWidth(homepageField))
         addNote(Self.note("Opens at launch and in new tabs, as chosen below."))
 
         let launchPopUp = Self.popUp(
-            LaunchTabs.allCases, title: \.displayName, selected: Settings.launchTabs,
+            LaunchTabs.allCases, title: \.displayName, selected: settings.launchTabs,
             target: self, action: #selector(launchTabsChanged(_:))
         )
         self.launchPopUp = launchPopUp
         addRow("At launch, open:", launchPopUp)
 
         let newTabPopUp = Self.popUp(
-            NewTabPage.allCases, title: \.displayName, selected: Settings.newTabPage,
+            NewTabPage.allCases, title: \.displayName, selected: settings.newTabPage,
             target: self, action: #selector(newTabPageChanged(_:))
         )
         self.newTabPopUp = newTabPopUp
         addRow("New tabs open with:", newTabPopUp)
 
         let tabLayoutPopUp = Self.popUp(
-            TabLayout.allCases, title: \.displayName, selected: Settings.tabLayout,
+            TabLayout.allCases, title: \.displayName, selected: settings.tabLayout,
             target: self, action: #selector(tabLayoutChanged(_:))
         )
         self.tabLayoutPopUp = tabLayoutPopUp
@@ -448,7 +475,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
         addNote(Self.note("Selections, chat bubbles and busy dots. Pages follow the appearance."))
 
         let searchPopUp = Self.popUp(
-            SearchEngine.allCases, title: \.displayName, selected: Settings.searchEngine,
+            SearchEngine.allCases, title: \.displayName, selected: settings.searchEngine,
             target: self, action: #selector(searchEngineChanged(_:))
         )
         self.searchPopUp = searchPopUp
@@ -460,7 +487,7 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
             popUp.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.popUpWidth).isActive = true
         }
 
-        templateField.stringValue = Settings.searchTemplate
+        templateField.stringValue = settings.searchTemplate
         templateField.placeholderString = "https://example.com/search?q=%s"
         templateField.delegate = self
         addRow("Custom search URL:", Self.fixWidth(templateField))
@@ -485,23 +512,23 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
     override func viewWillAppear() {
         super.viewWillAppear()
         showDefaultBrowserState()
-        homepageField.stringValue = Settings.homepage
-        templateField.stringValue = Settings.searchTemplate
-        launchPopUp?.selectItem(at: LaunchTabs.allCases.firstIndex(of: Settings.launchTabs) ?? 0)
-        newTabPopUp?.selectItem(at: NewTabPage.allCases.firstIndex(of: Settings.newTabPage) ?? 0)
-        tabLayoutPopUp?.selectItem(at: TabLayout.allCases.firstIndex(of: Settings.tabLayout) ?? 0)
+        homepageField.stringValue = settings.homepage
+        templateField.stringValue = settings.searchTemplate
+        launchPopUp?.selectItem(at: LaunchTabs.allCases.firstIndex(of: settings.launchTabs) ?? 0)
+        newTabPopUp?.selectItem(at: NewTabPage.allCases.firstIndex(of: settings.newTabPage) ?? 0)
+        tabLayoutPopUp?.selectItem(at: TabLayout.allCases.firstIndex(of: settings.tabLayout) ?? 0)
         appearancePopUp?.selectItem(at: Appearance.allCases.firstIndex(of: Settings.appearance) ?? 0)
         accentPopUp?.selectItem(at: AccentTheme.allCases.firstIndex(of: Settings.accentTheme) ?? 0)
-        searchPopUp?.selectItem(at: SearchEngine.allCases.firstIndex(of: Settings.searchEngine) ?? 0)
+        searchPopUp?.selectItem(at: SearchEngine.allCases.firstIndex(of: settings.searchEngine) ?? 0)
         showTemplateState()
     }
 
     func controlTextDidChange(_ notification: Notification) {
         guard let field = notification.object as? NSTextField else { return }
         if field === homepageField {
-            Settings.homepage = field.stringValue
+            settings.homepage = field.stringValue
         } else if field === templateField {
-            Settings.searchTemplate = field.stringValue
+            settings.searchTemplate = field.stringValue
             showTemplateState()
         }
     }
@@ -526,17 +553,17 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
 
     @objc private func launchTabsChanged(_ sender: NSPopUpButton) {
         guard let tabs = (sender.selectedItem?.representedObject as? String).flatMap(LaunchTabs.init) else { return }
-        Settings.launchTabs = tabs
+        settings.launchTabs = tabs
     }
 
     @objc private func newTabPageChanged(_ sender: NSPopUpButton) {
         guard let page = (sender.selectedItem?.representedObject as? String).flatMap(NewTabPage.init) else { return }
-        Settings.newTabPage = page
+        settings.newTabPage = page
     }
 
     @objc private func tabLayoutChanged(_ sender: NSPopUpButton) {
         guard let layout = (sender.selectedItem?.representedObject as? String).flatMap(TabLayout.init) else { return }
-        Settings.tabLayout = layout
+        settings.tabLayout = layout
     }
 
     @objc private func appearanceChanged(_ sender: NSPopUpButton) {
@@ -573,15 +600,15 @@ final class GeneralSettingsPane: SettingsPane, NSTextFieldDelegate {
 
     @objc private func searchEngineChanged(_ sender: NSPopUpButton) {
         guard let engine = (sender.selectedItem?.representedObject as? String).flatMap(SearchEngine.init) else { return }
-        Settings.searchEngine = engine
+        settings.searchEngine = engine
         showTemplateState()
         if engine == .custom { view.window?.makeFirstResponder(templateField) }
     }
 
     private func showTemplateState() {
-        let custom = Settings.searchEngine == .custom
+        let custom = settings.searchEngine == .custom
         templateField.isEnabled = custom
-        if custom && !Settings.isValidSearchTemplate(Settings.searchTemplate) {
+        if custom && !Settings.isValidSearchTemplate(settings.searchTemplate) {
             Self.show("Needs an http(s) URL with %s. Google is used until then.", in: templateNote, warning: true)
         } else {
             Self.show("Put %s where the search terms go.", in: templateNote)
@@ -602,11 +629,13 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
     private let removeAllButton = NSButton(title: "Remove All…", target: nil, action: nil)
     private let note = SettingsPane.wrappingNote(width: SettingsPane.tableWidth)
     private var placeholder: NSTextField?
-    private var entries: [PasswordStore.Entry] { PasswordStore.shared.entries }
+    private var entries: [PasswordStore.Entry] { profile.passwords.entries }
     /// The entries the search matches, which the table shows.
     private var filtered: [PasswordStore.Entry] = []
+    private let profile: ProfileContext
 
-    init() {
+    init(profile: ProfileContext) {
+        self.profile = profile
         super.init(nibName: nil, bundle: nil)
         title = "Passwords"
     }
@@ -668,7 +697,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         self.view = view
         view.layoutSubtreeIfNeeded()
         preferredContentSize = view.fittingSize
-        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .passwordsDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .passwordsDidChange, object: profile.passwords)
         reload(nil)
     }
 
@@ -756,7 +785,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         guard table.selectedRowIndexes.count == 1, let entry = selectedEntries.first else { return }
         Task {
             do {
-                let password = try await PasswordStore.shared.password(for: entry)
+                let password = try await self.profile.passwords.password(for: entry)
                 // Marked concealed and transient, so clipboard managers leave
                 // it out of their history, and kept off Universal Clipboard.
                 let pasteboard = NSPasteboard.general
@@ -789,7 +818,7 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
             MainActor.assumeIsolated {
                 guard let self else { return }
                 do {
-                    try PasswordStore.shared.remove(Set(picked.map(\.id)))
+                    try self.profile.passwords.remove(Set(picked.map(\.id)))
                     self.table.deselectAll(nil)
                     self.updateControls()
                 } catch {
@@ -810,10 +839,10 @@ final class PasswordsSettingsPane: NSViewController, NSTableViewDataSource, NSTa
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
             MainActor.assumeIsolated {
+                guard let self else { return }
                 do {
-                    try PasswordStore.shared.removeAll()
+                    try self.profile.passwords.removeAll()
                 } catch {
-                    guard let self else { return }
                     SettingsPane.show(error.localizedDescription, in: self.note, warning: true)
                 }
             }
@@ -837,8 +866,10 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
     private let note = SettingsPane.wrappingNote(width: SettingsPane.tableWidth)
     private var placeholder: NSTextField?
     private var store: ExtensionStore { .shared }
+    private let profile: ProfileContext
 
-    init() {
+    init(profile: ProfileContext) {
+        self.profile = profile
         super.init(nibName: nil, bundle: nil)
         title = Self.paneTitle
     }
@@ -1060,7 +1091,7 @@ final class ExtensionsSettingsPane: NSViewController, NSTableViewDataSource, NST
 
     @objc private func openOptions(_ sender: Any?) {
         guard let url = selectedManifest?.optionsURL else { return }
-        (NSApp.delegate as? AppDelegate)?.openInNewTab(url)
+        (NSApp.delegate as? AppDelegate)?.openInNewTab(url, profile: profile)
     }
 
     /// Asks first: an extension Tiller copied or unpacked is deleted with it.
@@ -1098,13 +1129,13 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     private var modelKindPopUp: NSPopUpButton?
     private lazy var modelButton = NSButton(title: "", target: self, action: #selector(chooseModel(_:)))
     private var modelKind: AgentChoice {
-        (modelKindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentChoice.init) ?? .current
+        (modelKindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentChoice.init) ?? profile.providers.current
     }
     /// What the lookup found, for kinds whose lookup has finished. Nil values mean not found.
     private var detected: [AgentKind: String?] = [:]
     /// The CLI whose path is being edited.
     private var pathKind: AgentKind {
-        (pathKindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentKind.init) ?? .current
+        (pathKindPopUp?.selectedItem?.representedObject as? String).flatMap(AgentKind.init) ?? profile.providers.current.kind
     }
     private var instructionsView: NSTextView?
     private let folderField = NSTextField()
@@ -1118,17 +1149,17 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     /// Paths need more room than General's controls.
     private static let wideControlWidth: CGFloat = 460
 
-    init() { super.init(title: "Agent") }
+    init(profile: ProfileContext) { super.init(title: "Agent", profile: profile) }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func buildRows() {
         let popUp = Self.popUp(
-            AgentChoice.all, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
+            profile.providers.all, title: profile.providers.displayName, image: { $0.logo(size: 16) }, selected: profile.providers.current,
             target: self, action: #selector(agentChanged(_:))
         )
         agentPopUp = popUp
-        AgentMenuAvailability.watch(popUp)
+        AgentMenuAvailability.watch(popUp, providers: profile.providers)
         addRow("New chats use:", popUp)
         addNote(Self.note("A running chat keeps its agent."))
         NotificationCenter.default.addObserver(
@@ -1140,7 +1171,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
             tabsPopUp.addItem(withTitle: "\(count)")
             tabsPopUp.lastItem?.tag = count
         }
-        tabsPopUp.selectItem(withTag: Settings.agentTabs)
+        tabsPopUp.selectItem(withTag: settings.agentTabs)
         tabsPopUp.target = self
         tabsPopUp.action = #selector(tabsChanged(_:))
         addRow("Chat tabs:", tabsPopUp)
@@ -1157,7 +1188,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
         // One row serves every CLI: the popup picks whose path the field shows.
         let kindPopUp = Self.popUp(
-            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
+            AgentKind.allCases, title: \.displayName, image: { $0.logo(size: 16) }, selected: profile.providers.current.kind,
             target: self, action: #selector(pathKindChanged(_:))
         )
         pathKindPopUp = kindPopUp
@@ -1172,11 +1203,11 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
         // Like the command row, the popup picks whose options the button shows.
         let modelKindPopUp = Self.popUp(
-            AgentChoice.all, title: \.displayName, image: { $0.logo(size: 16) }, selected: .current,
+            profile.providers.all, title: profile.providers.displayName, image: { $0.logo(size: 16) }, selected: profile.providers.current,
             target: self, action: #selector(modelKindChanged(_:))
         )
         self.modelKindPopUp = modelKindPopUp
-        AgentMenuAvailability.watch(modelKindPopUp)
+        AgentMenuAvailability.watch(modelKindPopUp, providers: profile.providers)
         modelButton.bezelStyle = .push
         modelButton.lineBreakMode = .byTruncatingTail
         modelButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1198,7 +1229,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         let checkboxes = AgentTool.allCases.enumerated().map { index, tool in
             let checkbox = NSButton(checkboxWithTitle: tool.displayName, target: self, action: #selector(toolChanged(_:)))
             checkbox.tag = index
-            checkbox.state = Settings.agentToolEnabled(tool) ? .on : .off
+            checkbox.state = settings.agentToolEnabled(tool) ? .on : .off
             return checkbox
         }
         let tools = NSStackView(views: checkboxes)
@@ -1216,7 +1247,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         toolsNote.preferredMaxLayoutWidth = Self.wideControlWidth
         addNote(toolsNote)
 
-        folderField.stringValue = Settings.agentFolder
+        folderField.stringValue = settings.agentFolder
         folderField.placeholderString = "An empty folder"
         folderField.delegate = self
         let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseFolder(_:)))
@@ -1241,7 +1272,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         box.heightAnchor.constraint(equalToConstant: 96).isActive = true
         let textView = scroll.documentView as! NSTextView
         textView.drawsBackground = false
-        textView.string = Settings.agentInstructions
+        textView.string = settings.agentInstructions
         textView.font = .systemFont(ofSize: 13)
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -1276,7 +1307,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     /// Shows the picked CLI's path in the field.
     private func loadPathField() {
-        pathField.stringValue = Settings.defaults.string(forKey: pathKind.pathDefaultsKey) ?? ""
+        pathField.stringValue = settings.defaults.string(forKey: pathKind.pathDefaultsKey) ?? ""
         showPathState()
     }
 
@@ -1292,7 +1323,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         case .some(let path?): path
         case .some(nil): "\(kind.rawValue) not found"
         }
-        if let path = Settings.agentPath(for: kind) {
+        if let path = settings.agentPath(for: kind) {
             if FileManager.default.isExecutableFile(atPath: path) {
                 Self.show("Tiller runs this file for \(kind.displayName).", in: pathNote)
             } else {
@@ -1306,7 +1337,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
     }
 
     private func showFolderState() {
-        guard let folder = Settings.agentFolderPath else {
+        guard let folder = settings.agentFolderPath else {
             Self.show("Leave empty so no project's files or instructions load.", in: folderNote)
             return
         }
@@ -1320,13 +1351,13 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     private func showModelOptions() {
         let kind = modelKind
-        let options = kind.defaultModelOptions
-        modelButton.title = options.isDefault ? "\(kind.displayName)'s own" : options.summary(for: kind)
+        let options = settings.agentModelOptions(for: kind)
+        modelButton.title = options.isDefault ? "\(profile.providers.displayName(kind))'s own" : options.summary(for: kind)
     }
 
     @objc private func modelKindChanged(_ sender: NSPopUpButton) {
         showModelOptions()
-        if modelKind.provider == nil { AgentModelCatalog.refresh(modelKind.kind) }
+        if modelKind.provider == nil { AgentModelCatalog.refresh(modelKind.kind, profile: profile) }
     }
 
     /// Providers added, renamed or removed in their pane show here too.
@@ -1334,8 +1365,8 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         for popUp in [agentPopUp, modelKindPopUp].compactMap({ $0 }) {
             let selected = (popUp.selectedItem?.representedObject as? String).flatMap(AgentChoice.init)
             Self.fill(
-                popUp, AgentChoice.all, title: \.displayName, image: { $0.logo(size: 16) },
-                selected: selected.flatMap { $0.exists ? $0 : nil } ?? .current
+                popUp, profile.providers.all, title: profile.providers.displayName, image: { $0.logo(size: 16) },
+                selected: selected.flatMap { profile.providers.exists($0) ? $0 : nil } ?? profile.providers.current
             )
         }
         showModelOptions()
@@ -1347,15 +1378,17 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     @objc private func chooseModel(_ sender: NSButton) {
         let kind = modelKind
-        AgentModelMenu.popUp(below: sender, kind: kind, options: kind.defaultModelOptions) { [weak self] options in
-            Settings.setAgentModelOptions(options, for: kind)
+        AgentModelMenu.popUp(
+            below: sender, kind: kind, profile: profile, options: settings.agentModelOptions(for: kind)
+        ) { [weak self] options in
+            self?.settings.setAgentModelOptions(options, for: kind)
             self?.showModelOptions()
         }
     }
 
     @objc private func toolChanged(_ sender: NSButton) {
         guard AgentTool.allCases.indices.contains(sender.tag) else { return }
-        Settings.setAgentTool(AgentTool.allCases[sender.tag], enabled: sender.state == .on)
+        settings.setAgentTool(AgentTool.allCases[sender.tag], enabled: sender.state == .on)
     }
 
     @objc private func chooseFolder(_ sender: NSButton) {
@@ -1365,13 +1398,13 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.message = "Choose the folder the agent works in"
-        if let current = Settings.agentFolderPath { panel.directoryURL = URL(fileURLWithPath: current) }
+        if let current = settings.agentFolderPath { panel.directoryURL = URL(fileURLWithPath: current) }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.folderField.stringValue = url.path
-                Settings.agentFolder = url.path
+                self.settings.agentFolder = url.path
                 self.showFolderState()
             }
         }
@@ -1379,27 +1412,27 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     func controlTextDidChange(_ notification: Notification) {
         if notification.object as? NSTextField === folderField {
-            Settings.agentFolder = folderField.stringValue
+            settings.agentFolder = folderField.stringValue
             showFolderState()
             return
         }
         guard notification.object as? NSTextField === pathField else { return }
-        Settings.setAgentPath(pathField.stringValue, for: pathKind)
+        settings.setAgentPath(pathField.stringValue, for: pathKind)
         showPathState()
     }
 
     func textDidChange(_ notification: Notification) {
         guard let textView = instructionsView else { return }
-        Settings.agentInstructions = textView.string
+        settings.agentInstructions = textView.string
     }
 
     @objc private func agentChanged(_ sender: NSPopUpButton) {
         guard let kind = (sender.selectedItem?.representedObject as? String).flatMap(AgentChoice.init) else { return }
-        AgentChoice.current = kind
+        profile.providers.current = kind
     }
 
     @objc private func tabsChanged(_ sender: NSPopUpButton) {
-        Settings.agentTabs = sender.selectedTag()
+        settings.agentTabs = sender.selectedTag()
     }
 
     private func shortcutRecorded(_ shortcut: Shortcut?) {
@@ -1435,7 +1468,7 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
 
     /// The panel's picker changed the agent.
     @objc private func currentAgentChanged(_ notification: Notification) {
-        agentPopUp?.selectItem(at: AgentChoice.all.firstIndex(of: .current) ?? 0)
+        agentPopUp?.selectItem(at: profile.providers.all.firstIndex(of: profile.providers.current) ?? 0)
     }
 
     @objc private func choosePath(_ sender: NSButton) {
@@ -1447,14 +1480,14 @@ final class AgentSettingsPane: SettingsPane, NSTextFieldDelegate, NSTextViewDele
         panel.treatsFilePackagesAsDirectories = true
         panel.showsHiddenFiles = true
         panel.message = "Choose the \(kind.displayName) executable"
-        if let current = Settings.agentPath(for: kind) ?? detected[kind] ?? nil {
+        if let current = settings.agentPath(for: kind) ?? detected[kind] ?? nil {
             panel.directoryURL = URL(fileURLWithPath: current).deletingLastPathComponent()
         }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             MainActor.assumeIsolated {
                 guard let self else { return }
-                Settings.setAgentPath(url.path, for: kind)
+                self.settings.setAgentPath(url.path, for: kind)
                 if self.pathKind == kind { self.loadPathField() }
             }
         }
@@ -1481,9 +1514,11 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
     private var isInstalling = false {
         didSet { updateControls() }
     }
-    private var store: AgentSkillStore { .shared }
+    private var store: AgentSkillStore { profile.skills }
+    private let profile: ProfileContext
 
-    init() {
+    init(profile: ProfileContext) {
+        self.profile = profile
         super.init(nibName: nil, bundle: nil)
         title = Self.paneTitle
     }
@@ -1545,7 +1580,7 @@ final class SkillsSettingsPane: NSViewController, NSTableViewDataSource, NSTable
         self.view = view
         view.layoutSubtreeIfNeeded()
         preferredContentSize = view.fittingSize
-        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .agentSkillsDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(reload(_:)), name: .agentSkillsDidChange, object: profile.skills)
         reload(nil)
         showDefaultNote()
     }
@@ -1734,8 +1769,11 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
     private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
     private let note = SettingsPane.wrappingNote(width: SettingsPane.tableWidth)
     private var profiles: [Profile] = []
+    /// The profile whose Settings these are.
+    private let current: ProfileContext
 
-    init() {
+    init(profile: ProfileContext) {
+        current = profile
         super.init(nibName: nil, bundle: nil)
         title = Self.paneTitle
     }
@@ -1817,10 +1855,10 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
         let selected = selectedProfile
         openButton.isEnabled = selected != nil
         renameButton.isEnabled = selected != nil
-        deleteButton.isEnabled = selected.map { $0.id != Profiles.current.id } ?? false
+        deleteButton.isEnabled = selected.map { ProfileContext.opened($0.id) == nil } ?? false
         SettingsPane.show(
             "Each profile keeps its own cookies, history, tabs, passwords, settings and chats, "
-                + "and opens as a separate Tiller.",
+                + "and opens in a window of its own. An open profile can't be deleted.",
             in: note
         )
     }
@@ -1833,10 +1871,10 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
         let text: String
         if column?.identifier.rawValue == "name" {
             text = profile.name
-        } else if profile.id == Profiles.current.id {
-            text = "This window"
+        } else if profile.id == current.id {
+            text = "These settings"
         } else {
-            text = Profiles.runningProcess(profile.id) != nil ? "Open" : ""
+            text = ProfileContext.opened(profile.id) != nil ? "Open" : ""
         }
         let cell = SettingsPane.textCell(tableView, text)
         if column?.identifier.rawValue == "status" { cell.textField?.textColor = .secondaryLabelColor }
@@ -1849,12 +1887,12 @@ final class ProfilesSettingsPane: NSViewController, NSTableViewDataSource, NSTab
 
     @objc private func openProfile(_ sender: Any?) {
         guard let profile = selectedProfile else { return }
-        Profiles.open(profile.id)
+        ProfileContext.open(profile.id)
     }
 
     @objc private func addProfile(_ sender: Any?) {
         ProfileNamePrompt.run("New Profile", button: "Create", on: view.window) { name in
-            Profiles.open(try Profiles.create(named: name).id)
+            ProfileContext.open(try Profiles.create(named: name).id)
         }
     }
 

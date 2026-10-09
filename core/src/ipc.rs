@@ -1,4 +1,5 @@
-//! Control socket the MCP server connects to. Each connection sends
+//! Control sockets the MCP server connects to, one per open profile, each
+//! reaching only that profile's tabs. Each connection sends
 //! newline-delimited JSON requests `{"id", "method", "params"}` and gets one
 //! reply line per request, `{"id", "result"}` or `{"id", "error"}`.
 //!
@@ -21,7 +22,7 @@ use std::{
     os::unix::{fs::PermissionsExt, net::{UnixListener, UnixStream}},
     path::{Path, PathBuf},
     sync::{
-        Mutex, OnceLock, mpsc,
+        Arc, Mutex, mpsc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -32,10 +33,13 @@ use std::{
 /// call `tiller_ipc_reply` with the same token.
 pub type Handler = unsafe extern "C" fn(ctx: *mut c_void, request: *const c_char, token: u64);
 
+/// Where one socket's requests go: the Swift handler for its profile, and
+/// the profile's request context, which bounds the tabs DevTools calls reach.
 #[derive(Clone, Copy)]
 struct SwiftHandler {
     ctx: usize,
     f: Handler,
+    context: i32,
 }
 
 /// What a waiting connection gets back.
@@ -50,8 +54,9 @@ enum Reply {
     DevTools(Vec<u8>),
 }
 
-static HANDLER: OnceLock<SwiftHandler> = OnceLock::new();
-static SOCKET_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// Each open socket's path and whether it still serves. A stopped socket's
+/// listener thread stays blocked in accept on a path that's gone.
+static SOCKETS: Mutex<Vec<(PathBuf, Arc<AtomicBool>)>> = Mutex::new(Vec::new());
 static PENDING: Mutex<Option<HashMap<u64, mpsc::Sender<Reply>>>> = Mutex::new(None);
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// Set once the message loop has ended, after which nothing may be posted to
@@ -64,36 +69,59 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 /// largest thing sent, and they are far smaller.
 const MAX_LINE: u64 = 32 * 1024 * 1024;
 
-pub fn start(path: &Path, ctx: *mut c_void, handler: Handler) -> std::io::Result<()> {
+/// Serves a profile's socket at `path`. Its requests go to `handler` with
+/// `ctx`, and its DevTools calls reach only tabs of request context `context`.
+pub fn start(path: &Path, context: i32, ctx: *mut c_void, handler: Handler) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    stop_one(path);
     // A socket left behind by a crashed run would make bind fail.
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
     // Anyone who can connect can run script in every tab, so only this user may.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    let _ = HANDLER.set(SwiftHandler { ctx: ctx as usize, f: handler });
-    let _ = SOCKET_PATH.set(path.to_path_buf());
+    let handler = SwiftHandler { ctx: ctx as usize, f: handler, context };
+    let live = Arc::new(AtomicBool::new(true));
+    SOCKETS.lock().unwrap().push((path.to_path_buf(), live.clone()));
 
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            thread::spawn(move || serve(stream));
+            if !live.load(Ordering::SeqCst) {
+                return;
+            }
+            let live = live.clone();
+            thread::spawn(move || serve(stream, handler, live));
         }
     });
     Ok(())
 }
 
-/// Stops requests reaching the UI thread and removes the socket. Called once
-/// the message loop has ended, before CEF shuts down.
+/// Stops serving the socket at `path` and removes it, for a profile closing.
+/// Requests already on their way get an error.
+pub fn stop_one(path: &Path) {
+    let mut sockets = SOCKETS.lock().unwrap();
+    sockets.retain(|(p, live)| {
+        if p != path {
+            return true;
+        }
+        live.store(false, Ordering::SeqCst);
+        let _ = std::fs::remove_file(p);
+        false
+    });
+}
+
+/// Stops requests reaching the UI thread and removes every socket. Called
+/// once the message loop has ended, before CEF shuts down.
 pub fn stop() {
     SHUTTING_DOWN.store(true, Ordering::SeqCst);
-    if let Some(path) = SOCKET_PATH.get() {
+    for (path, live) in SOCKETS.lock().unwrap().drain(..) {
+        live.store(false, Ordering::SeqCst);
         let _ = std::fs::remove_file(path);
     }
 }
 
-fn serve(stream: UnixStream) {
+fn serve(stream: UnixStream, handler: SwiftHandler, live: Arc<AtomicBool>) {
     let Ok(mut writer) = stream.try_clone() else { return };
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -109,7 +137,8 @@ fn serve(stream: UnixStream) {
             continue;
         }
         let (id, reply) = match parse(&line) {
-            Ok((id, request)) => (id, dispatch(request)),
+            Ok(_) if !live.load(Ordering::SeqCst) => (Value::Null, error_json("the profile was closed")),
+            Ok((id, request)) => (id, dispatch(request, handler)),
             Err(message) => (Value::Null, error_json(message)),
         };
         let mut out = with_id(&id, &reply);
@@ -189,7 +218,7 @@ fn parse(line: &str) -> Result<(Value, Request), String> {
 }
 
 /// Posts the request to the UI thread and waits for its reply.
-fn dispatch(request: Request) -> String {
+fn dispatch(request: Request, handler: SwiftHandler) -> String {
     if SHUTTING_DOWN.load(Ordering::SeqCst) {
         return error_json("browser is shutting down");
     }
@@ -197,7 +226,7 @@ fn dispatch(request: Request) -> String {
     let (tx, rx) = mpsc::channel();
     PENDING.lock().unwrap().get_or_insert_default().insert(token, tx);
 
-    let mut task = RequestTask::new(request, token);
+    let mut task = RequestTask::new(request, handler, token);
     if post_task(ThreadId::UI, Some(&mut task)) == 0 {
         take(token);
         return error_json("browser is shutting down");
@@ -286,6 +315,7 @@ pub fn reply_error(token: u64, message: impl Into<String>) {
 wrap_task! {
     struct RequestTask {
         request: Request,
+        handler: SwiftHandler,
         token: u64,
     }
 
@@ -293,12 +323,10 @@ wrap_task! {
         fn execute(&self) {
             match &self.request {
                 Request::Cdp { tab, message_id, message } => {
-                    browser::devtools_send(*tab, *message_id, message, self.token);
+                    browser::devtools_send(self.handler.context, *tab, *message_id, message, self.token);
                 }
                 Request::Swift(request) => {
-                    let Some(handler) = HANDLER.get() else {
-                        return reply_error(self.token, "no handler");
-                    };
+                    let handler = self.handler;
                     unsafe { (handler.f)(handler.ctx as *mut c_void, request.as_ptr(), self.token) };
                 }
             }

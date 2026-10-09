@@ -1,13 +1,45 @@
 import AppKit
 import CTillerCore
 
+/// What this launch opens.
+@MainActor
+enum Launch {
+    /// The profiles to open: the one `-profile` names by id or name, else
+    /// the ones open when Tiller last quit, else the one used last. Never
+    /// empty.
+    static let profiles: [String] = {
+        if let wanted = UserDefaults.standard.string(forKey: "profile"), let profile = Profiles.find(wanted) {
+            return [profile.id]
+        }
+        let open = Profiles.lastOpen.map(\.id)
+        return open.isEmpty ? [Profiles.lastUsed.id] : open
+    }()
+
+    /// The profile links given at launch open in: the one `-profile` names,
+    /// else the one used last.
+    static var linkProfile: String {
+        if let wanted = UserDefaults.standard.string(forKey: "profile"), let profile = Profiles.find(wanted) {
+            return profile.id
+        }
+        return Profiles.lastUsed.id
+    }
+
+    /// `-url`, then `-openURLs`, one per line, which carries links a launch
+    /// passed on.
+    nonisolated static var urls: [String] {
+        var urls = (UserDefaults.standard.string(forKey: "openURLs") ?? "").split(separator: "\n").map(String.init)
+        if let url = UserDefaults.standard.string(forKey: "url") { urls.insert(url, at: 0) }
+        return urls
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var windowController: BrowserWindowController?
-    private let controlServer = ControlServer()
-    private var settingsController: SettingsWindowController?
-    /// Links that arrived before the window, which opens them.
+    /// One Settings window per profile, by profile id.
+    private var settingsControllers: [String: SettingsWindowController] = [:]
+    /// Links that arrived before launch finished.
     private var pendingURLs: [URL] = []
+    private var launched = false
 
     /// A change of appearance redraws everything on its own; a change of
     /// accent needs a nudge.
@@ -16,19 +48,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Theme.redrawAll()
     }
 
+    /// The Settings of the profile whose window is in front.
     @objc func showSettings(_ sender: Any?) {
-        let controller = settingsController ?? SettingsWindowController()
-        settingsController = controller
-        controller.showWindow(sender)
+        guard let profile = ProfileContext.active else { return }
+        settingsController(for: profile).showWindow(sender)
     }
 
-    #if DEBUG
-    /// Opens Settings on the pane titled `pane`, for `ui.settings` on the control socket.
-    func showSettings(pane: String) {
-        showSettings(nil)
-        settingsController?.showPane(titled: pane)
+    private func settingsController(for profile: ProfileContext) -> SettingsWindowController {
+        if let controller = settingsControllers[profile.id] { return controller }
+        let controller = SettingsWindowController(profile: profile)
+        settingsControllers[profile.id] = controller
+        return controller
     }
-    #endif
+
+    /// Opens Settings on the pane titled `pane`, for `ui.settings` on the
+    /// control socket and the agent's errors.
+    func showSettings(pane: String, profile: ProfileContext? = nil) {
+        guard let profile = profile ?? ProfileContext.active else { return }
+        let controller = settingsController(for: profile)
+        controller.showWindow(nil)
+        controller.showPane(titled: pane)
+    }
 
     /// The manual, in a new tab.
     @objc func openHelp(_ sender: Any?) {
@@ -46,35 +86,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A profile in the Profiles menu. Its id is the item's represented object.
     @objc func openProfile(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Profiles.open(id)
+        ProfileContext.open(id)
     }
 
     @objc func newProfile(_ sender: Any?) {
         ProfileNamePrompt.run("New Profile", button: "Create", on: nil) { name in
-            Profiles.open(try Profiles.create(named: name).id)
+            ProfileContext.open(try Profiles.create(named: name).id)
         }
     }
 
     @objc func manageProfiles(_ sender: Any?) {
-        showSettings(sender)
-        settingsController?.showPane(titled: ProfilesSettingsPane.paneTitle)
+        showSettings(pane: ProfilesSettingsPane.paneTitle)
     }
 
     /// The Agent pane, from an error about the agent's command.
-    func showAgentSettings() {
-        showSettings(nil)
-        settingsController?.showPane(titled: "Agent")
+    func showAgentSettings(profile: ProfileContext? = nil) {
+        showSettings(pane: "Agent", profile: profile)
     }
 
     @objc func manageExtensions(_ sender: Any?) {
-        showSettings(sender)
-        settingsController?.showPane(titled: ExtensionsSettingsPane.paneTitle)
+        showSettings(pane: ExtensionsSettingsPane.paneTitle)
     }
 
-    /// Opens `url` in a new tab of the browser window, for Settings and links
-    /// in the agent panel.
-    func openInNewTab(_ url: String, background: Bool = false) {
-        windowController?.openInNewTab(url, background: background)
+    /// Opens `url` in a new tab of `profile`'s window, or of the window in
+    /// front, for Settings and links in the agent panel.
+    func openInNewTab(_ url: String, background: Bool = false, profile: ProfileContext? = nil) {
+        (profile ?? ProfileContext.active)?.window?.openInNewTab(url, background: background)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -84,44 +121,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = MainMenu.build()
         // Before the first window, so it never shows in the wrong appearance.
         Theme.applyAppearance()
-        NotificationCenter.default.addObserver(self, selector: #selector(themeChanged(_:)), name: .themeDidChange, object: nil)
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(themeChanged(_:)), name: .themeDidChange, object: nil)
+        center.addObserver(self, selector: #selector(profilesChanged(_:)), name: .profilesDidChange, object: nil)
+        center.addObserver(self, selector: #selector(profileOpened(_:)), name: .profileDidOpen, object: nil)
 
         tiller_core_set_quit_handler {
             MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.quitRequested() }
         }
 
-        // Last time's tabs, unless they were all blank. `-url` and links from
-        // other apps open after them.
-        let session = SessionStore.shared
-        let restore = Settings.launchTabs == .restore && session.openTabs.contains { !$0.isBlank }
-        let restored = restore ? session.openTabs : []
-        // `-openURLs`, one per line, carries links another profile's Tiller passed on.
-        var urls = (UserDefaults.standard.string(forKey: "openURLs") ?? "").split(separator: "\n").map(String.init)
-        urls += pendingURLs.map(\.absoluteString)
+        // Links from other apps and `-url` open in the profile used last,
+        // or the one `-profile` names.
+        let linkProfile = Launch.linkProfile
+        let urls = Launch.urls + pendingURLs.map(\.absoluteString)
         pendingURLs = []
-        if let url = UserDefaults.standard.string(forKey: "url") { urls.insert(url, at: 0) }
-        if urls.isEmpty && restored.isEmpty { urls = [Settings.homepageURL] }
-        let controller = BrowserWindowController(restoring: restored, selected: session.selectedIndex, opening: urls.first)
-        for url in urls.dropFirst() { controller.openInNewTab(url) }
-        controller.onClose = { [weak self] in self?.windowController = nil }
-        controller.showWindow(nil)
-        windowController = controller
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(profilesChanged(_:)), name: .profilesDidChange, object: nil
-        )
-        showProfile()
-        DownloadStore.shared.start()
-        controlServer.browser = controller
-        if !controlServer.start() {
-            NSLog("Tiller: control socket unavailable, agent tools will not work")
+        launched = true
+        var profiles = Launch.profiles
+        if !urls.isEmpty && !profiles.contains(linkProfile) { profiles.append(linkProfile) }
+        for id in profiles {
+            ProfileContext.open(id, urls: id == linkProfile ? urls : [])
         }
-        AgentScheduler.shared.start(browser: controller)
+        DownloadStore.shared.start()
         Updater.shared.start()
-        NSApp.activate()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak controller] in
-            MainActor.assumeIsolated { DefaultBrowser.askOnce(on: controller?.window) }
+    }
+
+    /// The first window to open asks about the default browser, and in debug
+    /// builds runs the launch arguments that need one.
+    @objc private func profileOpened(_ notification: Notification) {
+        guard let profile = notification.object as? ProfileContext else { return }
+        guard !askedOnce else { return }
+        askedOnce = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak profile] in
+            MainActor.assumeIsolated { DefaultBrowser.askOnce(on: profile?.window?.window) }
         }
         #if DEBUG
+        runDebugArguments(profile)
+        #endif
+    }
+
+    private var askedOnce = false
+
+    #if DEBUG
+    private func runDebugArguments(_ target: ProfileContext) {
+        let controller = target.window
         if let prompt = UserDefaults.standard.string(forKey: "agentPrompt") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak controller] in
                 MainActor.assumeIsolated { controller?.sendAgentPrompt(prompt) }
@@ -151,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 do {
                     let (profiles, lastUsed) = try ChromeReader.profiles()
                     guard let profile = profiles.first(where: { $0.directory == lastUsed }) ?? profiles.first else { return }
-                    for result in await ChromeImporter.run(profile: profile, kinds: kinds) {
+                    for result in await ChromeImporter.run(profile: profile, into: target, kinds: kinds) {
                         NSLog("Tiller import: %@: %@", result.title, result.error?.localizedDescription ?? result.detail)
                     }
                 } catch {
@@ -159,54 +201,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        #endif
     }
+    #endif
 
     /// Web links and HTML files from other apps, with Tiller as the default
-    /// browser or chosen in Open With. Links that start Tiller open in it: a
-    /// plain launch picks the profile used last already, and a profile started
-    /// to open links must not pass them back.
+    /// browser or chosen in Open With. They open in the profile used last.
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard windowController != nil else {
+        guard launched else {
             pendingURLs += urls
             return
         }
-        IncomingLinks.route(urls) { [weak self] urls in
-            guard let windowController = self?.windowController else { return }
-            for url in urls { windowController.openInNewTab(url.absoluteString) }
-            NSApp.activate()
+        IncomingLinks.route(urls)
+    }
+
+    /// Clicking the Dock icon with no window showing brings back the window
+    /// of the profile used last.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !flag else { return true }
+        (ProfileContext.opened(Profiles.lastUsed.id) ?? ProfileContext.all.first)?.show()
+        return false
+    }
+
+    /// Profiles were added, renamed, removed, opened or closed. With more
+    /// than one, each window names its profile in the toolbar and title.
+    @objc private func profilesChanged(_ notification: Notification) {
+        let several = Profiles.all.count > 1
+        for profile in ProfileContext.all {
+            profile.window?.showProfile(name: several ? profile.name : nil)
+            settingsControllers[profile.id]?.showProfile(name: several ? profile.name : nil)
+        }
+        settingsControllers = settingsControllers.filter { id, controller in
+            if ProfileContext.opened(id) != nil { return true }
+            controller.close()
+            return false
         }
     }
 
-    func applicationWillBecomeActive(_ notification: Notification) {
-        IncomingLinks.willBecomeActive()
-    }
-
-    /// Another Tiller may have added, renamed or removed profiles meanwhile.
-    func applicationDidBecomeActive(_ notification: Notification) {
-        Profiles.markUsed()
-        NotificationCenter.default.post(name: .profilesDidChange, object: nil)
-    }
-
-    @objc private func profilesChanged(_ notification: Notification) {
-        showProfile()
-    }
-
-    /// With more than one profile, each Tiller names its own in the Dock badge
-    /// and the toolbar, since every one has the same icon.
-    private func showProfile() {
-        let name = Profiles.all.count > 1 ? Profiles.currentName : nil
-        NSApp.dockTile.badgeLabel = name
-        windowController?.showProfile(name: name)
-    }
-
-    /// Cmd+Q, the Dock or logging out. Closes every tab, which closes the
-    /// window, and the core quits when the last browser is gone. The core
-    /// closes only tabs that have a browser, so this can't be left to it:
-    /// a restored tab that hasn't loaded yet would be selected, start, and
-    /// keep Tiller running.
+    /// Cmd+Q, the Dock or logging out. Closes every tab of every profile,
+    /// which closes their windows, and the core quits when the last browser
+    /// is gone. The core closes only tabs that have a browser, so this can't
+    /// be left to it: a restored tab that hasn't loaded yet would be
+    /// selected, start, and keep Tiller running. The profiles open now open
+    /// again at the next launch.
     fileprivate func quitRequested() {
-        windowController?.closeAllTabs()
+        ProfileContext.isQuitting = true
+        Profiles.setOpen(ProfileContext.all.map(\.id))
+        let windows = ProfileContext.all.compactMap(\.window)
+        if windows.isEmpty { return tiller_core_quit() }
+        windows.forEach { $0.closeAllTabs() }
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {

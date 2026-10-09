@@ -110,12 +110,12 @@ Some sites tie a session to the browser it started in, so they may still ask you
 
 ## Extensions
 
-Tiller runs Chrome extensions (Manifest V3) as unpacked extensions, the way Chrome's Load unpacked does. Chromium loads them at launch, so adding, removing or turning one on or off takes effect the next time Tiller opens.
+Tiller runs Chrome extensions (Manifest V3) as unpacked extensions, the way Chrome's Load unpacked does. Chromium loads them at launch, into every profile, so adding, removing or turning one on or off takes effect the next time Tiller opens, and for every profile.
 
-Settings > Extensions lists the profile's extensions, with each one's status:
+Settings > Extensions lists the extensions, with each one's status:
 
 - **Add Folder…** adds a folder with `manifest.json` in it. It is loaded from where it is, so edits to it apply at the next launch, and its id is the one Chrome's Load unpacked gives the same folder.
-- **Add CRX File…** unpacks a Chrome extension package into the profile. Its key goes into the manifest, so it keeps its Web Store id and adding a newer package updates it.
+- **Add CRX File…** unpacks a Chrome extension package into Tiller's data folder. Its key goes into the manifest, so it keeps its Web Store id and adding a newer package updates it.
 - Tiller > Import from Chrome… brings over Chrome's (see [Import from Chrome](#import-from-chrome)).
 - **On** turns an extension on or off, **Pinned** keeps its button in the toolbar, **Options** opens its options page in a new tab, and **Remove** takes it out. Removing a folder leaves the folder alone; removing a package deletes Tiller's copy.
 - Status is Running, Off, Starts or Stops at next launch, or an error: a manifest Tiller can't read, or one Chromium refused at launch, whose reason shows when you hover over it.
@@ -150,13 +150,14 @@ The chrome follows the system's accessibility settings. VoiceOver reads tabs, th
 
 ## Profiles
 
-A profile has its own cookies and site data, history, open tabs, saved passwords, settings and agent chats. Each open profile runs as a separate Tiller, with its own Dock icon.
+A profile has its own cookies and site data, history, open tabs, saved passwords, settings and agent chats. One Tiller runs every open profile, each in a window of its own, under one Dock icon.
 
-- Each profile has its own extensions.
-- The Profiles menu lists them, with a check on the current one. Choosing another brings its Tiller forward, or starts one. New Profile… asks for a name and opens it.
-- Settings > Profiles lists them too, with buttons to open, add, rename and delete. The current profile and profiles that are open can't be deleted. Deleting moves the profile's folder to the Trash and removes its settings and password key.
-- With more than one profile, each Tiller shows its profile's name at the right of the toolbar, where clicking it opens the Profiles menu, in the Dock badge and in the window title.
-- Opening Tiller from the Dock or Finder opens the profile used last, meaning the one whose Tiller was last active. `open Tiller.app --args -profile <name or id>` opens a given one.
-- A profile can only be open once. Launching it again brings the running Tiller forward.
-- Links and HTML files from other apps open in the profile used last too. When macOS hands them to another profile's Tiller, it passes them on over the profile's control socket, or starts the profile with them.
+- Extensions, the appearance, the accent color and the agent panel's shortcut are shared by every profile.
+- The Profiles menu lists them, with a check on the front window's profile and a dash on the other open ones. Choosing one brings its window forward, or opens it. New Profile… asks for a name and opens it.
+- Settings > Profiles lists them too, with buttons to open, add, rename and delete. An open profile can't be deleted. Deleting moves the profile's folders to the Trash and removes its settings and password key.
+- Settings (Cmd+,) shows the front window's profile. With more than one profile, each window shows its profile's name at the right of the toolbar, where clicking it opens the Profiles menu, and in the window title, which the Dock's and the Window menu's window lists show.
+- Tiller opens the profiles that were open when it last quit. Closing a profile's window closes the profile; closing the last one quits Tiller, and that profile opens at the next launch. Cmd+Q closes them all, and they all open again.
+- The profile used last is the one whose window was in front last. Clicking the Dock icon with no window showing brings its window back. `open Tiller.app --args -profile <name or id>` opens only that profile; with Tiller running, launching the app with `-profile` opens that profile in the running Tiller.
+- A profile can only be open once. An older Tiller, which ran a process per profile, can't open a profile this one has open, nor the other way round.
+- Links and HTML files from other apps open in the profile used last, which opens if it was closed.
 - Names must differ, since [`tiller --profile`](tools.md#command-line-tool) picks a profile by name.

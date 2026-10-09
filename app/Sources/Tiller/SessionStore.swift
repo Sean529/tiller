@@ -1,12 +1,10 @@
 import Foundation
 
-/// The open tabs and the recently closed ones, kept in `session.json` in the
-/// data folder so the next launch can bring them back and Cmd+Shift+T works
+/// A profile's open tabs and recently closed ones, kept in `session.json` in
+/// its folder so the next launch can bring them back and Cmd+Shift+T works
 /// across restarts.
 @MainActor
 final class SessionStore {
-    static let shared = SessionStore()
-
     struct SavedTab: Codable, Equatable {
         var url: String
         var title: String
@@ -29,11 +27,12 @@ final class SessionStore {
 
     private static let closedLimit = 25
 
-    private let path = DataDirectory.file("session.json")
+    private let path: String
     private var session: Session
     private var writeScheduled = false
 
-    private init() {
+    init(folder: String) {
+        path = folder + "/session.json"
         let data = try? Data(contentsOf: URL(fileURLWithPath: path))
         session = data.flatMap { try? JSONDecoder().decode(Session.self, from: $0) } ?? Session()
     }
@@ -75,7 +74,7 @@ final class SessionStore {
 
     private func closedTabsChanged() {
         scheduleWrite()
-        NotificationCenter.default.post(name: .closedTabsDidChange, object: nil)
+        NotificationCenter.default.post(name: .closedTabsDidChange, object: self)
     }
 
     /// Writes a pending change now rather than after the short delay.
@@ -94,8 +93,8 @@ final class SessionStore {
     private func scheduleWrite() {
         guard !writeScheduled else { return }
         writeScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            MainActor.assumeIsolated { SessionStore.shared.flush() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            MainActor.assumeIsolated { self?.flush() }
         }
     }
 }

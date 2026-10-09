@@ -30,16 +30,19 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         case input(String)
         case page(HistoryPage)
 
-        var url: String {
+        func url(settings: ProfileSettings) -> String {
             switch self {
-            case .input(let text): AddressInput.url(for: text)
+            case .input(let text): AddressInput.url(for: text, settings: settings)
             case .page(let page): page.url
             }
         }
     }
 
-    init(addressBar: AddressBarView) {
+    private let profile: ProfileContext
+
+    init(addressBar: AddressBarView, profile: ProfileContext) {
         self.addressBar = addressBar
+        self.profile = profile
         super.init()
         list.orientation = .vertical
         list.spacing = 0
@@ -97,7 +100,7 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         // The row for the text itself follows every keystroke, over the
         // pages found for the last one; the ones for this come after.
         show(shownPages, for: text)
-        HistoryStore.shared.search(text, limit: Self.limit) { [weak self] pages in
+        profile.history.search(text, limit: Self.limit) { [weak self] pages in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.generation == generation, self.addressBar.field.currentEditor() != nil else { return }
@@ -150,13 +153,13 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
         shownPages = pages
         // A page the text's own row already opens, give or take scheme and
         // "www.", is left out.
-        let typedAddress = HistoryStore.bare(AddressInput.url(for: text)).lowercased()
+        let typedAddress = HistoryStore.bare(AddressInput.url(for: text, settings: profile.settings)).lowercased()
         let pages = pages.filter { HistoryStore.bare($0.url).lowercased() != typedAddress }
         rows = [.input(text)] + pages.map(Suggestion.page)
         guard let window = addressBar.window else { return hide() }
         for (index, row) in pool.enumerated() {
             if rows.indices.contains(index) {
-                row.configure(rows[index], typed: text)
+                row.configure(rows[index], typed: text, settings: profile.settings)
                 row.isHidden = false
             } else {
                 row.isHidden = true
@@ -191,7 +194,7 @@ final class AddressSuggestions: NSObject, NSTextFieldDelegate {
 
     private func open(_ index: Int, _ disposition: OpenDisposition) {
         guard rows.indices.contains(index) else { return }
-        let url = rows[index].url
+        let url = rows[index].url(settings: profile.settings)
         hide()
         onOpen?(url, disposition)
     }
@@ -310,7 +313,7 @@ private final class SuggestionRow: NSView {
     }
 
     /// Shows `suggestion`, with `typed` in bold where the title matches it.
-    func configure(_ suggestion: AddressSuggestions.Suggestion, typed: String) {
+    func configure(_ suggestion: AddressSuggestions.Suggestion, typed: String, settings: ProfileSettings) {
         self.typed = typed
         var address = ""
         var tip = ""
@@ -326,10 +329,10 @@ private final class SuggestionRow: NSView {
                 showSymbol("clock", "History")
             }
         case .input(let text):
-            let url = AddressInput.url(for: text)
-            let isSearch = url == Settings.searchURL(for: text)
+            let url = AddressInput.url(for: text, settings: settings)
+            let isSearch = url == settings.searchURL(for: text)
             titleText = text
-            let engine = Settings.searchEngine
+            let engine = settings.searchEngine
             address = isSearch ? (engine == .custom ? "Search" : "Search \(engine.displayName)") : HistoryStore.bare(url)
             if isSearch { showSymbol("magnifyingglass", "Search") } else { showSymbol("globe", "Website") }
             tip = url
