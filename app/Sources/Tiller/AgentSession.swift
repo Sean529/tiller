@@ -6,7 +6,7 @@ import os
 /// which speaks JSON-RPC over stdio. Antigravity CLI has a stream-json of its
 /// own. Qoder CLI and Claude Code are limited to Tiller's MCP tools plus the
 /// built-in tools turned on in Settings. Codex always keeps a shell, confined
-/// to a read-only sandbox unless writing is on. Antigravity CLI can't be
+/// to a read-only sandbox unless writing or running commands is on. Antigravity CLI can't be
 /// limited, so it keeps all of its tools and is only told to use Tiller's.
 /// Grok Build prints the same stream-json as Claude Code but reads no stdin,
 /// so each message runs its own process, limited like Claude Code's.
@@ -31,7 +31,7 @@ enum AgentKind: String, CaseIterable, Codable {
     func alwaysAllows(_ tool: AgentTool) -> Bool {
         switch self {
         case .qodercli, .claude, .grok: false
-        case .codex: tool != .write
+        case .codex: tool == .read
         case .agy: true
         }
     }
@@ -1284,9 +1284,10 @@ enum AgentEnvironment {
 
     /// Codex's equivalent of the other CLIs' flags: only the tiller MCP server,
     /// its tools allowed without asking, and the shell in a sandbox that never
-    /// asks for approval. Codex has no separate read or shell tools, so only
-    /// writing changes anything: it lets the shell and patches write in the
-    /// working folder.
+    /// asks for approval. Codex has no separate read or shell tools, so the
+    /// sandbox stands in for them: writing lets the shell and patches write in
+    /// the working folder, and running commands lifts the sandbox, as Claude
+    /// Code's Bash isn't sandboxed either.
     /// `options` picks the model, its effort and its service tier; with no
     /// model, the one Codex lists as its default, so a thread that ran
     /// another goes back to it.
@@ -1313,7 +1314,8 @@ enum AgentEnvironment {
         if let effort = options.effort { config["model_reasoning_effort"] = effort }
         var params: [String: Any] = [
             "cwd": cwd.path,
-            "sandbox": tools.contains(.write) ? "workspace-write" : "read-only",
+            "sandbox": tools.contains(.shell) ? "danger-full-access"
+                : tools.contains(.write) ? "workspace-write" : "read-only",
             "approvalPolicy": "never",
             "developerInstructions": systemPrompt(tools: tools, settings: settings),
             "config": config,

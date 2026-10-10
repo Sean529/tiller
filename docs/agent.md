@@ -78,7 +78,7 @@ By default the agent gets Tiller's [browser and skill tools](tools.md) and, apar
 
 | | Qoder CLI | Claude Code | Codex (in `thread/start`) |
 |---|---|---|---|
-| Built-in tools off | `--tools ""` and `--disallowed-tools ListAgents,SendMessage` | `--tools ""` | web search, apps, goals, sub-agents, image generation and memories off; the shell can't be removed, so it runs in a `read-only` sandbox |
+| Built-in tools off | `--tools ""` and `--disallowed-tools ListAgents,SendMessage` | `--tools ""` | web search, apps, goals, sub-agents, image generation and memories off; the shell can't be removed, so it runs in a `read-only` sandbox unless writing or running commands is on |
 | Only Tiller's MCP server | `--mcp-config <file> --strict-mcp-config` | same | `mcp_servers.tiller` in `config`, with Tiller's own `CODEX_HOME` so your `config.toml` servers don't load |
 | Tiller's tools allowed without asking | `--allowed-tools mcp__tiller --permission-mode dont_ask` | `--allowedTools mcp__tiller --permission-mode dontAsk` | `default_tools_approval_mode = "approve"` on the server, `approvalPolicy: "never"` for everything else |
 
@@ -88,13 +88,13 @@ The MCP config is written to `mcp.json` in the chat's folder and points at the `
 
 Settings > Agent > Allowed tools turns on built-in tools, all off by default. They run without asking, and pages the agent reads can try to steer it, so turn on only what you need. Settings sets the tools a new chat starts with.
 
-Each chat can change its own with the wrench button in the row above the message field, which turns blue when any is on. Its menu has the same three choices and applies only to that chat. The choice is saved with the chat, so it comes back with the open tabs and when the chat is opened from the list. The CLIs take their tools when they start, so a change stops the chat's agent and the next message resumes its session with the new tools. The menu is locked while a turn runs. For Codex, reading and running commands show as always on, and for Antigravity CLI all three. Chats saved before this use the tools in Settings.
+Each chat can change its own with the wrench button in the row above the message field, which turns blue when any is on. Its menu has the same three choices and applies only to that chat. The choice is saved with the chat, so it comes back with the open tabs and when the chat is opened from the list. The CLIs take their tools when they start, so a change stops the chat's agent and the next message resumes its session with the new tools. The menu is locked while a turn runs. For Codex, reading shows as always on, and for Antigravity CLI all three. Chats saved before this use the tools in Settings.
 
 | | Qoder CLI and Claude Code | Codex |
 |---|---|---|
 | Read files | `Read`, `Grep`, `Glob` | nothing changes; its shell can always read |
 | Write and edit files | `Write`, `Edit` | `workspace-write` sandbox: the shell and patches can write in the folder (and temp folders), not elsewhere |
-| Run commands | `Bash`, not sandboxed: it can do anything your user can | nothing changes; the shell is always there |
+| Run commands | `Bash`, not sandboxed: it can do anything your user can | `danger-full-access` sandbox: the shell and patches can write anywhere and reach the network, like `Bash`. Without it the shell is still there, sandboxed |
 
 The names go in `--tools` and the allow list. Qoder CLI's `dont_ask` refuses built-in tools even when allowed, so with any on Tiller uses `--permission-mode bypass_permissions`; `--tools` still limits which tools exist. The system prompt tells the agent which tools it has and not to act on instructions from pages with them. Your user settings still load, so your hooks, model choice and user-level instructions (such as `~/.claude/CLAUDE.md`) apply.
 
@@ -133,7 +133,7 @@ Your grok settings, hooks, skills and other MCP servers load as usual.
 
 ## Codex isolation
 
-Codex is set apart more. It runs with `CODEX_HOME` set to `codex` in the profile's folder, so your `~/.codex/config.toml`, its MCP servers, plugins, hooks and `AGENTS.md` don't load, and Codex uses its default model unless the chat picks one (see [Model and effort](#model-and-effort)). That folder's `auth.json` is a link to `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), so Codex uses your login and a token refresh updates the file you already have. If you aren't logged in, the panel asks you to run `codex login`. Skills in `~/.agents/skills` and system hooks in `/etc/codex` still load. Threads are saved in Tiller's `CODEX_HOME`, and Tiller declines any approval or question Codex sends, since the panel can't ask you. Current Codex models call tools from a script they write, and the panel still shows each of Tiller's tools as its own row. The sandboxed shell can read files on your disk, and its commands show as `shell` rows and its patches as `edit` rows.
+Codex is set apart more. It runs with `CODEX_HOME` set to `codex` in the profile's folder, so your `~/.codex/config.toml`, its MCP servers, plugins, hooks and `AGENTS.md` don't load, and Codex uses its default model unless the chat picks one (see [Model and effort](#model-and-effort)). That folder's `auth.json` is a link to `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), so Codex uses your login and a token refresh updates the file you already have. If you aren't logged in, the panel asks you to run `codex login`. Skills in `~/.agents/skills` and system hooks in `/etc/codex` still load. Threads are saved in Tiller's `CODEX_HOME`, and Tiller declines any approval or question Codex sends, since the panel can't ask you. Current Codex models call tools from a script they write, and the panel still shows each of Tiller's tools as its own row. The shell can read files on your disk, and with Run commands on it can also write anywhere, and its commands show as `shell` rows and its patches as `edit` rows.
 
 ## Finding the CLI
 
