@@ -5,7 +5,7 @@ import PackageDescription
 // and passes its directory to the linker.
 let package = Package(
     name: "Tiller",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS(.v14)],
     dependencies: [
         // Updates. bundle.sh copies Sparkle.framework into the app.
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0"),

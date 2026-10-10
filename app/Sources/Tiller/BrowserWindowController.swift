@@ -43,12 +43,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private let newTabButton = NSButton()
     /// Names the profile and opens the Profiles menu. Hidden with one profile.
     private let profileButton = NSButton()
-    private var profileItem: NSToolbarItem?
     /// Extension buttons. Hidden when no extension is loaded.
     private let extensionBar = ExtensionBarView()
     /// Hidden until the first download of the run.
     private let downloadsButton = DownloadsButton()
-    private var downloadsItem: NSToolbarItem?
     private var downloadsPopover: NSPopover?
     /// The extension popup while one is open.
     private var extensionPopover: ExtensionPopover?
@@ -1035,7 +1033,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard let width = window?.frame.width else { return }
         let profileWidth = profileName == nil ? 0 : profileButton.fittingSize.width + 12
         let extensionsWidth = extensionBar.isEmpty ? 0 : extensionBar.fittingSize.width + 12
-        let downloadsWidth: CGFloat = downloadsItem?.isHidden == false ? 40 : 0
+        let downloadsWidth: CGFloat = showsToolbarItem(Item.downloads) ? 40 : 0
         tabStripWidth.constant = max(200, width - 370 - profileWidth - extensionsWidth - downloadsWidth)
         addressWidth.constant = max(200, width - 330 - profileWidth - extensionsWidth - downloadsWidth)
     }
@@ -1045,9 +1043,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// Shows the button with the first download and keeps its ring current.
     @objc private func downloadsChanged(_ notification: Notification) {
         downloadsButton.refresh()
-        let hidden = DownloadStore.shared.downloads.isEmpty
-        if downloadsItem?.isHidden != hidden {
-            downloadsItem?.isHidden = hidden
+        let shown = !DownloadStore.shared.downloads.isEmpty
+        if showsToolbarItem(Item.downloads) != shown {
+            showToolbarItem(Item.downloads, shown)
             fitTabStrip()
         }
         (downloadsPopover?.contentViewController as? DownloadsController)?.reload()
@@ -1064,8 +1062,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     @objc func showDownloads(_ sender: Any?) {
         if let downloadsPopover, downloadsPopover.isShown { return downloadsPopover.close() }
         // The button is away until the first download; the menu brings it out.
-        if downloadsItem?.isHidden != false {
-            downloadsItem?.isHidden = false
+        if !showsToolbarItem(Item.downloads) {
+            showToolbarItem(Item.downloads, true)
             fitTabStrip()
             window?.layoutIfNeeded()
         }
@@ -1110,6 +1108,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
+        showToolbarItem(Item.extensions, !extensionBar.isEmpty)
+        showToolbarItem(Item.downloads, !DownloadStore.shared.downloads.isEmpty)
+        showToolbarItem(Item.profile, profileName != nil)
         if vertical {
             sidebar.show(tabStrip)
         } else {
@@ -1186,7 +1187,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     func showProfile(name: String?) {
         profileName = name
         profileButton.title = name ?? ""
-        profileItem?.isHidden = name == nil
+        showToolbarItem(Item.profile, name != nil)
         updateWindowTitle()
         fitTabStrip()
     }
@@ -1313,6 +1314,31 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         popover.show(relativeTo: anchor)
     }
 
+    /// Whether the toolbar shows the item `id`.
+    private func showsToolbarItem(_ id: NSToolbarItem.Identifier) -> Bool {
+        guard let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == id }) else { return false }
+        if #available(macOS 15, *) { return !item.isHidden }
+        return true
+    }
+
+    /// Shows or hides the item `id`. NSToolbarItem.isHidden is macOS 15 and
+    /// later; before that the item leaves the toolbar and comes back at its
+    /// place in the default order.
+    private func showToolbarItem(_ id: NSToolbarItem.Identifier, _ shown: Bool) {
+        guard let toolbar = window?.toolbar else { return }
+        if #available(macOS 15, *) {
+            toolbar.items.first { $0.itemIdentifier == id }?.isHidden = !shown
+            return
+        }
+        let index = toolbar.items.firstIndex { $0.itemIdentifier == id }
+        if !shown, let index {
+            toolbar.removeItem(at: index)
+        } else if shown, index == nil {
+            let before = toolbarDefaultItemIdentifiers(toolbar).prefix { $0 != id }
+            toolbar.insertItem(withItemIdentifier: id, at: toolbar.items.filter { before.contains($0.itemIdentifier) }.count)
+        }
+    }
+
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         tabLayout == .vertical
             ? [
@@ -1347,17 +1373,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case Item.extensions:
             item.view = extensionBar
             item.label = "Extensions"
-            item.isHidden = extensionBar.isEmpty
         case Item.downloads:
             item.view = downloadsButton
             item.label = "Downloads"
-            item.isHidden = DownloadStore.shared.downloads.isEmpty
-            downloadsItem = item
         case Item.profile:
             item.view = profileButton
             item.label = "Profile"
-            item.isHidden = profileName == nil
-            profileItem = item
         case Item.tabs:
             item.view = tabStrip
             item.label = "Tabs"

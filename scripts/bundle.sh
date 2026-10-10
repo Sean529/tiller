@@ -110,7 +110,7 @@ write_plist() {
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD</string>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>LSMinimumSystemVersion</key><string>26.0</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSEnvironment</key><dict><key>MallocNanoZone</key><string>0</string></dict>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
     <key>NSHighResolutionCapable</key><true/>

@@ -24,6 +24,8 @@ https://github.com/user-attachments/assets/1960eca0-6cb0-460b-bb6f-b292b739a147
 
 ## Requirements
 
+Tiller runs on macOS 14 Sonoma or later. To build it:
+
 - macOS with the Swift toolchain (Xcode Command Line Tools)
 - Rust, installed through [rustup](https://rustup.rs)
 - [Ninja](https://ninja-build.org)

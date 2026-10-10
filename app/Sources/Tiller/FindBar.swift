@@ -11,7 +11,7 @@ final class FindBar: NSView, NSTextFieldDelegate {
     var onClose: (() -> Void)?
 
     let field = NSTextField()
-    private let glass = NSGlassEffectView()
+    private let glass = GlassView()
     private let countLabel = NSTextField(labelWithString: "")
     private let previousButton = FindBar.button("chevron.up", "Previous Match (Shift+Return)")
     private let nextButton = FindBar.button("chevron.down", "Next Match (Return)")

@@ -1,6 +1,6 @@
 import AppKit
 
-/// A Liquid Glass capsule holding a lock for secure pages, the address field
+/// A glass capsule holding a lock for secure pages, the address field
 /// and, at the end, the zoom and a key button that fills a saved login. It
 /// is a titlebar accessory under the tabs, or a toolbar item when the tabs
 /// are in the sidebar. While a page loads, the capsule fills with a faint
@@ -23,7 +23,7 @@ final class AddressBarView: NSView {
     private var statusSymbol = ""
     /// Whether the user is typing, when the icon says what Return would do.
     private var isEditing = false
-    private let glass = NSGlassEffectView()
+    private let glass = GlassView()
     private let progressFill = ProgressTintView()
     /// The share of the capsule's width the load tint covers, kept so the
     /// tint follows the capsule when it resizes.
