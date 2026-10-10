@@ -252,6 +252,9 @@ final class Tab {
             browserID, Int32(min.width), Int32(min.height), Int32(max.width), Int32(max.height))
     }
 
+    /// Stops sizing the browser to its page; it follows the view's size again.
+    func disableAutoResize() { tiller_browser_disable_auto_resize(browserID) }
+
     /// Runs `code` in the main frame. Does nothing once the tab has closed.
     func executeJavaScript(_ code: String) { tiller_browser_execute_js(browserID, code) }
 
