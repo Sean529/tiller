@@ -38,11 +38,26 @@ enum Profiles {
     /// `~/Library/Application Support/Tiller`, or the folder in `TILLER_DATA_DIR`.
     /// tiller_mcp reads the same variable to find `profiles.json`.
     static let root: String = {
-        // Absolute, since Chromium needs its folders to be.
+        var path = NSHomeDirectory() + "/Library/Application Support/Tiller"
         if let dir = ProcessInfo.processInfo.environment["TILLER_DATA_DIR"], !dir.isEmpty {
-            return URL(fileURLWithPath: dir).standardizedFileURL.path
+            path = URL(fileURLWithPath: dir).path
         }
-        return NSHomeDirectory() + "/Library/Application Support/Tiller"
+        // Absolute, with no symlinks and the disk's own capitalization, since
+        // Chromium resolves its folders once they exist and won't take a
+        // profile folder whose path then doesn't start with the root's.
+        // Foundation's own resolving drops `/private`, so it can't be used.
+        // The folder may not exist yet, so the part that does is resolved.
+        var existing = path, rest = ""
+        while existing != "/" {
+            if let resolved = realpath(existing, nil) {
+                defer { free(resolved) }
+                return String(cString: resolved) + rest
+            }
+            let url = URL(fileURLWithPath: existing)
+            rest = "/" + url.lastPathComponent + rest
+            existing = url.deletingLastPathComponent().path
+        }
+        return path
     }()
 
     /// Chromium's own folder: `Local State`, `chrome_debug.log` and the

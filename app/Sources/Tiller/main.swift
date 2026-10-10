@@ -22,10 +22,12 @@ SingleProcessMigration.run()
 
 // tiller_core_start installs the NSApplication subclass CEF needs, so it has to
 // run before anything touches NSApp. Chromium only loads extensions at startup.
-// The first profile to open gets Chromium's global request context.
-let code = tiller_core_start(
-    Profiles.chromiumRoot, Profiles.cachePath(for: Launch.profiles[0]), ExtensionStore.shared.launchArgument
-)
+// The first profile to open gets Chromium's global request context and is
+// Chromium's startup profile. Its folders exist first, so Chromium checks the
+// same paths it was given.
+let firstCachePath = Profiles.cachePath(for: Launch.profiles[0])
+try? FileManager.default.createDirectory(atPath: firstCachePath, withIntermediateDirectories: true)
+let code = tiller_core_start(Profiles.chromiumRoot, firstCachePath, ExtensionStore.shared.launchArgument)
 if code != 0 { exit(code) }
 
 let app = NSApplication.shared

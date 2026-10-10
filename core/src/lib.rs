@@ -39,6 +39,9 @@ pub unsafe extern "C" fn tiller_core_start(
     if root.is_empty() || cache_path.is_empty() {
         return 1;
     }
+    if let Some(name) = std::path::Path::new(&cache_path).file_name() {
+        let _ = browser::PROFILE_DIRECTORY.set(name.to_string_lossy().into_owned());
+    }
     // Chromium splits the switch on commas, so a folder with one in its path
     // can't be passed. The app leaves those out.
     let extensions = unsafe { cstr(extensions) };

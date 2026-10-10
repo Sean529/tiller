@@ -59,6 +59,10 @@ struct PendingCall {
 /// CEF initializes.
 pub static EXTENSIONS: OnceLock<String> = OnceLock::new();
 
+/// The global request context's folder name inside the root cache path, for
+/// `--profile-directory`. Set once before CEF initializes.
+pub static PROFILE_DIRECTORY: OnceLock<String> = OnceLock::new();
+
 /// Called once a profile's request context is ready for browsers.
 pub type ContextReady = unsafe extern "C" fn(ctx: *mut c_void);
 
@@ -857,6 +861,18 @@ wrap_app! {
                 // agent's clicks and keys would vanish while the user works
                 // in another app. The cost is that covered windows keep drawing.
                 cmd.append_switch(Some(&CefString::from("disable-backgrounding-occluded-windows")));
+                // Chromium's startup profile, which is otherwise `Default`.
+                // The global request context's profile is `default`'s folder
+                // on a case-insensitive disk but a profile of its own to
+                // Chromium, so both would open the same databases, and the
+                // first launch would show a profile error as they race to
+                // create them.
+                if let Some(dir) = PROFILE_DIRECTORY.get().filter(|d| !d.is_empty()) {
+                    cmd.append_switch_with_value(
+                        Some(&CefString::from("profile-directory")),
+                        Some(&CefString::from(dir.as_str())),
+                    );
+                }
                 // The profile's enabled extensions, loaded unpacked like
                 // Chrome's Load unpacked. Chromium only reads this at startup.
                 // An extension that fails to load would otherwise get an error
