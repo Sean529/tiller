@@ -85,6 +85,10 @@ final class StartPageView: NSView {
         content.addArrangedSubview(closedList)
         content.setCustomSpacing(30, after: grid)
         closedList.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
+        // The column keeps the four tiles' width however many there are, so
+        // the heading lines up over the first tile rather than the column
+        // shrinking to the heading and leaving a lone tile off center.
+        content.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
 
         for view in [content, emptyHint] {
             view.translatesAutoresizingMaskIntoConstraints = false

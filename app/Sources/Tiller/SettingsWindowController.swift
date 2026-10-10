@@ -46,6 +46,12 @@ final class SettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    override func showWindow(_ sender: Any?) {
+        let opening = window?.isVisible == false
+        super.showWindow(sender)
+        if opening { tabs.clearFocus() }
+    }
+
     /// With several profiles, the title says whose settings these are.
     func showProfile(name: String?) {
         tabs.profileName = name
@@ -80,6 +86,18 @@ final class SettingsTabViewController: NSTabViewController {
         }
         updateTitle()
         fitWindow(animate: true)
+        clearFocus()
+    }
+
+    /// Opens a pane with nothing in it focused, as System Settings does,
+    /// rather than with the first text field's ring lit as if being edited.
+    /// AppKit picks that field once the pane is in the window, so this waits
+    /// a turn.
+    func clearFocus() {
+        DispatchQueue.main.async { [weak self] in
+            guard let window = self?.view.window, window.firstResponder is NSTextView else { return }
+            window.makeFirstResponder(nil)
+        }
     }
 
     /// The pane's title, then the profile's name when there are several.

@@ -253,11 +253,16 @@ private final class CapsuleContentView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        let width = isFocused ? Theme.hairlineWidth : 0
-        let color = Theme.accent(Theme.Accent.outline).layerColor
+        // Light glass over a light titlebar all but disappears, so at rest
+        // the capsule keeps a faint fill and edge to show where to type.
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let width = isFocused || !dark ? Theme.hairlineWidth : 0
+        let color = isFocused ? Theme.accent(Theme.Accent.outline) : Theme.fill(0.07)
+        let fill = dark || isFocused ? NSColor.clear : Theme.fill(0.03)
         withEasing {
             layer?.borderWidth = width
-            layer?.borderColor = color
+            layer?.borderColor = color.layerColor
+            layer?.backgroundColor = fill.layerColor
         }
     }
 

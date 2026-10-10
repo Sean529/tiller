@@ -1183,12 +1183,24 @@ enum AgentMarkdown {
                 index += 1
                 continue
             }
+            // A long run of text ends at a paragraph break, so a streamed
+            // answer only renders and lays out its last few paragraphs on
+            // each tick rather than everything since the last table or
+            // fence. Shorter runs stay whole, so they select as one.
+            if trimmed.isEmpty, pending.count(where: { !$0.allSatisfy(\.isWhitespace) }) >= longTextRun {
+                flush()
+                index += 1
+                continue
+            }
             pending.append(line)
             index += 1
         }
         flush()
         return blocks
     }
+
+    /// The lines of text past which a run is split at its next blank line.
+    private static let longTextRun = 12
 
     /// Three or more of the same of `-`, `*` or `_`, spaces allowed between.
     private static func isRule(_ line: String) -> Bool {

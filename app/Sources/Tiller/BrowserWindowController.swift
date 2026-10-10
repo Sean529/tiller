@@ -1034,8 +1034,89 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         let profileWidth = profileName == nil ? 0 : profileButton.fittingSize.width + 12
         let extensionsWidth = extensionBar.isEmpty ? 0 : extensionBar.fittingSize.width + 12
         let downloadsWidth: CGFloat = showsToolbarItem(Item.downloads) ? 40 : 0
-        tabStripWidth.constant = max(200, width - 370 - profileWidth - extensionsWidth - downloadsWidth)
-        addressWidth.constant = max(200, width - 330 - profileWidth - extensionsWidth - downloadsWidth)
+        tabStripWidth.constant = max(200, width - 370 + tabStripSlack - profileWidth - extensionsWidth - downloadsWidth)
+        addressWidth.constant = max(200, width - 330 + addressSlack - profileWidth - extensionsWidth - downloadsWidth)
+        scheduleToolbarGapCheck()
+    }
+
+    /// What the estimates in `fitTabStrip` leave over, learned from where
+    /// the toolbar really put its items. The toolbar's spacing differs by
+    /// macOS version, so a fixed estimate leaves a wide empty gap before the
+    /// trailing buttons on some and would overflow them on others.
+    private var tabStripSlack: CGFloat = 0
+    private var addressSlack: CGFloat = 0
+    private var toolbarGapCheckPending = false
+    /// The most slack known to fit, lowered when the trailing buttons went
+    /// into the overflow menu.
+    private var slackCeiling: CGFloat = 400
+    /// The space kept between the tabs' or address bar's group and the
+    /// buttons at the end, about what the toolbar puts between groups.
+    private static let toolbarGap: CGFloat = 10
+
+    /// Whether the last pass widened the tabs, so a trailing button gone
+    /// from the toolbar right after means they pushed it out.
+    private var widenedToolbarLastPass = false
+    /// Passes left to wait for the toolbar to place its items, as when the
+    /// window is still being put together.
+    private var toolbarGapRetries = 0
+
+    private func scheduleToolbarGapCheck(after delay: TimeInterval = 0) {
+        guard !toolbarGapCheckPending else { return }
+        toolbarGapCheckPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.toolbarGapCheckPending = false
+            self.closeToolbarGap()
+        }
+    }
+
+    /// Widens or narrows the tabs, or the address bar with the tabs in the
+    /// sidebar, so the gap before the trailing buttons is `toolbarGap`.
+    private func closeToolbarGap() {
+        let widened = widenedToolbarLastPass
+        widenedToolbarLastPass = false
+        guard let window, fullscreenTab == nil, !window.styleMask.contains(.fullScreen) else { return }
+        let vertical = tabLayout == .vertical
+        let lead: NSView = vertical ? addressBar : newTabButton
+        let trailing: [NSView] = [extensionBar, downloadsButton, profileButton, agentButton]
+        window.layoutIfNeeded()
+        // Only the trailing buttons the toolbar shows; one in the overflow
+        // menu has no window.
+        guard lead.window != nil, agentButton.window != nil, !agentButton.isHiddenOrHasHiddenAncestor else {
+            guard widened else {
+                // Not placed yet: look again shortly, a few times at most.
+                if toolbarGapRetries < 5 {
+                    toolbarGapRetries += 1
+                    scheduleToolbarGapCheck(after: 0.2)
+                }
+                return
+            }
+            // The tabs just pushed the agent's button out. Back off, and
+            // don't come this far again, so passes can't take turns pushing
+            // the buttons out and pulling them back in.
+            let old = vertical ? addressSlack : tabStripSlack
+            let slack = max(-200, old - 12)
+            slackCeiling = slack
+            if vertical { addressSlack = slack } else { tabStripSlack = slack }
+            fitTabStrip()
+            return
+        }
+        toolbarGapRetries = 0
+        let leadEnd = lead.convert(lead.bounds, to: nil).maxX
+        let trailingStart = trailing
+            .filter { $0.window != nil && !$0.isHiddenOrHasHiddenAncestor && $0.frame.width > 0 }
+            .map { $0.convert($0.bounds, to: nil).minX }
+            .min() ?? leadEnd
+        let excess = (trailingStart - leadEnd - Self.toolbarGap).rounded()
+        guard abs(excess) >= 2 else { return }
+        let old = vertical ? addressSlack : tabStripSlack
+        let slack = min(slackCeiling, max(-200, old + excess))
+        // At a limit, or with the width held at its minimum, nothing moves
+        // and another pass would only measure the same gap again.
+        guard slack != old else { return }
+        if vertical { addressSlack = slack } else { tabStripSlack = slack }
+        widenedToolbarLastPass = slack > old
+        fitTabStrip()
     }
 
     // MARK: Downloads
@@ -1099,6 +1180,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         tabStripHeight.isActive = !vertical
         addressWidth.isActive = vertical
         addressHeight.isActive = vertical
+        // What overflowed in the other layout says nothing about this one.
+        slackCeiling = 400
         addressBar.inset = vertical ? 0 : 12
         tabStrip.orientation = vertical ? .vertical : .horizontal
 
@@ -1563,7 +1646,8 @@ extension BrowserWindowController {
     /// scheduled prompt with `text` as its prompt, `find` searches for
     /// `text`, `location` types `text` in the address bar, `downloads`,
     /// `sidebar` and `settings` open those, `appearance` forces `light` or
-    /// `dark`, and `resize` sets the window to `width` by `height`.
+    /// `dark`, `tabLayout` puts the tabs at `horizontal` or `vertical`, and
+    /// `resize` sets the window to `width` by `height`.
     func debugUI(_ action: String, params: [String: Any]) throws -> Any {
         let text = params["text"] as? String ?? ""
         switch action {
@@ -1597,6 +1681,9 @@ extension BrowserWindowController {
             toggleSidebarCollapsed(nil)
         case "settings":
             (NSApp.delegate as? AppDelegate)?.showSettings(pane: text, profile: profile)
+        case "tabLayout":
+            guard let layout = TabLayout(rawValue: text) else { throw ControlError("no tab layout \(text)") }
+            profile.settings.tabLayout = layout
         case "appearance":
             NSApp.appearance = switch text {
             case "dark": NSAppearance(named: .darkAqua)
