@@ -373,6 +373,9 @@ final class Tab {
         MainActor.assumeIsolated {
             guard let pointer = UnsafeRawPointer(bitPattern: event) else { return false }
             let event = Unmanaged<NSEvent>.fromOpaque(pointer).takeUnretainedValue()
+            // CEF can pair a key event with a mouse NSEvent, and reading the
+            // characters of a non-key event raises an AppKit assertion.
+            guard event.type == .keyDown else { return false }
             return delegate?.tab(self, performKeyEquivalent: event) ?? false
         }
     }
